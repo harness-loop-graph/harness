@@ -1,5 +1,6 @@
 import type { ModelResponse, VerificationResult } from '../contracts/core.js';
 import type { AgentLoop } from '../loop/agent-loop.js';
+import type { LoopResult } from '../loop/contracts.js';
 
 export interface GraphNode {
   id: string;
@@ -74,5 +75,7 @@ export interface GraphStepTrace {
   loopStatus: 'SUCCESS' | 'FAILED';
   decision: GraphDecision;
 }
+
+export type GraphRouter = (nodeId: string, loopResult: LoopResult, state: GraphState) => GraphDecision;
 
 export type LoopFactory = (node: GraphNode) => AgentLoop;

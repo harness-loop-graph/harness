@@ -14,7 +14,7 @@ import {
   RecordingVerificationManager,
   registerBuiltinTools,
 } from '../src/index.js';
-import type { GraphNode, LoopFactory, ModelAdapter } from '../src/index.js';
+import type { GraphNode, GraphRouter, LoopFactory, ModelAdapter } from '../src/index.js';
 import type { ModelRequest } from '../src/index.js';
 
 /** Replays a fixed list of responses; errors when exhausted. */
@@ -229,6 +229,65 @@ describe('C3 multi-agent graph', () => {
     expect(result.status).toBe('FAILED');
     expect(result.decision.action).toBe('FAIL');
     expect(result.failure).toContain('no on_failure edge');
+  });
+
+  it('routes through a custom router when provided', async () => {
+    const { factory, attempts } = makeLoopFactory();
+    attempts.source = [[{ type: 'finish', content: 'route to target' }]];
+    attempts.target = [[{ type: 'finish', content: 'target reached' }]];
+
+    const router: GraphRouter = (nodeId, _loopResult, state) => {
+      if (nodeId === 'source' && state.shared.source === 'route to target') {
+        return { action: 'NEXT', node: 'target', reason: 'custom router decided target' };
+      }
+      return { action: 'FINISH', reason: 'custom router finished' };
+    };
+
+    const engine = new GraphEngine(factory, {
+      task: 'Test custom router',
+      initialNode: 'source',
+      nodes: [
+        { id: 'source', role: 'test', task: 'Emit content', maxTurns: 1 },
+        { id: 'target', role: 'test', task: 'Receive routing', maxTurns: 1 },
+      ],
+      edges: [],
+      maxSteps: 4,
+    }, router);
+
+    const result = await engine.run();
+    expect(result.status).toBe('SUCCESS');
+    expect(result.steps).toBe(2);
+    expect(result.trace[0].decision.action).toBe('NEXT');
+    if (result.trace[0].decision.action === 'NEXT') {
+      expect(result.trace[0].decision.node).toBe('target');
+    }
+    expect(result.state.shared.source).toBe('route to target');
+  });
+
+  it('falls back to static edge routing when no custom router is provided', async () => {
+    const { factory, attempts } = makeLoopFactory();
+    attempts.alpha = [[{ type: 'finish', content: 'alpha done' }]];
+    attempts.beta = [[{ type: 'finish', content: 'beta done' }]];
+
+    const engine = new GraphEngine(factory, {
+      task: 'Test static fallback',
+      initialNode: 'alpha',
+      nodes: [
+        { id: 'alpha', role: 'test', task: 'Step alpha', maxTurns: 1 },
+        { id: 'beta', role: 'test', task: 'Step beta', maxTurns: 1 },
+      ],
+      edges: [{ from: 'alpha', to: 'beta', condition: 'on_success' }],
+      maxSteps: 4,
+    });
+
+    const result = await engine.run();
+    expect(result.status).toBe('SUCCESS');
+    expect(result.steps).toBe(2);
+    expect(result.state.currentNode).toBe('beta');
+    expect(result.trace[0].decision.action).toBe('NEXT');
+    if (result.trace[0].decision.action === 'NEXT') {
+      expect(result.trace[0].decision.node).toBe('beta');
+    }
   });
 
   it('FAILs immediately on an unknown initial node', async () => {

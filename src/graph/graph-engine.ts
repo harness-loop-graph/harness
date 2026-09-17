@@ -4,6 +4,7 @@ import type {
   GraphResult,
   GraphState,
   GraphStepTrace,
+  GraphRouter,
   NodeExecution,
 } from './contracts.js';
 import type { LoopFactory } from './contracts.js';
@@ -19,6 +20,7 @@ export class GraphEngine {
   constructor(
     private readonly createLoop: LoopFactory,
     private readonly request: GraphRequest,
+    private readonly router?: GraphRouter,
   ) {}
 
   async run(): Promise<GraphResult> {
@@ -75,7 +77,9 @@ export class GraphEngine {
         state.shared[node.id] = loopResult.finalResponse.content;
       }
 
-      decision = this.route(node.id, loopResult.status);
+      decision = this.router
+        ? this.router(node.id, loopResult, state)
+        : this.route(node.id, loopResult.status);
       trace.push({ step: state.step, nodeId: node.id, loopStatus: loopResult.status, decision });
 
       if (decision.action === 'NEXT') {
