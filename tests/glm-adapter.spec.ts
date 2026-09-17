@@ -30,21 +30,21 @@ afterEach(() => {
 });
 
 describe('GlmModelAdapter', () => {
-  it('throws a clear error when GLM_API_KEY is missing', () => {
-    delete process.env.GLM_API_KEY;
-    process.env.GLM_MODEL = 'glm-4.7';
-    expect(() => new GlmModelAdapter()).toThrow(/GLM_API_KEY/);
+  it('throws a clear error when MODEL_API_KEY is missing', () => {
+    delete process.env.MODEL_API_KEY;
+    process.env.MODEL_ID = 'glm-4.7';
+    expect(() => new GlmModelAdapter()).toThrow(/MODEL_API_KEY/);
   });
 
-  it('throws a clear error when GLM_MODEL is missing', () => {
-    process.env.GLM_API_KEY = 'test-key';
-    delete process.env.GLM_MODEL;
-    expect(() => new GlmModelAdapter()).toThrow(/GLM_MODEL/);
+  it('throws a clear error when MODEL_ID is missing', () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    delete process.env.MODEL_ID;
+    expect(() => new GlmModelAdapter()).toThrow(/MODEL_ID/);
   });
 
   it('maps a tool_calls response to a tool_call ModelResponse', async () => {
-    process.env.GLM_API_KEY = 'test-key';
-    process.env.GLM_MODEL = 'glm-4.7';
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         choices: [
@@ -90,8 +90,8 @@ describe('GlmModelAdapter', () => {
   });
 
   it('maps a content response to a finish ModelResponse', async () => {
-    process.env.GLM_API_KEY = 'test-key';
-    process.env.GLM_MODEL = 'glm-4.7';
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'All done.' } }],
@@ -105,8 +105,8 @@ describe('GlmModelAdapter', () => {
   });
 
   it('works unchanged against any OpenAI-compatible endpoint (e.g., OpenAI)', async () => {
-    process.env.GLM_API_KEY = 'openai-key';
-    process.env.GLM_MODEL = 'gpt-5.6-luna';
+    process.env.MODEL_API_KEY = 'openai-key';
+    process.env.MODEL_ID = 'gpt-5.6-luna';
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }],
@@ -130,8 +130,8 @@ describe('GlmModelAdapter', () => {
   });
 
   it('maps HTTP errors to an error ModelResponse', async () => {
-    process.env.GLM_API_KEY = 'test-key';
-    process.env.GLM_MODEL = 'glm-4.7';
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(401, { error: { code: 401, message: 'Invalid API key' } }),
     );
@@ -147,8 +147,8 @@ describe('GlmModelAdapter', () => {
   });
 
   it('maps network failures to an error ModelResponse', async () => {
-    process.env.GLM_API_KEY = 'test-key';
-    process.env.GLM_MODEL = 'glm-4.7';
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
 
@@ -162,8 +162,8 @@ describe('GlmModelAdapter', () => {
   });
 
   it('feeds history back as assistant tool_calls plus tool-role messages', async () => {
-    process.env.GLM_API_KEY = 'test-key';
-    process.env.GLM_MODEL = 'glm-4.7';
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }],

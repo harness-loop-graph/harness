@@ -9,11 +9,11 @@ import type { ModelAdapter } from './model-adapter.js';
 export const DEFAULT_GLM_BASE_URL = 'https://opencode.ai/zen/go/v1';
 
 export interface GlmAdapterConfig {
-  /** API key. Falls back to process.env.GLM_API_KEY. */
+  /** API key. Falls back to process.env.MODEL_API_KEY. */
   apiKey?: string;
-  /** Base URL. Falls back to process.env.GLM_BASE_URL, then the Z.ai default. */
+  /** Base URL. Falls back to process.env.MODEL_BASE_URL, then OpenCode Go. */
   baseUrl?: string;
-  /** Model identifier, e.g. 'glm-4.7'. Falls back to process.env.GLM_MODEL. */
+  /** Model identifier, e.g. 'glm-5.2'. Falls back to process.env.MODEL_ID. */
   model?: string;
   /** Injectable fetch for tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
@@ -71,19 +71,19 @@ export class GlmModelAdapter implements ModelAdapter {
   private readonly userAgent: string;
 
   constructor(config: GlmAdapterConfig = {}) {
-    this.apiKey = config.apiKey ?? process.env.GLM_API_KEY ?? '';
-    this.baseUrl = (config.baseUrl ?? process.env.GLM_BASE_URL ?? DEFAULT_GLM_BASE_URL).replace(/\/$/, '');
-    this.model = config.model ?? process.env.GLM_MODEL ?? '';
+    this.apiKey = config.apiKey ?? process.env.MODEL_API_KEY ?? '';
+    this.baseUrl = (config.baseUrl ?? process.env.MODEL_BASE_URL ?? DEFAULT_GLM_BASE_URL).replace(/\/$/, '');
+    this.model = config.model ?? process.env.MODEL_ID ?? '';
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.timeoutMs = config.timeoutMs ?? 120_000;
     this.sessionId = config.sessionId;
     this.userAgent = config.userAgent ?? 'harness-glm/0.1.0';
 
     if (this.apiKey === '') {
-      throw new Error('GLM_API_KEY is not set. Export it before constructing GlmModelAdapter.');
+      throw new Error('MODEL_API_KEY is not set. Export it before constructing GlmModelAdapter.');
     }
     if (this.model === '') {
-      throw new Error('GLM_MODEL is not set. Export it (e.g. GLM_MODEL=glm-4.7) before constructing GlmModelAdapter.');
+      throw new Error('MODEL_ID is not set. Export it (e.g. MODEL_ID=glm-5.2) before constructing GlmModelAdapter.');
     }
   }
 

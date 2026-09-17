@@ -67,9 +67,13 @@ not finish successfully.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `GLM_API_KEY` | yes | — | OpenCode Go API key (from https://opencode.ai/auth) |
-| `GLM_MODEL` | yes | — | Model id, e.g. `glm-5.2` |
-| `GLM_BASE_URL` | no | `https://opencode.ai/zen/go/v1` | OpenCode Go endpoint |
+| `MODEL_API_KEY` | yes | — | API key of the provider you point at (OpenCode Go: https://opencode.ai/auth) |
+| `MODEL_ID` | yes | — | Model id, e.g. `glm-5.2`, or any OpenAI-compatible model |
+| `MODEL_BASE_URL` | no | `https://opencode.ai/zen/go/v1` | Any OpenAI-compatible base URL works |
+
+Variables are provider-generic on purpose: the adapter speaks the
+OpenAI-compatible dialect, so pointing `MODEL_BASE_URL` at OpenAI,
+Z.ai, OpenRouter, etc. works with no code changes (see the adapter tests).
 
 ### Provider: OpenCode Go
 
