@@ -104,6 +104,31 @@ describe('GlmModelAdapter', () => {
     expect(response).toEqual({ type: 'finish', content: 'All done.' });
   });
 
+  it('works unchanged against any OpenAI-compatible endpoint (e.g., OpenAI)', async () => {
+    process.env.GLM_API_KEY = 'openai-key';
+    process.env.GLM_MODEL = 'gpt-5.6-luna';
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }],
+      }),
+    );
+    const adapter = new GlmModelAdapter({
+      baseUrl: 'https://api.openai.com/v1',
+      sessionId: 'session-openai',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const response = await adapter.complete(request());
+
+    // Same request shape, different provider: only the base URL and model change.
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.openai.com/v1/chat/completions');
+    const body = JSON.parse(String(init.body));
+    expect(body.model).toBe('gpt-5.6-luna');
+    expect(body.tools[0].type).toBe('function');
+    expect(response).toEqual({ type: 'finish', content: 'ok' });
+  });
+
   it('maps HTTP errors to an error ModelResponse', async () => {
     process.env.GLM_API_KEY = 'test-key';
     process.env.GLM_MODEL = 'glm-4.7';
