@@ -1,14 +1,15 @@
 {
   "name": "harness",
   "version": "0.1.0",
-  "description": "Model-agnostic agent harness — C1 skeleton",
+  "description": "Model-agnostic agent harness — GLM arm (C1)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "smoke": "tsc && node dist/smoke.js"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

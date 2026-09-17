@@ -51,6 +51,18 @@ npm install
 npm test
 ```
 
+## Live smoke test (real GLM endpoint)
+
+```bash
+export GLM_API_KEY=<your Z.ai key>
+export GLM_MODEL=<model id, e.g. glm-4.6>
+npm run smoke
+```
+
+The smoke run creates an isolated temp workspace, asks the model to write
+`smoke.txt` through the tool pipeline, and exits non-zero if the cycle does
+not finish successfully.
+
 ## Build
 
 ```bash
