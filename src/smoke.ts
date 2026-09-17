@@ -46,7 +46,12 @@ async function main(): Promise<void> {
       availTools,
       instructions:
         'You are a code-generation agent inside a controlled harness. ' +
-        'Use the provided tools to complete the task. Stay inside the workspace.',
+        'Use the provided tools to complete the task. Stay inside the workspace. ' +
+        'Finish with a final answer once the task is complete.',
+      // C1 contract keeps maxToolRounds at 1; the smoke allows a few rounds
+      // because real models verify their own work (act -> observe -> finish)
+      // before answering. Multi-round with corrective decisions is C2.
+      maxToolRounds: 5,
     },
   );
 
