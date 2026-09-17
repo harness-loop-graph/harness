@@ -53,6 +53,7 @@ interface ChatCompletionResponse {
     };
   }>;
   error?: { code?: string | number; message?: string };
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 /**
@@ -68,6 +69,9 @@ export class GlmModelAdapter implements ModelAdapter {
   private readonly timeoutMs: number;
   private readonly sessionId?: string;
   private readonly userAgent: string;
+  private promptTokens = 0;
+  private completionTokens = 0;
+  private calls = 0;
 
   constructor(config: GlmAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.MODEL_API_KEY ?? '';
@@ -87,6 +91,7 @@ export class GlmModelAdapter implements ModelAdapter {
   }
 
   async complete(request: ModelRequest): Promise<ModelResponse> {
+    this.calls += 1;
     const body = {
       model: this.model,
       messages: this.buildMessages(request),
@@ -136,6 +141,11 @@ export class GlmModelAdapter implements ModelAdapter {
         code: String(payload.error.code ?? 'api_error'),
         message: payload.error.message ?? 'Unknown API error',
       };
+    }
+
+    if (payload.usage) {
+      this.promptTokens += payload.usage.prompt_tokens ?? 0;
+      this.completionTokens += payload.usage.completion_tokens ?? 0;
     }
 
     const message = payload.choices?.[0]?.message;
@@ -220,6 +230,15 @@ export class GlmModelAdapter implements ModelAdapter {
     }
 
     return messages;
+  }
+
+  getUsage(): { promptTokens: number; completionTokens: number; totalTokens: number; calls: number } {
+    return {
+      promptTokens: this.promptTokens,
+      completionTokens: this.completionTokens,
+      totalTokens: this.promptTokens + this.completionTokens,
+      calls: this.calls,
+    };
   }
 
   private buildTools(request: ModelRequest): Array<Record<string, unknown>> {

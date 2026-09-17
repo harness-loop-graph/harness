@@ -161,6 +161,55 @@ describe('GlmModelAdapter', () => {
     }
   });
 
+  it('accumulates usage across multiple complete() calls', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'First.' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'Second.' } }],
+          usage: { prompt_tokens: 20, completion_tokens: 8 },
+        }),
+      );
+    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await adapter.complete(request());
+    await adapter.complete(request());
+
+    expect(adapter.getUsage()).toEqual({
+      promptTokens: 30,
+      completionTokens: 13,
+      totalTokens: 43,
+      calls: 2,
+    });
+  });
+
+  it('counts a call and contributes zeros when usage is absent', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'No usage.' } }],
+      }),
+    );
+    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await adapter.complete(request());
+
+    expect(adapter.getUsage()).toEqual({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      calls: 1,
+    });
+  });
+
   it('feeds history back as assistant tool_calls plus tool-role messages', async () => {
     process.env.MODEL_API_KEY = 'test-key';
     process.env.MODEL_ID = 'glm-4.7';
