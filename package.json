@@ -9,7 +9,8 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "smoke": "tsc && node dist/smoke.js"
+    "smoke": "tsc && node dist/smoke.js",
+    "smoke:loop": "tsc && node dist/smoke-loop.js"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

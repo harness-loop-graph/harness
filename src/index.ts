@@ -12,3 +12,7 @@ export * from './components/guardrails.js';
 
 // Harness
 export * from './harness.js';
+
+// C2 loop
+export * from './loop/contracts.js';
+export * from './loop/agent-loop.js';

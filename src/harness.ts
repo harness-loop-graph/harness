@@ -4,6 +4,7 @@ import type {
   ToolResult,
   ToolSpec,
   VerificationResult,
+  GuardrailDecision,
 } from './contracts/core.js';
 import type { ContextManager } from './components/context-manager.js';
 import type { ModelAdapter } from './components/model-adapter.js';
@@ -11,7 +12,6 @@ import type { ToolManager } from './components/tool-manager.js';
 import type { ExecutionManager } from './components/execution-manager.js';
 import type { VerificationManager } from './components/verification-manager.js';
 import type { Guardrails } from './components/guardrails.js';
-import type { GuardrailDecision } from './contracts/core.js';
 
 /** The six harness components, injected fully assembled. */
 export interface HarnessComponents {
@@ -34,6 +34,14 @@ export interface HarnessOptions {
    * How many tool rounds a single run may take. C1 uses the default
    * of 1 (a single interaction cycle, no corrective loop — that is C2).
    */
+  maxToolRounds?: number;
+}
+
+/** Runtime options for a single harness run. */
+export interface HarnessRunOptions {
+  /** Verification feedback from a previous failed attempt (C2 loop retry). */
+  feedback?: string;
+  /** Overrides the constructor's maxToolRounds for this run only. */
   maxToolRounds?: number;
 }
 
@@ -69,8 +77,9 @@ export class Harness {
     this.maxToolRounds = options.maxToolRounds ?? 1;
   }
 
-  async run(task: string): Promise<HarnessRunResult> {
+  async run(task: string, runOptions: HarnessRunOptions = {}): Promise<HarnessRunResult> {
     const { context, model, tools, verification, guardrails } = this.components;
+    const maxToolRounds = runOptions.maxToolRounds ?? this.maxToolRounds;
 
     const ctx = await context.prepare(task, this.options.workspaceRoot);
     const history: Array<ModelResponse | ToolResult> = [];
@@ -78,13 +87,16 @@ export class Harness {
 
     let response: ModelResponse | undefined;
 
-    for (let round = 0; round <= this.maxToolRounds; round++) {
+    for (let round = 0; round <= maxToolRounds; round++) {
       const request: ModelRequest = {
         task,
         context: ctx,
         availTools: this.options.availTools,
         instructions: this.options.instructions,
         history: [...history],
+        // Feedback describes the previous ATTEMPT: attach it to the first
+        // request of the turn; later requests carry the tool history instead.
+        ...(round === 0 && runOptions.feedback ? { feedback: runOptions.feedback } : {}),
       };
 
       response = await model.complete(request);
@@ -103,11 +115,11 @@ export class Harness {
         turn.verification = await verification.verify(toolResult.result);
       }
 
-      if (round === this.maxToolRounds) {
+      if (round === maxToolRounds) {
         response = {
           type: 'error',
           code: 'max_tool_rounds',
-          message: `Reached the limit of ${this.maxToolRounds} tool round(s) without a final response`,
+          message: `Reached the limit of ${maxToolRounds} tool round(s) without a final response`,
         };
         turns.push({
           request: { ...request, history: [...history] },

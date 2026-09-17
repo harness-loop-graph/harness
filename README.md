@@ -22,7 +22,21 @@ task ──► ContextManager ──► ModelRequest ──► ModelAdapter (GLM
            ToolResult ──► back to the model ──► final response
 ```
 
-No corrective loop (that is C2) and no multi-agent graph (that is C3).
+**C2** — The corrective loop on top (`src/loop/`). Each turn runs a full
+harness interaction, then the loop verifies the workspace with an
+operator-owned command and decides:
+
+```
+starting → generating → observing → verifying → deciding → final
+                                                ├─ FINISH (verification passed)
+                                                ├─ RETRY  (feedback fed to next turn)
+                                                └─ FAIL   (max_turns reached)
+```
+
+The decision policy is deterministic and lives in `AgentLoop`, not in
+the model: verification evidence, not model claims, closes the loop.
+Contracts: `LoopRequest` (task + maxTurns + verification), `LoopState`,
+`LoopDecision` (FINISH/RETRY/FAIL), `LoopResult` (SUCCESS/FAILED + trace).
 
 ## Components (6)
 
@@ -56,7 +70,10 @@ npm test
 Create a git-ignored `glm/.env` file (see below) and run:
 
 ```bash
-npm run smoke
+MODEL_API_KEY=<OpenCode Go key>
+MODEL_ID=glm-5.2
+npm run smoke        # C1: single interaction cycle
+npm run smoke:loop   # C2: corrective loop with hidden verification
 ```
 
 The smoke run creates an isolated temp workspace, asks the model to write

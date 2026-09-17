@@ -189,7 +189,9 @@ export class GlmModelAdapter implements ModelAdapter {
     ];
     messages.push({
       role: 'user',
-      content: `${request.task}\n\nProject context:\n${contextLines.join('\n')}`,
+      content:
+        `${request.task}\n\nProject context:\n${contextLines.join('\n')}` +
+        (request.feedback ? `\n\n[feedback from previous failed attempt]\n${request.feedback}` : ''),
     });
 
     for (const entry of request.history ?? []) {

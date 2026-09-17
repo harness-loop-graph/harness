@@ -18,6 +18,8 @@ export interface ModelRequest {
   context: Context;
   availTools: ToolSpec[];
   instructions?: string;
+  /** Verification feedback from a previous failed attempt (loop retry). */
+  feedback?: string;
   /** Prior responses of this interaction, including tool results fed back. */
   history?: Array<ModelResponse | ToolResult>;
 }
