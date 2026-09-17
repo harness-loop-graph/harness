@@ -16,3 +16,7 @@ export * from './harness.js';
 // C2 loop
 export * from './loop/contracts.js';
 export * from './loop/agent-loop.js';
+
+// C3 graph
+export * from './graph/contracts.js';
+export * from './graph/graph-engine.js';

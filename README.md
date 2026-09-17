@@ -38,6 +38,25 @@ the model: verification evidence, not model claims, closes the loop.
 Contracts: `LoopRequest` (task + maxTurns + verification), `LoopState`,
 `LoopDecision` (FINISH/RETRY/FAIL), `LoopResult` (SUCCESS/FAILED + trace).
 
+**C3** — The multi-agent graph on top (`src/graph/`). A state machine
+over nodes where each node runs its own C2 loop; edges route on loop
+outcomes with conditional branching:
+
+```
+architect --on_success--> data --on_success--> backend ...
+reviewer --on_failure--> backend   (returns to the responsible layer)
+successful node with no outgoing edge = terminal FINISH
+maxSteps = graph-level infinite-loop prevention
+```
+
+Contracts: `GraphRequest` (task + nodes + edges + initialNode +
+maxSteps), `GraphNode` (id/role/task/instructions/verification),
+`GraphEdge` (from/to/on_success|on_failure|always), `GraphState`
+(current node, visits, results, shared notes), `GraphDecision`
+(NEXT/FINISH/FAIL), `GraphResult` (SUCCESS/FAILED + step trace +
+metrics). Routing is deterministic: the reviewer pattern is an
+`on_failure` edge, not a model choice.
+
 ## Components (6)
 
 1. **Context Manager** (`FsContextManager`) — deterministic workspace scan
@@ -72,8 +91,9 @@ Create a git-ignored `glm/.env` file (see below) and run:
 ```bash
 MODEL_API_KEY=<OpenCode Go key>
 MODEL_ID=glm-5.2
-npm run smoke        # C1: single interaction cycle
-npm run smoke:loop   # C2: corrective loop with hidden verification
+npm run smoke         # C1: single interaction cycle
+npm run smoke:loop    # C2: corrective loop with hidden verification
+npm run smoke:graph   # C3: architect -> builder multi-agent graph
 ```
 
 The smoke run creates an isolated temp workspace, asks the model to write

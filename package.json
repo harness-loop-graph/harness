@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "tsc && node dist/smoke.js",
-    "smoke:loop": "tsc && node dist/smoke-loop.js"
+    "smoke:loop": "tsc && node dist/smoke-loop.js",
+    "smoke:graph": "tsc && node dist/smoke-graph.js"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
