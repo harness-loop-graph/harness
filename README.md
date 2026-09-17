@@ -53,15 +53,34 @@ npm test
 
 ## Live smoke test (real GLM endpoint)
 
+Create a git-ignored `glm/.env` file (see below) and run:
+
 ```bash
-export GLM_API_KEY=<your Z.ai key>
-export GLM_MODEL=<model id, e.g. glm-4.6>
 npm run smoke
 ```
 
 The smoke run creates an isolated temp workspace, asks the model to write
 `smoke.txt` through the tool pipeline, and exits non-zero if the cycle does
 not finish successfully.
+
+### Environment variables
+
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `GLM_API_KEY` | yes | — | Z.ai API key |
+| `GLM_MODEL` | yes | — | Model id, e.g. `glm-5.2` |
+| `GLM_BASE_URL` | no | `https://api.z.ai/api/paas/v4` | Override for the GLM Coding Plan |
+
+### GLM Coding Plan (as configured in this experiment)
+
+The Coding Plan key uses the OpenAI-compatible endpoint instead of the
+default pay-as-you-go endpoint:
+
+```bash
+GLM_API_KEY=<coding plan key>
+GLM_MODEL=<model id, e.g. glm-5.2>
+GLM_BASE_URL=https://api.z.ai/api/coding/paas/v4
+```
 
 ## Build
 
