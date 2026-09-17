@@ -29,7 +29,12 @@ export interface Guardrails {
 }
 
 export const DEFAULT_ALLOWED_TOOLS = ['write_file', 'read_file', 'run_command'];
-export const DEFAULT_ALLOWED_COMMAND_PREFIXES = ['npm', 'node', 'npx', 'git', 'ls', 'cat', 'echo', 'mkdir', 'docker', 'pnpm', 'psql'];
+export const DEFAULT_ALLOWED_COMMAND_PREFIXES = [
+  'npm', 'node', 'npx', 'git', 'ls', 'cat', 'echo', 'mkdir', 'docker', 'pnpm', 'psql',
+  'cd', 'head', 'tail', 'grep', 'sed', 'awk', 'find', 'touch', 'cp', 'mv', 'rm',
+  'chmod', 'curl', 'bash', 'sh', 'test', 'diff', 'wc', 'sort', 'uniq', 'tr', 'cut',
+  'xargs', 'tee', 'env', 'printenv', 'which', 'sleep', 'true', 'false',
+];
 
 /** Policy guardrails: path confinement, tool/command whitelists, size limits, audit trail. */
 export class PolicyGuardrails implements Guardrails {
