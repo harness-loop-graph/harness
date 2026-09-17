@@ -13,12 +13,7 @@ import { PolicyGuardrails } from './components/guardrails.js';
 import { RegistryToolManager, registerBuiltinTools } from './components/tool-manager.js';
 import { RecordingVerificationManager } from './components/verification-manager.js';
 
-/**
- * Live smoke test for the C3 multi-agent graph against the real model.
- * A minimal architect -> builder graph: the architect node produces the
- * spec, the builder node implements it; each node runs its own C2 loop
- * with operator-owned verification. Requires MODEL_API_KEY/MODEL_ID.
- */
+/** Live C3 smoke: architect -> builder graph, each node runs its own C2 loop. */
 async function main(): Promise<void> {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-graph-smoke-'));
   const sessionId = randomUUID();

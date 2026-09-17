@@ -13,7 +13,6 @@ import type { ExecutionManager } from './components/execution-manager.js';
 import type { VerificationManager } from './components/verification-manager.js';
 import type { Guardrails } from './components/guardrails.js';
 
-/** The six harness components, injected fully assembled. */
 export interface HarnessComponents {
   context: ContextManager;
   model: ModelAdapter;
@@ -24,28 +23,21 @@ export interface HarnessComponents {
 }
 
 export interface HarnessOptions {
-  /** Absolute path of the isolated workspace the agent operates in. */
   workspaceRoot: string;
-  /** Tools offered to the model on every request. */
   availTools: ToolSpec[];
-  /** Standing rules and constraints sent with every request. */
   instructions?: string;
   /**
-   * How many tool rounds a single run may take. C1 uses the default
-   * of 1 (a single interaction cycle, no corrective loop — that is C2).
+   * C1 contract: 1 (single interaction, no corrective loop — that is C2).
+   * C2 loops override this per run.
    */
   maxToolRounds?: number;
 }
 
-/** Runtime options for a single harness run. */
 export interface HarnessRunOptions {
-  /** Verification feedback from a previous failed attempt (C2 loop retry). */
   feedback?: string;
-  /** Overrides the constructor's maxToolRounds for this run only. */
   maxToolRounds?: number;
 }
 
-/** Trace of one interaction step: what was asked, answered, executed, verified. */
 export interface InteractionTurn {
   request: ModelRequest;
   response: ModelResponse;
@@ -61,11 +53,9 @@ export interface HarnessRunResult {
 }
 
 /**
- * The C1 agent harness: composes the six managers and runs ONE
- * interaction cycle —
- *   context -> model -> (tool call -> guardrails -> tool -> verify)
- *           -> model with tool result -> final response.
- * There is no retry loop; that behavior belongs to C2.
+ * C1 harness: one interaction cycle —
+ * context -> model -> (tool call -> guardrails -> tool -> verify)
+ * -> model with tool result -> final response. No retries.
  */
 export class Harness {
   private readonly maxToolRounds: number;
@@ -94,8 +84,8 @@ export class Harness {
         availTools: this.options.availTools,
         instructions: this.options.instructions,
         history: [...history],
-        // Feedback describes the previous ATTEMPT: attach it to the first
-        // request of the turn; later requests carry the tool history instead.
+        // Feedback belongs to the previous ATTEMPT: only on the first
+        // request of the turn; later requests carry the tool history.
         ...(round === 0 && runOptions.feedback ? { feedback: runOptions.feedback } : {}),
       };
 
@@ -109,8 +99,6 @@ export class Harness {
       turn.toolResult = toolResult;
       history.push(response, toolResult);
 
-      // Commands are verified through the verification manager (C1 scope:
-      // execute checks and store results; feedback loops arrive in C2).
       if (this.isExecutionResult(toolResult.result)) {
         turn.verification = await verification.verify(toolResult.result);
       }
@@ -136,7 +124,6 @@ export class Harness {
     };
   }
 
-  /** Structural check for an ExecutionResult payload inside a ToolResult. */
   private isExecutionResult(result: unknown): result is {
     exitCode: number;
     stdout: string;

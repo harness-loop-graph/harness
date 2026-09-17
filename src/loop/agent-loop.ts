@@ -10,26 +10,18 @@ import type {
   LoopTurnTrace,
 } from './contracts.js';
 
-/** Dependencies the loop needs beyond the harness itself. */
 export interface LoopDeps {
   harness: Harness;
   execution: ExecutionManager;
   verification: VerificationManager;
-  /** Workspace root: verification commands run confined to it. */
   workspaceRoot: string;
 }
 
 /**
- * The C2 corrective loop, per the design document:
- *
- *   starting -> generating -> observing -> verifying -> deciding -> final
- *
- * Each turn runs a full harness interaction. After the model responds,
- * the operator-specified verification command runs (verifying phase) and
- * the loop DECIDES: FINISH (task succeeded), RETRY (result must be
- * corrected — verification feedback is fed to the next turn) or FAIL
- * (max_turns reached). The decision policy is deterministic and lives
- * here, not in the model.
+ * C2 corrective loop. Each turn runs a full harness interaction, then the
+ * operator-owned verification command runs and the loop decides FINISH /
+ * RETRY (verification feedback goes to the next turn) / FAIL. The decision
+ * policy is deterministic and lives here, not in the model.
  */
 export class AgentLoop {
   constructor(private readonly deps: LoopDeps) {}
@@ -50,7 +42,6 @@ export class AgentLoop {
     for (let turn = 1; turn <= request.maxTurns; turn++) {
       state.turn = turn;
 
-      // generating: the model works on the task (with prior feedback, if any).
       state.phase = 'generating';
       const run = await this.deps.harness.run(request.task, {
         feedback,
@@ -58,8 +49,6 @@ export class AgentLoop {
       });
       finalResponse = run.finalResponse;
 
-      // observing: tool executions happened inside the harness turn;
-      // record them, then verify the resulting workspace state.
       state.phase = 'observing';
 
       let verification: VerificationResult | undefined;
@@ -73,7 +62,6 @@ export class AgentLoop {
         state.verifications.push(verification);
       }
 
-      // deciding: deterministic policy over the verification evidence.
       state.phase = 'deciding';
       decision = this.decide(finalResponse, verification, request.maxTurns - turn);
       state.lastAction = decision.action;
@@ -119,10 +107,8 @@ export class AgentLoop {
   }
 
   /**
-   * Deterministic decision policy:
-   * - finish + verification passed (or no verification) -> FINISH
-   * - finish/error + failed verification + turns left    -> RETRY
-   * - anything with no turns left                        -> FAIL
+   * finish + passed (or no) verification -> FINISH; anything failed with
+   * turns left -> RETRY; anything with no turns left -> FAIL.
    */
   private decide(
     response: ModelResponse,
@@ -146,7 +132,6 @@ export class AgentLoop {
       : { action: 'FAIL', reason: 'Model finished but verification failed and no turns are left' };
   }
 
-  /** Turns verification failure (or model error) into model-readable feedback. */
   private buildFeedback(
     response: ModelResponse,
     verification: VerificationResult | undefined,

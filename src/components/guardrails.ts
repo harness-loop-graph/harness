@@ -31,11 +31,7 @@ export interface Guardrails {
 export const DEFAULT_ALLOWED_TOOLS = ['write_file', 'read_file', 'run_command'];
 export const DEFAULT_ALLOWED_COMMAND_PREFIXES = ['npm', 'node', 'npx', 'git', 'ls', 'cat', 'echo', 'mkdir'];
 
-/**
- * Real guardrails: path confinement, tool whitelist, command prefix
- * whitelist and size limits. Every decision is recorded in memory and,
- * when an audit file path is configured, appended to a JSONL trail.
- */
+/** Policy guardrails: path confinement, tool/command whitelists, size limits, audit trail. */
 export class PolicyGuardrails implements Guardrails {
   private readonly audit: GuardrailDecision[] = [];
 
@@ -106,10 +102,7 @@ export class PolicyGuardrails implements Guardrails {
     return { decision: 'allowed', reason: `Command '${firstToken}' is allowed by policy` };
   }
 
-  /**
-   * A relative path is confined to the workspace; absolute paths must
-   * resolve inside the workspace root. `..` escapes are rejected.
-   */
+  /** Relative paths are confined to the workspace; `..` escapes are rejected. */
   private checkPath(target: string, isAbsoluteOk = false): GuardrailDecision {
     if (target === '') {
       return { decision: 'denied', reason: 'Missing path argument' };
@@ -134,7 +127,7 @@ export class PolicyGuardrails implements Guardrails {
   }
 }
 
-/** Minimal stub: allows whitelisted tools, denies others. Used in unit tests. */
+/** Stub for unit tests. */
 export class StubGuardrails implements Guardrails {
   private readonly audit: GuardrailDecision[] = [];
   private readonly whitelist: string[];

@@ -15,11 +15,7 @@ export interface ToolManager {
 
 const MAX_READ_BYTES = 256 * 1024;
 
-/**
- * Real tool manager: every call is checked against the guardrails
- * before execution, unknown tools are rejected, and handler failures
- * become failed ToolResults instead of exceptions.
- */
+/** Every call is guardrail-checked; handler failures become failed ToolResults. */
 export class RegistryToolManager implements ToolManager {
   private readonly specs = new Map<string, ToolSpec>();
   private readonly handlers = new Map<string, ToolHandler>();
@@ -145,7 +141,7 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
-/** Minimal stub: registers specs and returns a canned success result. Used in unit tests. */
+/** Stub for unit tests. */
 export class StubToolManager implements ToolManager {
   private readonly registry = new Map<string, ToolSpec>();
 

@@ -16,11 +16,7 @@ export interface LocalExecutionOptions {
   timeoutMs?: number;
 }
 
-/**
- * Real execution manager: spawns the command with a shell inside the
- * workspace, captures stdout/stderr with a size cap, and kills the
- * process tree on timeout. The cwd is confined to the workspace root.
- */
+/** Spawns commands confined to the workspace, with output caps and a hard timeout. */
 export class LocalExecutionManager implements ExecutionManager {
   private readonly timeoutMs: number;
 
@@ -81,7 +77,7 @@ export class LocalExecutionManager implements ExecutionManager {
   }
 }
 
-/** Minimal stub: echoes the command back as stdout. Used in unit tests. */
+/** Stub for unit tests. */
 export class StubExecutionManager implements ExecutionManager {
   async run(req: ExecutionRequest): Promise<ExecutionResult> {
     return {

@@ -9,15 +9,11 @@ import type {
 import type { LoopFactory } from './contracts.js';
 
 /**
- * The C3 graph engine: a state machine over nodes. Each step executes
- * one node's corrective loop, then the router follows a matching edge
- * (on_success / on_failure / always). Nodes with no matching edge are
- * terminal. maxSteps is the graph-level loop-infinite prevention.
- *
- * Routing is deterministic: it depends on loop outcomes (verification
- * evidence), never on model claims. The canonical reviewer pattern —
- * a failing reviewer returns the flow to the layer responsible for
- * the failure — is expressed as an on_failure edge.
+ * C3 graph engine: a state machine over nodes. Each step runs one node's
+ * corrective loop, then the router follows the edge matching the loop
+ * outcome. Routing is deterministic (verification evidence, never model
+ * claims); the reviewer pattern is an on_failure edge back to the node
+ * responsible for the failure. maxSteps prevents node ping-pong.
  */
 export class GraphEngine {
   constructor(
@@ -56,7 +52,6 @@ export class GraphEngine {
       state.step += 1;
       state.visits[node.id] = (state.visits[node.id] ?? 0) + 1;
 
-      // Each node runs its own C2 loop: plan, act, verify, feedback.
       const loop = this.createLoop(node);
       const loopResult = await loop.run({
         task: node.task,
@@ -101,12 +96,7 @@ export class GraphEngine {
     };
   }
 
-  /**
-   * Deterministic routing: pick the edge whose condition matches the
-   * loop outcome; 'always' edges match either outcome. A successful
-   * node with no matching edge is terminal (FINISH); a failed node
-   * with no on_failure edge fails the graph.
-   */
+      /** A successful node with no matching edge is terminal; a failed node with no on_failure edge fails the graph. */
   private route(nodeId: string, loopStatus: 'SUCCESS' | 'FAILED'): GraphDecision {
     const edges = this.request.edges.filter((e) => e.from === nodeId);
     const wanted = loopStatus === 'SUCCESS' ? 'on_success' : 'on_failure';

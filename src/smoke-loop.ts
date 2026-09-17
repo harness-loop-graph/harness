@@ -11,12 +11,7 @@ import { PolicyGuardrails } from './components/guardrails.js';
 import { RegistryToolManager, registerBuiltinTools } from './components/tool-manager.js';
 import { RecordingVerificationManager } from './components/verification-manager.js';
 
-/**
- * Live smoke test for the C2 corrective loop against the real model.
- * Requires MODEL_API_KEY and MODEL_ID in the environment. The loop's
- * verification is operator-owned: the model never sees it, it only
- * receives its feedback when it fails.
- */
+/** Live C2 smoke: corrective loop; the verification command is operator-owned and hidden from the model. */
 async function main(): Promise<void> {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-loop-smoke-'));
 

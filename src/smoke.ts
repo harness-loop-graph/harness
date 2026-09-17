@@ -10,11 +10,7 @@ import { PolicyGuardrails } from './components/guardrails.js';
 import { RegistryToolManager, registerBuiltinTools } from './components/tool-manager.js';
 import { RecordingVerificationManager } from './components/verification-manager.js';
 
-/**
- * Live smoke test for the C1 harness against the real GLM endpoint.
- * Requires GLM_API_KEY and GLM_MODEL in the environment; exits with
- * a non-zero code if the cycle does not finish successfully.
- */
+/** Live C1 smoke: one interaction cycle against the real model. */
 async function main(): Promise<void> {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-smoke-'));
 

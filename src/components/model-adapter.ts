@@ -5,7 +5,7 @@ export interface ModelAdapter {
   complete(request: ModelRequest): Promise<ModelResponse>;
 }
 
-/** Stub adapter that always returns a canned finish response. */
+/** Stub for unit tests. */
 export class StubModelAdapter implements ModelAdapter {
   async complete(request: ModelRequest): Promise<ModelResponse> {
     return {

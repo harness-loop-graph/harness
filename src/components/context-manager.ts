@@ -11,11 +11,7 @@ const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', '.cache']);
 const MAX_FILES = 500;
 const MAX_DEPTH = 6;
 
-/**
- * Real context manager: deterministically scans the workspace and
- * returns its file listing plus a coarse language guess. The task is
- * kept in the context for downstream consumers.
- */
+/** Deterministic workspace scan: file listing plus a coarse language guess. */
 export class FsContextManager implements ContextManager {
   async prepare(task: string, projectRoot: string): Promise<Context> {
     const root = path.resolve(projectRoot);
@@ -57,7 +53,7 @@ export class FsContextManager implements ContextManager {
   }
 }
 
-/** Minimal stub: returns a Context with the given root and an empty file list. */
+/** Stub for unit tests. */
 export class StubContextManager implements ContextManager {
   async prepare(task: string, projectRoot: string): Promise<Context> {
     return {

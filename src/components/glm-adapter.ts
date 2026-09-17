@@ -4,7 +4,7 @@ import type { ModelAdapter } from './model-adapter.js';
 /**
  * Default endpoint: OpenCode Go (https://opencode.ai/docs/go/), the
  * provider this experiment accesses GLM through. Override with
- * GLM_BASE_URL for direct Z.ai access if ever needed.
+ * MODEL_BASE_URL for any other OpenAI-compatible endpoint.
  */
 export const DEFAULT_GLM_BASE_URL = 'https://opencode.ai/zen/go/v1';
 
@@ -56,10 +56,9 @@ interface ChatCompletionResponse {
 }
 
 /**
- * Real model adapter for GLM (Z.ai) against its OpenAI-compatible
- * chat completions endpoint. Everything the harness knows about GLM
- * lives here and only here — swapping models means swapping this
- * adapter, per the harness/model contract.
+ * OpenAI-compatible chat-completions adapter (OpenCode Go by default).
+ * The only harness component that knows how to talk to a provider;
+ * swapping providers means swapping or reconfiguring this class.
  */
 export class GlmModelAdapter implements ModelAdapter {
   private readonly apiKey: string;

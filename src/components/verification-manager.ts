@@ -10,12 +10,7 @@ export interface VerificationManager {
 
 const MAX_DETAIL_CHARS = 2000;
 
-/**
- * Real verification manager for C1: evaluates an execution result
- * (exit code + output tail) and records the history, optionally
- * persisting it as JSONL. Corrective feedback on top of these results
- * arrives in C2 with the loop.
- */
+/** Evaluates executions (exit code + output tail) and records history, optionally as JSONL. */
 export class RecordingVerificationManager implements VerificationManager {
   private readonly history: VerificationResult[] = [];
 
@@ -43,7 +38,7 @@ export class RecordingVerificationManager implements VerificationManager {
   }
 }
 
-/** Minimal stub: always passes. Used in unit tests. */
+/** Stub for unit tests. */
 export class StubVerificationManager implements VerificationManager {
   private readonly history: VerificationResult[] = [];
 
