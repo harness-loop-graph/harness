@@ -27,13 +27,13 @@ describe('C1 harness contracts', () => {
     }
   });
 
-  it('stub guardrail allows whitelisted actions and denies others', async () => {
+  it('stub guardrail allows whitelisted tools and denies others', async () => {
     const guardrails = new StubGuardrails();
 
-    const allowed = await guardrails.evaluate('read');
+    const allowed = await guardrails.evaluate({ kind: 'tool', tool: 'read_file', args: {} });
     expect(allowed.decision).toBe('allowed');
 
-    const denied = await guardrails.evaluate('delete');
+    const denied = await guardrails.evaluate({ kind: 'tool', tool: 'delete', args: {} });
     expect(denied.decision).toBe('denied');
 
     const log = guardrails.getAuditLog();

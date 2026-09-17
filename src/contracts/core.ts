@@ -8,6 +8,8 @@ export interface Context {
   files: string[];
   language?: string;
   framework?: string;
+  /** The task this context was prepared for. */
+  task?: string;
 }
 
 /** Request sent to the model adapter. */
@@ -16,7 +18,8 @@ export interface ModelRequest {
   context: Context;
   availTools: ToolSpec[];
   instructions?: string;
-  history?: ModelResponse[];
+  /** Prior responses of this interaction, including tool results fed back. */
+  history?: Array<ModelResponse | ToolResult>;
 }
 
 /** Discriminated union of possible model responses. */

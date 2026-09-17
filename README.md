@@ -1,19 +1,48 @@
-# Agent Harness — C1 Skeleton
+# Agent Harness — C1
 
 Model-agnostic agent harness for experimental AI code-generation.
+This repository is the **GLM** arm of the experiment: the same harness
+runs against Claude in the sibling `claude/` repository.
 
 ## Iteration
 
-**C1** — Base contracts and component interfaces with minimal stub implementations.
+**C1** — The harness as a running system. One interaction cycle:
+
+```
+task ──► ContextManager ──► ModelRequest ──► ModelAdapter (GLM)
+                                                  │
+                     ┌────────────────────────────┤
+                     ▼                            ▼
+                tool_call                     finish / error
+                     │
+           Guardrails (allowed / denied)
+                     ▼
+           ToolManager (validate + execute)
+                     ▼
+           ToolResult ──► back to the model ──► final response
+```
+
+No corrective loop (that is C2) and no multi-agent graph (that is C3).
 
 ## Components (6)
 
-1. **Context Manager** — selects and prepares relevant project context
-2. **Model Adapter** — abstracts LLM interaction (stub in C1)
-3. **Tool Manager** — validates and executes tool calls
-4. **Execution Manager** — runs commands in isolated workspaces
-5. **Verification Manager** — evaluates execution results and artifacts
-6. **Guardrails** — policy enforcement with audit trail
+1. **Context Manager** (`FsContextManager`) — deterministic workspace scan
+2. **Model Adapter** — interface + stub; the GLM adapter lands next
+3. **Tool Manager** (`RegistryToolManager`) — registry, guardrail check, execution
+   of `write_file`, `read_file`, `run_command`
+4. **Execution Manager** (`LocalExecutionManager`) — spawns commands confined to
+   the workspace, captures stdout/stderr, hard timeout
+5. **Verification Manager** (`RecordingVerificationManager`) — evaluates command
+   results, stores history (in memory + JSONL)
+6. **Guardrails** (`PolicyGuardrails`) — tool whitelist, command prefix whitelist,
+   path confinement, size limits, append-only audit trail
+
+## Harness
+
+`src/harness.ts` composes the six components and runs exactly one
+interaction cycle (`maxToolRounds` defaults to 1). Every run returns the
+final model response, a per-turn trace, the guardrail audit log and the
+verification history.
 
 ## Run tests
 

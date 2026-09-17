@@ -8,3 +8,6 @@ export * from './components/tool-manager.js';
 export * from './components/execution-manager.js';
 export * from './components/verification-manager.js';
 export * from './components/guardrails.js';
+
+// Harness
+export * from './harness.js';
