@@ -65,7 +65,10 @@ describe('GlmModelAdapter', () => {
         ],
       }),
     );
-    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new GlmModelAdapter({
+      sessionId: 'session-1',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
 
     const response = await adapter.complete(request());
 
@@ -74,10 +77,13 @@ describe('GlmModelAdapter', () => {
       tool: 'write_file',
       args: { path: 'x.txt', content: 'hi' },
     });
-    // Request shape: OpenAI-compatible body against the Z.ai endpoint.
+    // Request shape: OpenAI-compatible body against the OpenCode Go endpoint.
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://api.z.ai/api/paas/v4/chat/completions');
-    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer test-key');
+    expect(url).toBe('https://opencode.ai/zen/go/v1/chat/completions');
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer test-key');
+    expect(headers['x-opencode-session']).toBe('session-1');
+    expect(headers['User-Agent']).toBe('harness-glm/0.1.0');
     const body = JSON.parse(String(init.body));
     expect(body.model).toBe('glm-4.7');
     expect(body.tools[0].function.name).toBe('write_file');

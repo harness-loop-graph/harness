@@ -67,20 +67,19 @@ not finish successfully.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `GLM_API_KEY` | yes | — | Z.ai API key |
+| `GLM_API_KEY` | yes | — | OpenCode Go API key (from https://opencode.ai/auth) |
 | `GLM_MODEL` | yes | — | Model id, e.g. `glm-5.2` |
-| `GLM_BASE_URL` | no | `https://api.z.ai/api/paas/v4` | Override for the GLM Coding Plan |
+| `GLM_BASE_URL` | no | `https://opencode.ai/zen/go/v1` | OpenCode Go endpoint |
 
-### GLM Coding Plan (as configured in this experiment)
+### Provider: OpenCode Go
 
-The Coding Plan key uses the OpenAI-compatible endpoint instead of the
-default pay-as-you-go endpoint:
-
-```bash
-GLM_API_KEY=<coding plan key>
-GLM_MODEL=<model id, e.g. glm-5.2>
-GLM_BASE_URL=https://api.z.ai/api/coding/paas/v4
-```
+This experiment accesses GLM through **OpenCode Go**
+(https://opencode.ai/docs/go/): an OpenAI-compatible proxy that serves
+`glm-5.2` (and other GLM versions). The adapter implements Go's client
+requirements automatically: a custom `User-Agent` identifying the harness
+and a stable `x-opencode-session` header per conversation (see
+`GlmModelAdapter` options). Direct Z.ai endpoints can be used instead by
+overriding `GLM_BASE_URL`.
 
 ## Build
 

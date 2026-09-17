@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { Harness } from './harness.js';
 import { FsContextManager } from './components/context-manager.js';
 import { GlmModelAdapter } from './components/glm-adapter.js';
@@ -29,7 +30,7 @@ async function main(): Promise<void> {
   );
   const tools = new RegistryToolManager(guardrails);
   const availTools = registerBuiltinTools(tools, { execution, workspaceRoot: workspace });
-  const model = new GlmModelAdapter();
+  const model = new GlmModelAdapter({ sessionId: randomUUID() });
 
   const harness = new Harness(
     {

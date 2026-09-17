@@ -1,8 +1,12 @@
 import type { ModelRequest, ModelResponse } from '../contracts/core.js';
 import type { ModelAdapter } from './model-adapter.js';
 
-/** Where to reach the OpenAI-compatible endpoint of Z.ai. */
-export const DEFAULT_GLM_BASE_URL = 'https://api.z.ai/api/paas/v4';
+/**
+ * Default endpoint: OpenCode Go (https://opencode.ai/docs/go/), the
+ * provider this experiment accesses GLM through. Override with
+ * GLM_BASE_URL for direct Z.ai access if ever needed.
+ */
+export const DEFAULT_GLM_BASE_URL = 'https://opencode.ai/zen/go/v1';
 
 export interface GlmAdapterConfig {
   /** API key. Falls back to process.env.GLM_API_KEY. */
@@ -15,6 +19,13 @@ export interface GlmAdapterConfig {
   fetchImpl?: typeof fetch;
   /** Request timeout in ms. Default 120_000. */
   timeoutMs?: number;
+  /**
+   * Stable per-conversation session id, sent as x-opencode-session.
+   * OpenCode Go requires it for routing and prompt caching.
+   */
+  sessionId?: string;
+  /** Custom user agent identifying this harness. OpenCode Go requires it. */
+  userAgent?: string;
 }
 
 interface ChatMessage {
@@ -56,6 +67,8 @@ export class GlmModelAdapter implements ModelAdapter {
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly sessionId?: string;
+  private readonly userAgent: string;
 
   constructor(config: GlmAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.GLM_API_KEY ?? '';
@@ -63,6 +76,8 @@ export class GlmModelAdapter implements ModelAdapter {
     this.model = config.model ?? process.env.GLM_MODEL ?? '';
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.timeoutMs = config.timeoutMs ?? 120_000;
+    this.sessionId = config.sessionId;
+    this.userAgent = config.userAgent ?? 'harness-glm/0.1.0';
 
     if (this.apiKey === '') {
       throw new Error('GLM_API_KEY is not set. Export it before constructing GlmModelAdapter.');
@@ -86,6 +101,8 @@ export class GlmModelAdapter implements ModelAdapter {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
+          'User-Agent': this.userAgent,
+          ...(this.sessionId ? { 'x-opencode-session': this.sessionId } : {}),
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(this.timeoutMs),
