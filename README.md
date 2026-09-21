@@ -1,15 +1,15 @@
 # Agent Harness — C1
 
 Model-agnostic agent harness for experimental AI code-generation.
-This repository is the **GLM** arm of the experiment: the same harness
-runs against Claude in the sibling `claude/` repository.
+The same harness implementation is run against multiple model providers
+as part of a broader experiment.
 
 ## Iteration
 
 **C1** — The harness as a running system. One interaction cycle:
 
 ```
-task ──► ContextManager ──► ModelRequest ──► ModelAdapter (GLM)
+task ──► ContextManager ──► ModelRequest ──► ModelAdapter
                                                   │
                      ┌────────────────────────────┤
                      ▼                            ▼
@@ -60,7 +60,7 @@ metrics). Routing is deterministic: the reviewer pattern is an
 ## Components (6)
 
 1. **Context Manager** (`FsContextManager`) — deterministic workspace scan
-2. **Model Adapter** — interface + stub; the GLM adapter lands next
+2. **Model Adapter** — interface + a concrete adapter for an OpenAI-compatible endpoint
 3. **Tool Manager** (`RegistryToolManager`) — registry, guardrail check, execution
    of `write_file`, `read_file`, `run_command`
 4. **Execution Manager** (`LocalExecutionManager`) — spawns commands confined to
@@ -84,13 +84,13 @@ npm install
 npm test
 ```
 
-## Live smoke test (real GLM endpoint)
+## Live smoke test (real model endpoint)
 
-Create a git-ignored `glm/.env` file (see below) and run:
+Create a git-ignored `.env` file (see below) and run:
 
 ```bash
-MODEL_API_KEY=<OpenCode Go key>
-MODEL_ID=glm-5.2
+MODEL_API_KEY=<your provider API key>
+MODEL_ID=<your model id>
 npm run smoke         # C1: single interaction cycle
 npm run smoke:loop    # C2: corrective loop with hidden verification
 npm run smoke:graph   # C3: architect -> builder multi-agent graph
@@ -104,23 +104,15 @@ not finish successfully.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `MODEL_API_KEY` | yes | — | API key of the provider you point at (OpenCode Go: https://opencode.ai/auth) |
-| `MODEL_ID` | yes | — | Model id, e.g. `glm-5.2`, or any OpenAI-compatible model |
-| `MODEL_BASE_URL` | no | `https://opencode.ai/zen/go/v1` | Any OpenAI-compatible base URL works |
+| `MODEL_API_KEY` | yes | — | API key of the provider you point at |
+| `MODEL_ID` | yes | — | Model id, any OpenAI-compatible model |
+| `MODEL_BASE_URL` | no | provider default | Any OpenAI-compatible base URL works |
 
 Variables are provider-generic on purpose: the adapter speaks the
-OpenAI-compatible dialect, so pointing `MODEL_BASE_URL` at OpenAI,
-Z.ai, OpenRouter, etc. works with no code changes (see the adapter tests).
-
-### Provider: OpenCode Go
-
-This experiment accesses GLM through **OpenCode Go**
-(https://opencode.ai/docs/go/): an OpenAI-compatible proxy that serves
-`glm-5.2` (and other GLM versions). The adapter implements Go's client
-requirements automatically: a custom `User-Agent` identifying the harness
-and a stable `x-opencode-session` header per conversation (see
-`GlmModelAdapter` options). Direct Z.ai endpoints can be used instead by
-overriding `GLM_BASE_URL`.
+OpenAI-compatible dialect, so pointing `MODEL_BASE_URL` at a different
+provider works with no code changes (see the adapter tests). The adapter
+also sends a custom `User-Agent` identifying the harness and a stable
+session header per conversation, configurable through adapter options.
 
 ## Build
 
