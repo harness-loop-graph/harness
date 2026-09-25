@@ -9,6 +9,7 @@ export * from './components/tool-manager.js';
 export * from './components/execution-manager.js';
 export * from './components/verification-manager.js';
 export * from './components/guardrails.js';
+export * from './components/mcp-tool-provider.js';
 
 // Harness
 export * from './harness.js';
