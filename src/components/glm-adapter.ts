@@ -200,6 +200,14 @@ export class GlmModelAdapter implements ModelAdapter {
         .join('\n');
       systemParts.push(`Available tools:\n${toolList}`);
     }
+    if (request.context.skills && request.context.skills.length > 0) {
+      const skillList = request.context.skills
+        .map((s) => `- ${s.name}: ${s.description}`)
+        .join('\n');
+      systemParts.push(
+        `Available skills:\n${skillList}\n\nCall load_skill with the skill name before doing work a skill covers.`,
+      );
+    }
     if (systemParts.length > 0) {
       messages.push({ role: 'system', content: systemParts.join('\n\n') });
     }

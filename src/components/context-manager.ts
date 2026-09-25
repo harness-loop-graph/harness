@@ -1,4 +1,5 @@
 import type { Context } from '../contracts/core.js';
+import type { SkillCatalog } from './skill-catalog.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -13,13 +14,16 @@ const MAX_DEPTH = 6;
 
 /** Deterministic workspace scan: file listing plus a coarse language guess. */
 export class FsContextManager implements ContextManager {
+  constructor(private readonly skillCatalog?: SkillCatalog) {}
+
   async prepare(task: string, projectRoot: string): Promise<Context> {
     const root = path.resolve(projectRoot);
     const files: string[] = [];
     await this.walk(root, root, files, 0);
 
     const language = this.guessLanguage(files);
-    return { projectRoot: root, files, language, task };
+    const skills = this.skillCatalog?.list();
+    return { projectRoot: root, files, language, task, ...(skills && skills.length > 0 ? { skills } : {}) };
   }
 
   private async walk(root: string, dir: string, files: string[], depth: number): Promise<void> {

@@ -4,6 +4,8 @@ export interface Context {
   language?: string;
   framework?: string;
   task?: string;
+  /** Progressive disclosure: name + description only; body via the `load_skill` tool. */
+  skills?: Array<{ name: string; description: string }>;
 }
 
 export interface ModelRequest {
