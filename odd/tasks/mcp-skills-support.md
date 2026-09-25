@@ -24,7 +24,7 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
 - [x] T1 — MCP tool provider (`@modelcontextprotocol/sdk` stdio client), tools namespaced `mcp__<server>__<tool>`, registered in `RegistryToolManager`; tests with a local fixture MCP server.
 - [x] T2 — Skills: `SkillCatalog` (frontmatter `name`/`description`), `load_skill` tool, skill index in `Context` rendered by the GLM adapter; tests.
 - [x] T3 — Public exports, harness-config loader, README/docs update.
-- [ ] T4 — Runner: `--harness-config <path>`, one shared MCP connection per run, guardrail allowlist extended, config recorded in run metrics, clean shutdown; README.
+- [x] T4 — Runner: `--harness-config <path>`, one shared MCP connection per run, guardrail allowlist extended, config recorded in run metrics, clean shutdown; README.
 
 ## Acceptance criteria
 - A run with a harness config exposes MCP tools and skills to the model in C1, C2 and C3.
@@ -70,5 +70,27 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
   `McpToolProvider`/`SkillCatalog` primitives directly instead of this
   helper, since calling it per harness would reconnect per harness.
 
+### T4 — Runner wiring (repo: `app`, branch `feat/harness-config`)
+- Commit: `app@29a00f4` — `feat(runner): wire MCP tools and skills into C1/C2/C3 via --harness-config`
+- `node --check runner/run-experiment.mjs`: pass.
+- No-model wiring check (throwaway script against
+  `glm/examples/harness-config.json` + the fixture MCP server): registered
+  tool names include `mcp__fixture__echo`, `mcp__fixture__fail`,
+  `load_skill`; a guardrail-allowed `mcp__fixture__echo` call and a
+  `load_skill('greeter')` call both succeed end to end.
+- `--dry-run` verified byte-identical plan JSON without `--harness-config`,
+  and an added `harnessConfig` field (path only, no connection opened)
+  with it.
+- `run-report.json` gains `harnessConfig: { path, sha256, mcpServers,
+  toolNames, skillNames }` only when `--harness-config` is passed.
+- Deviation: none from the design; `wireHarnessConfig` (T3's single-harness
+  convenience) is intentionally not used here — the runner connects
+  `McpToolProvider` and loads `SkillCatalog` directly once per run and
+  reuses them (`registerInto` / `registerSkillTool`) per harness, per the
+  T3 deviation note above.
+
 ## Next step
-T4 (app runner).
+Feature complete (T1-T4). Live model smoke run with a real
+`--harness-config` is optional follow-up, not required by the acceptance
+criteria (which are satisfied by the automated tests + the no-model wiring
+check).
