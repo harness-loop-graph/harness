@@ -54,7 +54,7 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
   `Context.skills` population, adapter rendering, `load_skill`).
 
 ### T3 — Exports, harness-config loader, docs
-- Commit: (recorded below after commit)
+- Commit: f00195e — `feat(harness-config): add config loader, public exports and docs`
 - `npm run build`: pass. `npm test`: pass (adds
   `tests/harness-config.spec.ts` against `examples/harness-config.json`).
 - Exports added to `src/index.ts`: `mcp-tool-provider`, `skill-catalog`,
