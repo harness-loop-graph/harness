@@ -14,6 +14,7 @@ export * from './components/skill-catalog.js';
 
 // Harness
 export * from './harness.js';
+export * from './harness-config.js';
 
 // C2 loop
 export * from './loop/contracts.js';

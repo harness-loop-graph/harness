@@ -22,8 +22,8 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
 
 ## Tasks
 - [x] T1 — MCP tool provider (`@modelcontextprotocol/sdk` stdio client), tools namespaced `mcp__<server>__<tool>`, registered in `RegistryToolManager`; tests with a local fixture MCP server.
-- [ ] T2 — Skills: `SkillCatalog` (frontmatter `name`/`description`), `load_skill` tool, skill index in `Context` rendered by the GLM adapter; tests.
-- [ ] T3 — Public exports, harness-config loader, README/docs update.
+- [x] T2 — Skills: `SkillCatalog` (frontmatter `name`/`description`), `load_skill` tool, skill index in `Context` rendered by the GLM adapter; tests.
+- [x] T3 — Public exports, harness-config loader, README/docs update.
 - [ ] T4 — Runner: `--harness-config <path>`, one shared MCP connection per run, guardrail allowlist extended, config recorded in run metrics, clean shutdown; README.
 
 ## Acceptance criteria
@@ -47,5 +47,28 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
   either one connection per harness or a manager built before the servers
   are known.
 
+### T2 — Skills
+- Commit: d1e15a0 — `feat(skills): add SKILL.md catalog and load_skill tool`
+- `npm run build`: pass. `npm test`: 8 files / 54 tests pass (includes
+  `tests/skill-catalog.spec.ts`: frontmatter parsing, duplicate names,
+  `Context.skills` population, adapter rendering, `load_skill`).
+
+### T3 — Exports, harness-config loader, docs
+- Commit: (recorded below after commit)
+- `npm run build`: pass. `npm test`: pass (adds
+  `tests/harness-config.spec.ts` against `examples/harness-config.json`).
+- Exports added to `src/index.ts`: `mcp-tool-provider`, `skill-catalog`,
+  `harness-config`.
+- Docs: `docs/mcp-skills.md` (new), `docs/README.md` and
+  `docs/architecture.md` updated to reference it, top-level `README.md`
+  gets an "MCP tools and skills" section. Example config + skill added
+  under `glm/examples/`.
+- Deviation: `wireHarnessConfig(config, manager)` connects/loads fresh MCP
+  + skill instances rather than accepting pre-connected ones — it is a
+  convenience for the single-harness case only. A run sharing one MCP
+  connection across several harnesses (the runner, T4) uses the lower-level
+  `McpToolProvider`/`SkillCatalog` primitives directly instead of this
+  helper, since calling it per harness would reconnect per harness.
+
 ## Next step
-T2.
+T4 (app runner).

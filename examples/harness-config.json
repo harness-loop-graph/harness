@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "fixture": {
+      "command": "node",
+      "args": ["../tests/fixtures/mcp-fixture-server.mjs"],
+      "cwd": "."
+    }
+  },
+  "skillsDirs": ["./skills"]
+}

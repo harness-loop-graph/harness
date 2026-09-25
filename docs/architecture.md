@@ -163,3 +163,11 @@ These are the types every component and the harness share:
 
 All of these are exported from `src/index.ts` alongside every concrete
 component class, the `Harness`, and the C2/C3 contracts and engines.
+
+## Optional: MCP tools and skills
+
+Two optional additions sit alongside the six components without changing
+any of them: an MCP tool provider (tools sourced from external MCP
+servers) and a skill catalog (`SKILL.md` progressive disclosure). Both
+register into the same `RegistryToolManager`/`Guardrails` path as the
+built-in tools. See [`mcp-skills.md`](./mcp-skills.md).

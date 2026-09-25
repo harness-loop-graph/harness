@@ -77,6 +77,23 @@ interaction cycle (`maxToolRounds` defaults to 1). Every run returns the
 final model response, a per-turn trace, the guardrail audit log and the
 verification history.
 
+## MCP tools and skills (optional)
+
+The harness can consume tools from MCP servers and load agent skills
+(`SKILL.md`), on top of the built-in tools:
+
+- `McpToolProvider` connects to stdio MCP servers, lists their tools, and
+  registers them (namespaced `mcp__<server>__<tool>`) into a
+  `RegistryToolManager`, so every call is guardrail-checked and audited.
+- `SkillCatalog` loads `SKILL.md` files (frontmatter `name`/`description`);
+  the context manager exposes name/description only, and the `load_skill`
+  tool returns the full body on demand.
+- `loadHarnessConfig(path)` / `wireHarnessConfig(config, manager)` wire a
+  JSON config (`{ mcpServers, skillsDirs }`) into a harness.
+
+See [`docs/mcp-skills.md`](./docs/mcp-skills.md) for the full detail and
+`examples/harness-config.json` for a working example.
+
 ## Run tests
 
 ```bash

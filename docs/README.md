@@ -32,6 +32,9 @@ so the thesis writeup can cite exact implementation evidence.
 - [`decisions.md`](./decisions.md) — implementation decisions worth
   recording for the thesis: provider choice, env var naming, deterministic
   decision policy, guardrails design.
+- [`mcp-skills.md`](./mcp-skills.md) — MCP tool provider (`McpToolProvider`),
+  skill catalog + `load_skill`, and the harness-config loader that wires
+  both into C1/C2/C3 identically.
 
 Every claim in these documents is grounded in the source under `src/` and
 the behavior asserted by the tests under `tests/`.
