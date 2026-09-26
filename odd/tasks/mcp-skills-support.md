@@ -26,8 +26,8 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
 - [x] T3 — Public exports, harness-config loader, README/docs update.
 - [x] T4 — Runner: `--harness-config <path>`, one shared MCP connection per run, guardrail allowlist extended, config recorded in run metrics, clean shutdown; README.
 
-- [ ] T5 — glm review fixes: skills sorted deterministically; unreadable/invalid skill dirs fail fast (only a missing SKILL.md is skipped); `connect()` tracks/closes clients on partial failure; `wireHarnessConfig` closes what it opened on failure; tool-name collision → error; validate `args`/`env`; guardrail-deny test for MCP + `load_skill`; test cleanup in finally/afterEach; restore env in tests.
-- [ ] T6 — runner review fixes: close MCP if skills load fails; config failures recorded in run-report; `--harness-config` without value → usage error; hash and parse the same buffer; `close()` errors logged without masking the original error; unit tests for the runner's harness-config wiring.
+- [x] T5 — glm review fixes: skills sorted deterministically; unreadable/invalid skill dirs fail fast (only a missing SKILL.md is skipped); `connect()` tracks/closes clients on partial failure; `wireHarnessConfig` closes what it opened on failure; tool-name collision → error; validate `args`/`env`; guardrail-deny test for MCP + `load_skill`; test cleanup in finally/afterEach; restore env in tests.
+- [x] T6 — runner review fixes: close MCP if skills load fails; config failures recorded in run-report; `--harness-config` without value → usage error; hash and parse the same buffer; `close()` errors logged without masking the original error; unit tests for the runner's harness-config wiring.
 
 ## Acceptance criteria
 - A run with a harness config exposes MCP tools and skills to the model in C1, C2 and C3.
@@ -96,8 +96,71 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
 - app `feat/harness-config`: reliability lens, approved + acknowledged (lineage review-7c283696d9725e62). Advisory: MCP connection leak if skills load fails; no run-report on config failure; `--harness-config` without value → TypeError; config read twice for hash; close() error masks original; no runner tests. R3-003 (allowlist changed) refuted: `DEFAULT_ALLOWED_TOOLS` equals the previous three names.
 - glm `feat/mcp-skills`: reliability lens, approved + acknowledged (lineage review-eeb80d880cb37fb9). Advisory: leaks on partial connect failure (`wireHarnessConfig`, untracked client on `connect()` reject); tool-name collisions after sanitize/truncate; skill order depends on `readdir` (non-deterministic prompt across runs); bare catch skips unreadable skills; args/env unvalidated; no guardrail-deny test; test cleanup/env pollution.
 
+### T5 — glm review fixes
+- Commit: d8c7242 — `fix(mcp-skills): address review findings on ordering, leaks and collisions`
+- `npm run build`: pass. `npm test`: 8 files / 65 tests pass (was 54; +11
+  new: guardrail-deny for MCP + `load_skill`, deterministic sort order,
+  non-ENOENT skill read errors, missing skills dir, partial-connect
+  cleanup, two collision cases, args/env/cwd validation, wireHarnessConfig
+  cleanup-on-failure).
+- `SkillCatalog`: subdirectories sorted by name before loading, `list()`
+  sorted by name; a non-ENOENT `SKILL.md` read error now throws naming the
+  file instead of being silently skipped.
+- `McpToolProvider.connect()`: tracks a client as soon as `client.connect()`
+  succeeds; any later failure (a subsequent server, a name collision)
+  closes every client opened so far (and drops registrations) before
+  rethrowing — `close()` now also clears `registrations` so no stale
+  handler referencing a closed client survives.
+- `McpToolProvider.registerInto()`: throws naming both origins on a
+  tool-name collision against an already-registered tool (built-in,
+  `load_skill`, or an earlier MCP registration) instead of overriding it.
+- `wireHarnessConfig`: closes the provider if `registerInto()` or
+  `SkillCatalog.load()` fails after a successful `connect()`.
+- `harness-config.ts`: validates `mcpServers[].args` (string array),
+  `.env` (string→string record) and `.cwd` (string), naming the config
+  path and server. Extracted `parseHarnessConfig(text, configDir, path)`
+  (pure) from `loadHarnessConfig` so a caller can parse an already-read
+  buffer.
+- `docs/mcp-skills.md` updated (ordering, fail-fast, collisions, close()).
+- Deviation: none from the review findings as scoped.
+
+### T6 — runner review fixes (repo: `app`, branch `feat/harness-config`)
+- Commit: `app@1f2e8a4` — `fix(runner): address review findings on harness-config failures and cleanup`
+- `node --check runner/run-experiment.mjs`: pass.
+- `node --test runner/run-experiment.test.mjs`: 4/4 pass (new file; uses
+  glm's fixture MCP server + skill fixtures, no model calls). Covers
+  `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist
+  extended with MCP tools + `load_skill`, the MCP provider being closed
+  when `SkillCatalog.load()` fails, and that a run without
+  `--harness-config` registers exactly the pre-existing 3 built-in tools.
+- Manual `--dry-run` checks: c1/c2/c3 without `--harness-config` produce
+  byte-identical plan JSON (module differences aside) to before T6; with
+  `--harness-config` the `harnessConfig` path field is added, unchanged;
+  `--harness-config` with no value now prints a usage error (exit 1)
+  instead of a raw `TypeError`.
+- Manual end-to-end check: `--harness-config` pointing at a missing file
+  (no model call reached) still writes `run-report.json` with
+  `status: "FAILED"` and `failure: "harness-config: ..."`, and the process
+  exits non-zero (`process.exitCode = 1`).
+- `loadHarnessExtras` now reads the config file once and calls glm's new
+  `parseHarnessConfig(raw, dir, path)` directly (no second `fs.readFile`
+  via `loadHarnessConfig`); closes the MCP provider if `SkillCatalog.load()`
+  throws after `connect()` succeeded.
+- `main()` moved the harness-config load inside the run's try/catch; a
+  `finally` `close()` failure is caught, logged, and recorded under a new
+  `closeError` report field without replacing `report.failure`.
+- Added an entrypoint guard (`main()` only auto-runs when the file is
+  executed directly) and exported the wiring functions used by the new
+  tests; `buildHarness` additionally returns `tools`/`guardrails`/
+  `availTools` for inspection. No CLI behavior change.
+- `app/runner/README.md` updated: config-failure behavior, `closeError`,
+  and the `node --test` command.
+- Deviation: none from the review findings as scoped.
+
 ## Next step
-T5, then T6 (accepted review follow-ups, user-authorized 2026-09-25).
+Feature complete (T1-T6). Live model smoke run with a real
+`--harness-config` remains optional follow-up, not required by the
+acceptance criteria.
 
 ### Previous next step
 Feature complete (T1-T4). Live model smoke run with a real
