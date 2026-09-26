@@ -17,6 +17,7 @@ import { RecordingVerificationManager } from './components/verification-manager.
 async function main(): Promise<void> {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-graph-smoke-'));
   const sessionId = randomUUID();
+  const models: GlmModelAdapter[] = [];
 
   const createLoop: LoopFactory = (node: GraphNode) => {
     const execution = new LocalExecutionManager({ workspaceRoot: workspace, timeoutMs: 30_000 });
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
     // Same provider session across nodes: one conversation per graph run
     // keeps provider-side prompt caching effective.
     const model = new GlmModelAdapter({ sessionId });
+    models.push(model);
 
     const harness = new Harness(
       { context: new FsContextManager(), model, tools, execution, verification, guardrails },
@@ -59,14 +61,22 @@ async function main(): Promise<void> {
         id: 'architect',
         role: 'architect',
         task: 'Create spec.txt containing one line: "artifact: app.txt must contain the text graph alive"',
-        verification: { command: 'grep -q "graph alive" spec.txt' },
+        verification: {
+          command:
+              `node -e "const fs=require('fs'); ` +
+              `process.exit(fs.readFileSync('spec.txt','utf8').includes('graph alive') ? 0 : 1)"`,
+        },
         maxTurns: 2,
       },
       {
         id: 'builder',
         role: 'backend',
         task: 'Read spec.txt and create app.txt exactly as the spec requires.',
-        verification: { command: 'grep -q "graph alive" app.txt' },
+        verification: {
+          command:
+              `node -e "const fs=require('fs'); ` +
+              `process.exit(fs.readFileSync('app.txt','utf8').includes('graph alive') ? 0 : 1)"`,
+        },
         maxTurns: 3,
       },
     ],
@@ -90,6 +100,39 @@ async function main(): Promise<void> {
   console.log(`\nStatus: ${result.status} after ${result.steps} step(s), ${result.totalLoopTurns} loop turn(s)`);
   console.log(`Decision: ${result.decision.action} — ${result.decision.reason}`);
   if (result.failure) console.log(`Failure: ${result.failure}`);
+
+  const totalUsage = models.reduce(
+      (total, model) => {const usage = model.getUsage();
+        total.calls += usage.calls;
+        total.promptTokens += usage.promptTokens;
+        total.completionTokens += usage.completionTokens;
+        total.cost += usage.cost;
+        for (const modelName of usage.modelsUsed) {
+          total.modelsUsed.add(modelName);
+        }
+        return total;
+      },
+      {
+        calls: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cost: 0,
+        modelsUsed: new Set<string>(),
+      },
+  );
+  console.log('\n--- Usage ---');
+  console.log(`Calls: ${totalUsage.calls}`);
+  console.log(`Prompt tokens: ${totalUsage.promptTokens}`);
+  console.log(`Completion tokens: ${totalUsage.completionTokens}`);
+  console.log(
+      `Total tokens: ${totalUsage.promptTokens + totalUsage.completionTokens}`,
+  );
+  console.log(`Cost: $${totalUsage.cost.toFixed(6)}`);
+
+  console.log('\n--- Models used ---');
+  for (const model of totalUsage.modelsUsed) {
+    console.log(`- ${model}`);
+  }
 
   if (result.status !== 'SUCCESS') process.exitCode = 1;
 }

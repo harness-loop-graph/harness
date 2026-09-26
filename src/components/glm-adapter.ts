@@ -40,6 +40,8 @@ interface ChatMessage {
 }
 
 interface ChatCompletionResponse {
+  model?: string;
+  provider?: string;
   choices?: Array<{
     finish_reason?: string;
     message?: {
@@ -53,7 +55,12 @@ interface ChatCompletionResponse {
     };
   }>;
   error?: { code?: string | number; message?: string };
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cost?: number;
+  };
 }
 
 /**
@@ -71,7 +78,9 @@ export class GlmModelAdapter implements ModelAdapter {
   private readonly userAgent: string;
   private promptTokens = 0;
   private completionTokens = 0;
+  private cost = 0;
   private calls = 0;
+  private modelsUsed = new Set<string>();
 
   constructor(config: GlmAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.MODEL_API_KEY ?? '';
@@ -135,17 +144,22 @@ export class GlmModelAdapter implements ModelAdapter {
       return { type: 'error', code: 'invalid_json', message: 'The endpoint returned non-JSON content' };
     }
 
+    if (payload.model) {
+      this.modelsUsed.add(payload.model);
+    }
+
+    if (payload.usage) {
+      this.promptTokens += payload.usage.prompt_tokens ?? 0;
+      this.completionTokens += payload.usage.completion_tokens ?? 0;
+      this.cost += payload.usage.cost ?? 0;
+    }
+
     if (payload.error) {
       return {
         type: 'error',
         code: String(payload.error.code ?? 'api_error'),
         message: payload.error.message ?? 'Unknown API error',
       };
-    }
-
-    if (payload.usage) {
-      this.promptTokens += payload.usage.prompt_tokens ?? 0;
-      this.completionTokens += payload.usage.completion_tokens ?? 0;
     }
 
     const message = payload.choices?.[0]?.message;
@@ -232,12 +246,21 @@ export class GlmModelAdapter implements ModelAdapter {
     return messages;
   }
 
-  getUsage(): { promptTokens: number; completionTokens: number; totalTokens: number; calls: number } {
+  getUsage(): {
+    modelsUsed: string[];
+    cost: number;
+    calls: number;
+    promptTokens: number;
+    totalTokens: number;
+    completionTokens: number
+  } {
     return {
       promptTokens: this.promptTokens,
       completionTokens: this.completionTokens,
       totalTokens: this.promptTokens + this.completionTokens,
       calls: this.calls,
+      cost: this.cost,
+      modelsUsed: [...this.modelsUsed],
     };
   }
 

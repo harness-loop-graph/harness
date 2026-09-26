@@ -53,13 +53,17 @@ async function main(): Promise<void> {
 
   console.log(`Workspace: ${workspace}`);
   console.log('Task: create loop.txt containing exactly "loop alive".');
-  console.log('Verification (hidden from the model): grep -q "loop alive" loop.txt\n');
+  console.log('Verification (hidden from the model): Node checks loop.txt content\n');
 
   const result = await loop.run({
     task: 'Create a file named loop.txt containing exactly the text "loop alive".',
     maxTurns: 3,
     toolRoundsPerTurn: 6,
-    verification: { command: 'grep -q "loop alive" loop.txt' },
+    verification: {
+      command:
+          `node -e "const fs=require('fs'); ` +
+          `process.exit(fs.readFileSync('loop.txt','utf8') === 'loop alive' ? 0 : 1)"`,
+    },
   });
 
   console.log('--- Loop trace ---');
@@ -78,6 +82,13 @@ async function main(): Promise<void> {
 
   console.log(`\nStatus: ${result.status} after ${result.turns} turn(s)`);
   console.log(`Decision: ${result.decision.action} — ${result.decision.reason}`);
+  const usage = model.getUsage();
+  console.log('\n--- Usage ---');
+  console.log(`Calls: ${usage.calls}`);
+  console.log(`Prompt tokens: ${usage.promptTokens}`);
+  console.log(`Completion tokens: ${usage.completionTokens}`);
+  console.log(`Total tokens: ${usage.totalTokens}`);
+
   if (result.failure) console.log(`Failure: ${result.failure}`);
 
   if (result.status !== 'SUCCESS') process.exitCode = 1;

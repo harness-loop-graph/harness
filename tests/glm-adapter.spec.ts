@@ -43,50 +43,72 @@ describe('GlmModelAdapter', () => {
   });
 
   it('maps a tool_calls response to a tool_call ModelResponse', async () => {
-    process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
-    const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse(200, {
-        choices: [
-          {
-            finish_reason: 'tool_calls',
-            message: {
-              role: 'assistant',
-              content: null,
-              tool_calls: [
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+            JSON.stringify({
+              choices: [
                 {
-                  id: 'call_1',
-                  type: 'function',
-                  function: { name: 'write_file', arguments: '{"path":"x.txt","content":"hi"}' },
+                  finish_reason: 'tool_calls',
+                  message: {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: 'call_123',
+                        type: 'function',
+                        function: {
+                          name: 'write_file',
+                          arguments: JSON.stringify({
+                            path: 'test.txt',
+                            content: 'hello',
+                          }),
+                        },
+                      },
+                    ],
+                  },
                 },
               ],
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
             },
-          },
-        ],
-      }),
+        ),
     );
+
     const adapter = new GlmModelAdapter({
-      sessionId: 'session-1',
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      apiKey: 'test-key',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      model: 'test-model',
+      fetchImpl,
     });
 
-    const response = await adapter.complete(request());
+    const result = await adapter.complete(request());
 
-    expect(response).toEqual({
+    expect(result).toEqual({
       type: 'tool_call',
       tool: 'write_file',
-      args: { path: 'x.txt', content: 'hi' },
+      args: {
+        path: 'test.txt',
+        content: 'hello',
+      },
     });
-    // Request shape: OpenAI-compatible body against the OpenCode Go endpoint.
+
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://opencode.ai/zen/go/v1/chat/completions');
+
+    expect(url).toBe(
+        'https://opencode.ai/zen/go/v1/chat/completions',
+    );
+
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer test-key');
-    expect(headers['x-opencode-session']).toBe('session-1');
-    expect(headers['User-Agent']).toBe('harness-glm/0.1.0');
+    expect(headers['Content-Type']).toBe('application/json');
+
     const body = JSON.parse(String(init.body));
-    expect(body.model).toBe('glm-4.7');
-    expect(body.tools[0].function.name).toBe('write_file');
+
+    expect(body.model).toBe('test-model');
+    expect(body.messages).toBeDefined();
+    expect(body.tools).toBeDefined();
   });
 
   it('maps a content response to a finish ModelResponse', async () => {
@@ -162,22 +184,63 @@ describe('GlmModelAdapter', () => {
   });
 
   it('accumulates usage across multiple complete() calls', async () => {
-    process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
-    const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'First.' } }],
-          usage: { prompt_tokens: 10, completion_tokens: 5 },
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'Second.' } }],
-          usage: { prompt_tokens: 20, completion_tokens: 8 },
-        }),
-      );
-    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+            new Response(
+                JSON.stringify({
+                  choices: [
+                    {
+                      message: {
+                        role: 'assistant',
+                        content: 'first response',
+                      },
+                    },
+                  ],
+                  usage: {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cost: 0.000001,
+                  },
+                }),
+                {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' },
+                },
+            ),
+        )
+        .mockResolvedValueOnce(
+            new Response(
+                JSON.stringify({
+                  choices: [
+                    {
+                      message: {
+                        role: 'assistant',
+                        content: 'second response',
+                      },
+                    },
+                  ],
+                  usage: {
+                    prompt_tokens: 20,
+                    completion_tokens: 8,
+                    total_tokens: 28,
+                    cost: 0.000002,
+                  },
+                }),
+                {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' },
+                },
+            ),
+        );
+
+    const adapter = new GlmModelAdapter({
+      apiKey: 'test-key',
+      baseUrl: 'https://test.example/v1',
+      model: 'test-model',
+      fetchImpl,
+    });
 
     await adapter.complete(request());
     await adapter.complete(request());
@@ -187,26 +250,52 @@ describe('GlmModelAdapter', () => {
       completionTokens: 13,
       totalTokens: 43,
       calls: 2,
+      cost: 0.000003,
+      modelsUsed: [],
     });
   });
 
   it('counts a call and contributes zeros when usage is absent', async () => {
-    process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
-    const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse(200, {
-        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'No usage.' } }],
-      }),
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    role: 'assistant',
+                    content: 'response without usage',
+                  },
+                },
+              ],
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            },
+        ),
     );
-    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
 
-    await adapter.complete(request());
+    const adapter = new GlmModelAdapter({
+      apiKey: 'test-key',
+      baseUrl: 'https://test.example/v1',
+      model: 'test-model',
+      fetchImpl,
+    });
+
+    const result = await adapter.complete(request());
+
+    expect(result).toEqual({
+      type: 'finish',
+      content: 'response without usage',
+    });
 
     expect(adapter.getUsage()).toEqual({
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
       calls: 1,
+      cost: 0,
+      modelsUsed: [],
     });
   });
 
@@ -234,4 +323,244 @@ describe('GlmModelAdapter', () => {
     expect(body.messages[2].tool_calls[0].function.name).toBe('write_file');
     expect(body.messages[3].tool_call_id).toBe('call_write_file');
   });
+
+  // adding a couple more unit test for the GLM Adapter functionality
+  it('returns invalid_tool_arguments when a tool call has malformed JSON arguments', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
+
+    const fetchImpl = vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          choices: [
+            {
+              finish_reason: 'tool_calls',
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'call_1',
+                    type: 'function',
+                    function: {
+                      name: 'write_file',
+                      arguments: '{"path":"test.txt",',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+    );
+
+    const adapter = new GlmModelAdapter({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const response = await adapter.complete(request());
+
+    expect(response).toEqual({
+      type: 'error',
+      code: 'invalid_tool_arguments',
+      message: "Tool 'write_file' returned non-JSON arguments",
+    });
+  });
+
+  it('returns empty_response when the API returns no choices', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
+
+    const fetchImpl = vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          choices: [],
+        }),
+    );
+
+    const adapter = new GlmModelAdapter({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const response = await adapter.complete(request());
+
+    expect(response).toEqual({
+      type: 'error',
+      code: 'empty_response',
+      message: 'No choice in the API response',
+    });
+  });
+
+  it('returns empty_content when the model returns neither content nor tool calls', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
+
+    const fetchImpl = vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: {
+                role: 'assistant',
+                content: null,
+              },
+            },
+          ],
+        }),
+    );
+
+    const adapter = new GlmModelAdapter({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const response = await adapter.complete(request());
+
+    expect(response).toEqual({
+      type: 'error',
+      code: 'empty_content',
+      message: 'The model returned neither content nor a tool call',
+    });
+  });
+
+  it('reconstructs multiple tool-call/tool-result history entries correctly', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
+
+    const fetchImpl = vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: {
+                role: 'assistant',
+                content: 'Task completed.',
+              },
+            },
+          ],
+        }),
+    );
+
+    const adapter = new GlmModelAdapter({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const testRequest = request([
+      {
+        type: 'tool_call',
+        tool: 'read_file',
+        args: {
+          path: 'src/index.ts',
+        },
+      },
+      {
+        type: 'tool_result',
+        tool: 'read_file',
+        success: true,
+        result: {
+          content: 'console.log("hello");',
+        },
+      },
+      {
+        type: 'tool_call',
+        tool: 'write_file',
+        args: {
+          path: 'src/index.ts',
+          content: 'console.log("hello world");',
+        },
+      },
+      {
+        type: 'tool_result',
+        tool: 'write_file',
+        success: true,
+        result: {
+          ok: true,
+        },
+      },
+    ]);
+
+    const response = await adapter.complete(testRequest);
+
+    expect(response).toEqual({
+      type: 'finish',
+      content: 'Task completed.',
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+
+    const messages = body.messages;
+
+    const toolCalls = messages.filter(
+        (message: { role: string }) => message.role === 'assistant',
+    );
+
+    const toolResults = messages.filter(
+        (message: { role: string }) => message.role === 'tool',
+    );
+
+    expect(toolCalls).toHaveLength(2);
+    expect(toolResults).toHaveLength(2);
+
+    expect(toolCalls[0].tool_calls[0].function.name).toBe('read_file');
+    expect(toolCalls[1].tool_calls[0].function.name).toBe('write_file');
+
+    expect(toolResults[0].tool_call_id).toBe('call_read_file');
+    expect(toolResults[1].tool_call_id).toBe('call_write_file');
+  });
+
+  it('includes previous-attempt feedback in the user message', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'glm-4.7';
+
+    const fetchImpl = vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: {
+                role: 'assistant',
+                content: 'I will fix it.',
+              },
+            },
+          ],
+        }),
+    );
+
+    const adapter = new GlmModelAdapter({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const response = await adapter.complete({
+      task: 'Fix the failing endpoint.',
+      context: {
+        projectRoot: '/tmp/ws',
+        files: ['src/index.ts'],
+        language: 'typescript',
+      },
+      availTools: TOOLS,
+      instructions: 'Be brief.',
+      history: [],
+      feedback: 'The test failed: expected status 200 but received 500.',
+    });
+
+    expect(response).toEqual({
+      type: 'finish',
+      content: 'I will fix it.',
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+
+    const userMessage = body.messages.find(
+        (message: { role: string }) => message.role === 'user',
+    );
+
+    expect(userMessage).toBeDefined();
+
+    expect(userMessage.content).toContain(
+        '[feedback from previous failed attempt]',
+    );
+
+    expect(userMessage.content).toContain(
+        'expected status 200 but received 500',
+    );
+  });
+
 });

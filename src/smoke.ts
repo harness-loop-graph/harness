@@ -73,6 +73,17 @@ async function main(): Promise<void> {
   console.log('\n--- Final response ---');
   console.log(JSON.stringify(result.finalResponse, null, 2));
   console.log(`\nAudit decisions: ${result.audit.map((a) => a.decision).join(', ') || '(none)'}`);
+  const usage = model.getUsage();
+  console.log('\n--- Usage ---');
+  console.log(`Calls: ${usage.calls}`);
+  console.log(`Prompt tokens: ${usage.promptTokens}`);
+  console.log(`Completion tokens: ${usage.completionTokens}`);
+  console.log(`Total tokens: ${usage.totalTokens}`);
+  console.log(`Cost: $${usage.cost.toFixed(6)}`);
+  console.log('\n--- Models used ---');
+  for (const model of usage.modelsUsed) {
+    console.log(`- ${model}`);
+  }
 
   const smokePath = path.join(workspace, 'smoke.txt');
   const content = await fs.readFile(smokePath, 'utf8').catch(() => null);
