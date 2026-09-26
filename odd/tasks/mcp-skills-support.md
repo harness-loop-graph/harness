@@ -26,6 +26,9 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
 - [x] T3 — Public exports, harness-config loader, README/docs update.
 - [x] T4 — Runner: `--harness-config <path>`, one shared MCP connection per run, guardrail allowlist extended, config recorded in run metrics, clean shutdown; README.
 
+- [ ] T5 — glm review fixes: skills sorted deterministically; unreadable/invalid skill dirs fail fast (only a missing SKILL.md is skipped); `connect()` tracks/closes clients on partial failure; `wireHarnessConfig` closes what it opened on failure; tool-name collision → error; validate `args`/`env`; guardrail-deny test for MCP + `load_skill`; test cleanup in finally/afterEach; restore env in tests.
+- [ ] T6 — runner review fixes: close MCP if skills load fails; config failures recorded in run-report; `--harness-config` without value → usage error; hash and parse the same buffer; `close()` errors logged without masking the original error; unit tests for the runner's harness-config wiring.
+
 ## Acceptance criteria
 - A run with a harness config exposes MCP tools and skills to the model in C1, C2 and C3.
 - Guardrails deny unlisted tools; MCP calls appear in the audit log.
@@ -94,6 +97,9 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
 - glm `feat/mcp-skills`: reliability lens, approved + acknowledged (lineage review-eeb80d880cb37fb9). Advisory: leaks on partial connect failure (`wireHarnessConfig`, untracked client on `connect()` reject); tool-name collisions after sanitize/truncate; skill order depends on `readdir` (non-deterministic prompt across runs); bare catch skips unreadable skills; args/env unvalidated; no guardrail-deny test; test cleanup/env pollution.
 
 ## Next step
+T5, then T6 (accepted review follow-ups, user-authorized 2026-09-25).
+
+### Previous next step
 Feature complete (T1-T4). Live model smoke run with a real
 `--harness-config` is optional follow-up, not required by the acceptance
 criteria (which are satisfied by the automated tests + the no-model wiring
