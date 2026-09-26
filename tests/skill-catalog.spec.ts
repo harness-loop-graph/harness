@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -68,6 +68,31 @@ describe('SkillCatalog', () => {
 
     await expect(SkillCatalog.load([path.join(workspace, 'a'), path.join(workspace, 'b')])).rejects.toThrow(/Duplicate skill name 'dup'/);
   });
+
+  it('errors naming the config when the configured skills directory itself is missing', async () => {
+    const missing = path.join(workspace, 'does-not-exist');
+    await expect(SkillCatalog.load([missing])).rejects.toThrow(/Cannot read skills directory/);
+  });
+
+  it('propagates a non-ENOENT read error (e.g. SKILL.md is itself a directory) naming the file', async () => {
+    const dir = path.join(workspace, 'weird-skill');
+    // A directory named SKILL.md makes fs.readFile fail with EISDIR, not ENOENT:
+    // this must fail fast rather than being silently skipped as "not a skill".
+    await fs.mkdir(path.join(dir, 'SKILL.md'), { recursive: true });
+
+    await expect(SkillCatalog.load([workspace])).rejects.toThrow(path.join(dir, 'SKILL.md'));
+  });
+
+  it('lists skills sorted by name regardless of on-disk order', async () => {
+    for (const name of ['charlie', 'alpha', 'bravo']) {
+      const dir = path.join(workspace, name);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${name} skill\n---\nBody\n`);
+    }
+
+    const catalog = await SkillCatalog.load([workspace]);
+    expect(catalog.list().map((s) => s.name)).toEqual(['alpha', 'bravo', 'charlie']);
+  });
 });
 
 describe('Context rendering with skills', () => {
@@ -79,6 +104,7 @@ describe('Context rendering with skills', () => {
 
   afterEach(async () => {
     await fs.rm(workspace, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   it('FsContextManager populates Context.skills from the catalog', async () => {
@@ -97,8 +123,8 @@ describe('Context rendering with skills', () => {
   });
 
   it('the GLM adapter renders an Available skills section only when skills exist', async () => {
-    process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'test-model';
+    vi.stubEnv('MODEL_API_KEY', 'test-key');
+    vi.stubEnv('MODEL_ID', 'test-model');
     let capturedBody: any;
     const fetchImpl = (async (_url: string, init: RequestInit) => {
       capturedBody = JSON.parse(init.body as string);

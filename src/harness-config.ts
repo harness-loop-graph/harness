@@ -18,21 +18,12 @@ export interface HarnessConfig {
 }
 
 /**
- * Loads `{ mcpServers, skillsDirs }` from a JSON file. Relative paths
- * (skillsDirs, and each server's cwd) are resolved against the config
- * file's directory, so a config is portable regardless of the caller's cwd.
+ * Parses and validates already-read harness config text. Split out from
+ * `loadHarnessConfig` so a caller that needs the raw bytes for something
+ * else (e.g. hashing) can read the file once and reuse the same buffer for
+ * both, instead of reading it twice.
  */
-export async function loadHarnessConfig(configPath: string): Promise<HarnessConfig> {
-  const resolvedPath = path.resolve(configPath);
-  const configDir = path.dirname(resolvedPath);
-
-  let text: string;
-  try {
-    text = await fs.readFile(resolvedPath, 'utf8');
-  } catch (err) {
-    throw new Error(`Cannot read harness config '${resolvedPath}': ${err instanceof Error ? err.message : String(err)}`);
-  }
-
+export function parseHarnessConfig(text: string, configDir: string, resolvedPath: string): HarnessConfig {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -54,6 +45,22 @@ export async function loadHarnessConfig(configPath: string): Promise<HarnessConf
       if (typeof server !== 'object' || server === null || typeof server.command !== 'string' || server.command === '') {
         throw new Error(`Harness config '${resolvedPath}': mcpServers.${name} must have a non-empty 'command' string`);
       }
+      if (server.args !== undefined && (!Array.isArray(server.args) || server.args.some((a) => typeof a !== 'string'))) {
+        throw new Error(`Harness config '${resolvedPath}': mcpServers.${name}.args must be an array of strings`);
+      }
+      if (server.env !== undefined) {
+        const validEnv =
+          typeof server.env === 'object' &&
+          server.env !== null &&
+          !Array.isArray(server.env) &&
+          Object.values(server.env).every((v) => typeof v === 'string');
+        if (!validEnv) {
+          throw new Error(`Harness config '${resolvedPath}': mcpServers.${name}.env must be an object of string values`);
+        }
+      }
+      if (server.cwd !== undefined && typeof server.cwd !== 'string') {
+        throw new Error(`Harness config '${resolvedPath}': mcpServers.${name}.cwd must be a string`);
+      }
       mcpServers[name] = {
         command: server.command,
         args: server.args,
@@ -72,6 +79,25 @@ export async function loadHarnessConfig(configPath: string): Promise<HarnessConf
   }
 
   return { path: resolvedPath, mcpServers, skillsDirs };
+}
+
+/**
+ * Loads `{ mcpServers, skillsDirs }` from a JSON file. Relative paths
+ * (skillsDirs, and each server's cwd) are resolved against the config
+ * file's directory, so a config is portable regardless of the caller's cwd.
+ */
+export async function loadHarnessConfig(configPath: string): Promise<HarnessConfig> {
+  const resolvedPath = path.resolve(configPath);
+  const configDir = path.dirname(resolvedPath);
+
+  let text: string;
+  try {
+    text = await fs.readFile(resolvedPath, 'utf8');
+  } catch (err) {
+    throw new Error(`Cannot read harness config '${resolvedPath}': ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return parseHarnessConfig(text, configDir, resolvedPath);
 }
 
 export interface WiredHarnessConfig {
@@ -93,22 +119,32 @@ export interface WiredHarnessConfig {
  */
 export async function wireHarnessConfig(config: HarnessConfig, manager: RegistryToolManager): Promise<WiredHarnessConfig> {
   const provider = new McpToolProvider({ mcpServers: config.mcpServers });
+  // connect() already closes everything it opened if it fails partway
+  // through (see McpToolProvider); a failure here needs no extra cleanup.
   const mcpSpecs = await provider.connect();
-  provider.registerInto(manager);
 
-  let catalog: SkillCatalog | undefined;
-  const specs = [...mcpSpecs];
-  if (config.skillsDirs.length > 0) {
-    catalog = await SkillCatalog.load(config.skillsDirs);
-    if (catalog.list().length > 0) {
-      specs.push(registerSkillTool(manager, catalog));
+  try {
+    provider.registerInto(manager);
+
+    let catalog: SkillCatalog | undefined;
+    const specs = [...mcpSpecs];
+    if (config.skillsDirs.length > 0) {
+      catalog = await SkillCatalog.load(config.skillsDirs);
+      if (catalog.list().length > 0) {
+        specs.push(registerSkillTool(manager, catalog));
+      }
     }
-  }
 
-  return {
-    specs,
-    catalog,
-    allowedToolNames: specs.map((s) => s.name),
-    close: () => provider.close(),
-  };
+    return {
+      specs,
+      catalog,
+      allowedToolNames: specs.map((s) => s.name),
+      close: () => provider.close(),
+    };
+  } catch (err) {
+    // registerInto() or SkillCatalog.load() failed after a successful
+    // connect(): the provider is otherwise never returned, so close it here.
+    await provider.close();
+    throw err;
+  }
 }

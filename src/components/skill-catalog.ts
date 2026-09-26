@@ -39,14 +39,24 @@ export class SkillCatalog {
     } catch (err) {
       throw new Error(`Cannot read skills directory '${dir}': ${err instanceof Error ? err.message : String(err)}`);
     }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const skillFile = path.join(dir, entry.name, 'SKILL.md');
+    // Sort subdirectory names so loading order (and therefore duplicate-name
+    // error messages) is stable regardless of the OS's readdir order.
+    const subdirNames = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b));
+
+    for (const subdir of subdirNames) {
+      const skillFile = path.join(dir, subdir, 'SKILL.md');
       let raw: string;
       try {
         raw = await fs.readFile(skillFile, 'utf8');
-      } catch {
-        continue; // not every subdirectory is a skill
+      } catch (err) {
+        // Only a missing SKILL.md means "not a skill directory"; any other
+        // read failure (permissions, a SKILL.md that is itself a directory,
+        // etc.) is a real problem and must fail fast, naming the file.
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+        throw new Error(`Cannot read '${skillFile}': ${err instanceof Error ? err.message : String(err)}`);
       }
       const { name, description, body } = parseSkillMd(raw, skillFile);
       if (this.entries.has(name)) {
@@ -56,8 +66,11 @@ export class SkillCatalog {
     }
   }
 
+  /** Sorted by name so `list()` and the "Available skills" prompt are stable across runs. */
   list(): SkillMeta[] {
-    return [...this.entries.values()].map(({ name, description }) => ({ name, description }));
+    return [...this.entries.values()]
+      .map(({ name, description }) => ({ name, description }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   get(name: string): SkillEntry | undefined {

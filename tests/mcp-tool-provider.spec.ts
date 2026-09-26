@@ -83,4 +83,48 @@ describe('McpToolProvider', () => {
     });
     await expect(provider.connect()).rejects.toThrow(/Failed to connect to MCP server 'broken'/);
   });
+
+  it('closes the already-connected server when a later one fails to connect (no leaked client)', async () => {
+    provider = new McpToolProvider({
+      mcpServers: {
+        fixture: { command: 'node', args: [FIXTURE_SERVER] },
+        broken: { command: '/nonexistent-binary-xyz' },
+      },
+    });
+
+    await expect(provider.connect()).rejects.toThrow(/Failed to connect to MCP server 'broken'/);
+
+    // Internal state must be leak-free: nothing left tracked to close later.
+    expect((provider as unknown as { clients: Map<string, unknown> }).clients.size).toBe(0);
+    expect((provider as unknown as { registrations: unknown[] }).registrations.length).toBe(0);
+  });
+
+  it('throws a clear collision error when two servers sanitize to the same tool name, and closes both', async () => {
+    provider = new McpToolProvider({
+      mcpServers: {
+        // '.' sanitizes to '_', so both server names collapse to the same
+        // 'fx_1' segment and therefore the same 'mcp__fx_1__echo' tool name.
+        'fx.1': { command: 'node', args: [FIXTURE_SERVER] },
+        'fx_1': { command: 'node', args: [FIXTURE_SERVER] },
+      },
+    });
+
+    await expect(provider.connect()).rejects.toThrow(/Tool name collision on 'mcp__fx_1__echo'/);
+    expect((provider as unknown as { clients: Map<string, unknown> }).clients.size).toBe(0);
+  });
+
+  it('registerInto throws a clear collision error against an already-registered tool, naming both origins', async () => {
+    provider = buildProvider();
+    await provider.connect();
+    const manager = new RegistryToolManager(new StubGuardrails());
+    manager.register({
+      name: 'mcp__fixture__echo',
+      description: 'A pre-existing tool with the same name',
+      inputSchema: { type: 'object', properties: {} },
+    });
+
+    expect(() => provider!.registerInto(manager)).toThrow(
+      /Tool name collision on 'mcp__fixture__echo': MCP tool 'echo' from server 'fixture' collides with the already-registered tool 'mcp__fixture__echo' \(A pre-existing tool with the same name\)/,
+    );
+  });
 });

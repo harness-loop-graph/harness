@@ -27,66 +27,111 @@ const MAX_TOOL_NAME_LENGTH = 64;
  * A server that fails to connect throws immediately: a silently missing
  * server would corrupt an experiment run.
  */
+interface Registration {
+  spec: ToolSpec;
+  handler: ToolHandler;
+  /** Human-readable source, used in collision error messages. */
+  origin: string;
+}
+
 export class McpToolProvider {
   private readonly clients = new Map<string, Client>();
-  private readonly registrations: Array<{ spec: ToolSpec; handler: ToolHandler }> = [];
+  private readonly registrations: Registration[] = [];
 
   constructor(private readonly options: McpToolProviderOptions) {}
 
-  /** Connects to every configured server and lists its tools. Returns the resulting specs. */
+  /**
+   * Connects to every configured server and lists its tools. Returns the
+   * resulting specs. On any failure partway through (a server that fails to
+   * connect, or a tool-name collision), every client opened so far is closed
+   * before the error is rethrown — a partial connect() never leaks processes.
+   */
   async connect(): Promise<ToolSpec[]> {
-    for (const [serverName, config] of Object.entries(this.options.mcpServers)) {
-      const client = new Client({ name: `harness-mcp-${serverName}`, version: '0.1.0' }, { capabilities: {} });
-      const transport = new StdioClientTransport({
-        command: config.command,
-        args: config.args,
-        env: config.env,
-        cwd: config.cwd,
-      });
+    try {
+      for (const [serverName, config] of Object.entries(this.options.mcpServers)) {
+        const client = new Client({ name: `harness-mcp-${serverName}`, version: '0.1.0' }, { capabilities: {} });
+        const transport = new StdioClientTransport({
+          command: config.command,
+          args: config.args,
+          env: config.env,
+          cwd: config.cwd,
+        });
 
-      try {
-        await client.connect(transport);
-      } catch (err) {
-        throw new Error(
-          `Failed to connect to MCP server '${serverName}': ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      this.clients.set(serverName, client);
+        try {
+          await client.connect(transport);
+        } catch (err) {
+          throw new Error(
+            `Failed to connect to MCP server '${serverName}': ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        // Track the client as soon as connect() succeeds, so a later failure
+        // (listTools, a collision) still reaches it in close().
+        this.clients.set(serverName, client);
 
-      const { tools } = await client.listTools();
-      for (const tool of tools) {
-        const spec: ToolSpec = {
-          name: sanitizeToolName(serverName, tool.name),
-          description: tool.description ?? `MCP tool '${tool.name}' from server '${serverName}'`,
-          inputSchema: tool.inputSchema as Record<string, unknown>,
-        };
-        const handler: ToolHandler = async (args) => {
-          const result = await client.callTool({ name: tool.name, arguments: args });
-          if ('isError' in result && result.isError) {
-            throw new Error(extractText(result.content) || `MCP tool '${tool.name}' returned an error`);
+        const { tools } = await client.listTools();
+        for (const tool of tools) {
+          const name = sanitizeToolName(serverName, tool.name);
+          const origin = `MCP tool '${tool.name}' from server '${serverName}'`;
+          const collision = this.registrations.find((r) => r.spec.name === name);
+          if (collision) {
+            throw new Error(`Tool name collision on '${name}': ${origin} collides with ${collision.origin}`);
           }
-          return 'content' in result ? extractText(result.content) : result;
-        };
-        this.registrations.push({ spec, handler });
+          const spec: ToolSpec = {
+            name,
+            description: tool.description ?? `MCP tool '${tool.name}' from server '${serverName}'`,
+            inputSchema: tool.inputSchema as Record<string, unknown>,
+          };
+          const handler: ToolHandler = async (args) => {
+            const result = await client.callTool({ name: tool.name, arguments: args });
+            if ('isError' in result && result.isError) {
+              throw new Error(extractText(result.content) || `MCP tool '${tool.name}' returned an error`);
+            }
+            return 'content' in result ? extractText(result.content) : result;
+          };
+          this.registrations.push({ spec, handler, origin });
+        }
       }
+    } catch (err) {
+      await this.close();
+      throw err;
     }
     return this.registrations.map((r) => r.spec);
   }
 
-  /** Registers every discovered MCP tool into the given manager. Call once per harness. */
+  /**
+   * Registers every discovered MCP tool into the given manager. Call once
+   * per harness. Throws on a name collision with a tool already registered
+   * in `manager` (a built-in, `load_skill`, or another MCP tool registered
+   * earlier) instead of silently overriding it.
+   */
   registerInto(manager: RegistryToolManager): ToolSpec[] {
+    const existing = manager.getSpecs();
+    for (const { spec, origin } of this.registrations) {
+      const collision = existing.find((s) => s.name === spec.name);
+      if (collision) {
+        throw new Error(
+          `Tool name collision on '${spec.name}': ${origin} collides with the already-registered tool ` +
+            `'${collision.name}' (${collision.description})`,
+        );
+      }
+    }
     for (const { spec, handler } of this.registrations) {
       manager.register(spec, handler);
     }
     return this.registrations.map((r) => r.spec);
   }
 
-  /** Closes every open server connection. Safe to call even if connect() partially failed. */
+  /**
+   * Closes every open server connection. Safe to call even if connect()
+   * partially failed. Also drops any discovered registrations, since their
+   * handlers call clients that are no longer open.
+   */
   async close(): Promise<void> {
     for (const client of this.clients.values()) {
       await client.close().catch(() => undefined);
     }
     this.clients.clear();
+    this.registrations.length = 0;
   }
 }
 
