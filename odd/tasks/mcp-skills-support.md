@@ -89,6 +89,10 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
   reuses them (`registerInto` / `registerSkillTool`) per harness, per the
   T3 deviation note above.
 
+### Native review (RDD on, both medium)
+- app `feat/harness-config`: reliability lens, approved + acknowledged (lineage review-7c283696d9725e62). Advisory: MCP connection leak if skills load fails; no run-report on config failure; `--harness-config` without value → TypeError; config read twice for hash; close() error masks original; no runner tests. R3-003 (allowlist changed) refuted: `DEFAULT_ALLOWED_TOOLS` equals the previous three names.
+- glm `feat/mcp-skills`: reliability lens, approved + acknowledged (lineage review-eeb80d880cb37fb9). Advisory: leaks on partial connect failure (`wireHarnessConfig`, untracked client on `connect()` reject); tool-name collisions after sanitize/truncate; skill order depends on `readdir` (non-deterministic prompt across runs); bare catch skips unreadable skills; args/env unvalidated; no guardrail-deny test; test cleanup/env pollution.
+
 ## Next step
 Feature complete (T1-T4). Live model smoke run with a real
 `--harness-config` is optional follow-up, not required by the acceptance
