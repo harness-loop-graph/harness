@@ -1,13 +1,41 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { ToolSpec } from './contracts/core.js';
 import { McpToolProvider, type McpServerConfig } from './components/mcp-tool-provider.js';
 import { SkillCatalog, registerSkillTool } from './components/skill-catalog.js';
 import type { RegistryToolManager } from './components/tool-manager.js';
+import { GlmModelAdapter, type GlmAdapterConfig } from './components/glm-adapter.js';
+import { RoutingModelAdapter, type CustomRouter } from './components/routing-model-adapter.js';
+import type { ModelAdapter } from './components/model-adapter.js';
+
+/** One named route in a `router` config section: which model/endpoint it dials. */
+export interface RouterRouteConfig {
+  model: string;
+  baseUrl?: string;
+  /** Env var holding the API key. Omitted → falls back to the default model's env (MODEL_API_KEY). Never a literal key. */
+  apiKeyEnv?: string;
+}
+
+export interface RouterConfigFile {
+  longContextThreshold?: number;
+  /** Route names other than 'default' (supplied by the caller): 'longContext', 'retry', or any name a customRouter can return. */
+  routes: Record<string, RouterRouteConfig>;
+  /** Path (relative to the config file) to a module whose default (or named `route`) export is a CustomRouter function. */
+  customRouterPath?: string;
+}
+
+/** `RouterConfigFile` with `customRouterPath` resolved to an absolute path. */
+export interface RouterConfig {
+  longContextThreshold?: number;
+  routes: Record<string, RouterRouteConfig>;
+  customRouterPath?: string;
+}
 
 export interface HarnessConfigFile {
   mcpServers?: Record<string, McpServerConfig>;
   skillsDirs?: string[];
+  router?: RouterConfigFile;
 }
 
 /** A harness config file, parsed and with every relative path resolved against its own directory. */
@@ -15,6 +43,7 @@ export interface HarnessConfig {
   path: string;
   mcpServers: Record<string, McpServerConfig>;
   skillsDirs: string[];
+  router?: RouterConfig;
 }
 
 /**
@@ -78,7 +107,50 @@ export function parseHarnessConfig(text: string, configDir: string, resolvedPath
     skillsDirs = file.skillsDirs.map((d) => path.resolve(configDir, d));
   }
 
-  return { path: resolvedPath, mcpServers, skillsDirs };
+  let router: RouterConfig | undefined;
+  if (file.router !== undefined) {
+    const r = file.router;
+    if (typeof r !== 'object' || r === null || Array.isArray(r)) {
+      throw new Error(`Harness config '${resolvedPath}': 'router' must be an object`);
+    }
+    if (
+      r.longContextThreshold !== undefined &&
+      (typeof r.longContextThreshold !== 'number' || !Number.isFinite(r.longContextThreshold) || r.longContextThreshold <= 0)
+    ) {
+      throw new Error(`Harness config '${resolvedPath}': router.longContextThreshold must be a positive number`);
+    }
+    if (typeof r.routes !== 'object' || r.routes === null || Array.isArray(r.routes) || Object.keys(r.routes).length === 0) {
+      throw new Error(`Harness config '${resolvedPath}': router.routes must be a non-empty object`);
+    }
+    const routes: Record<string, RouterRouteConfig> = {};
+    for (const [name, route] of Object.entries(r.routes)) {
+      if (name === 'default') {
+        throw new Error(
+          `Harness config '${resolvedPath}': router.routes must not declare 'default' (the caller's existing model is always the default route)`,
+        );
+      }
+      if (typeof route !== 'object' || route === null || typeof route.model !== 'string' || route.model === '') {
+        throw new Error(`Harness config '${resolvedPath}': router.routes.${name}.model must be a non-empty string`);
+      }
+      if (route.baseUrl !== undefined && typeof route.baseUrl !== 'string') {
+        throw new Error(`Harness config '${resolvedPath}': router.routes.${name}.baseUrl must be a string`);
+      }
+      if (route.apiKeyEnv !== undefined && typeof route.apiKeyEnv !== 'string') {
+        throw new Error(`Harness config '${resolvedPath}': router.routes.${name}.apiKeyEnv must be a string`);
+      }
+      routes[name] = { model: route.model, baseUrl: route.baseUrl, apiKeyEnv: route.apiKeyEnv };
+    }
+    if (r.customRouterPath !== undefined && (typeof r.customRouterPath !== 'string' || r.customRouterPath === '')) {
+      throw new Error(`Harness config '${resolvedPath}': router.customRouterPath must be a non-empty string`);
+    }
+    router = {
+      longContextThreshold: r.longContextThreshold,
+      routes,
+      customRouterPath: r.customRouterPath ? path.resolve(configDir, r.customRouterPath) : undefined,
+    };
+  }
+
+  return { path: resolvedPath, mcpServers, skillsDirs, router };
 }
 
 /**
@@ -147,4 +219,59 @@ export async function wireHarnessConfig(config: HarnessConfig, manager: Registry
     await provider.close();
     throw err;
   }
+}
+
+export interface CreateRoutedModelOptions {
+  sessionId?: string;
+  /** Adapter constructor for named routes; defaults to `GlmModelAdapter`. Injectable for tests. */
+  makeAdapter?: (config: GlmAdapterConfig) => ModelAdapter;
+}
+
+/**
+ * Builds a `RoutingModelAdapter` from a harness config's `router` section:
+ * `defaultAdapter` becomes the 'default' route (it is never declared in the
+ * config file), and every configured route gets its own adapter instance.
+ * Each route's API key comes from `apiKeyEnv` (never a literal key in the
+ * config); a missing env var fails fast, naming the route and the variable.
+ * `customRouterPath`, if set, is dynamically imported and its default (or
+ * named `route`) export used as the `CustomRouter` function.
+ */
+export async function createRoutedModel(
+  routerConfig: RouterConfig,
+  defaultAdapter: ModelAdapter,
+  options: CreateRoutedModelOptions = {},
+): Promise<RoutingModelAdapter> {
+  const makeAdapter = options.makeAdapter ?? ((config: GlmAdapterConfig) => new GlmModelAdapter(config));
+
+  const routes: Record<string, ModelAdapter> = { default: defaultAdapter };
+  for (const [name, route] of Object.entries(routerConfig.routes)) {
+    const apiKey = route.apiKeyEnv ? process.env[route.apiKeyEnv] : process.env.MODEL_API_KEY;
+    if (!apiKey) {
+      const source = route.apiKeyEnv ? `env var '${route.apiKeyEnv}' (apiKeyEnv)` : `env var 'MODEL_API_KEY' (no apiKeyEnv set)`;
+      throw new Error(`Harness config router: route '${name}' needs ${source}, which is not set`);
+    }
+    routes[name] = makeAdapter({
+      apiKey,
+      model: route.model,
+      baseUrl: route.baseUrl ?? process.env.MODEL_BASE_URL,
+      sessionId: options.sessionId,
+    });
+  }
+
+  let customRouter: CustomRouter | undefined;
+  if (routerConfig.customRouterPath) {
+    const mod = (await import(pathToFileURL(routerConfig.customRouterPath).href)) as {
+      default?: unknown;
+      route?: unknown;
+    };
+    const candidate = mod.default ?? mod.route;
+    if (typeof candidate !== 'function') {
+      throw new Error(
+        `Harness config router: customRouterPath '${routerConfig.customRouterPath}' must export a function as default or 'route'`,
+      );
+    }
+    customRouter = candidate as CustomRouter;
+  }
+
+  return new RoutingModelAdapter({ routes, longContextThreshold: routerConfig.longContextThreshold, customRouter });
 }

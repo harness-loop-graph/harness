@@ -171,3 +171,11 @@ any of them: an MCP tool provider (tools sourced from external MCP
 servers) and a skill catalog (`SKILL.md` progressive disclosure). Both
 register into the same `RegistryToolManager`/`Guardrails` path as the
 built-in tools. See [`mcp-skills.md`](./mcp-skills.md).
+
+## Optional: model router
+
+`RoutingModelAdapter` is a third optional addition: a `ModelAdapter` that
+routes each request to a named delegate adapter by rule (custom → long
+context → retry → default), off unless a harness config's `router`
+section opts in. It sits behind the `ModelAdapter` interface, so nothing
+else in this document changes. See [`model-router.md`](./model-router.md).

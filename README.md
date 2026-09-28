@@ -94,6 +94,14 @@ The harness can consume tools from MCP servers and load agent skills
 See [`docs/mcp-skills.md`](./docs/mcp-skills.md) for the full detail and
 `examples/harness-config.json` for a working example.
 
+## Model router (optional)
+
+`RoutingModelAdapter` routes each request to a named `ModelAdapter` by
+rule (custom → long-context → retry → default), off unless a harness
+config's `router` section opts in. The same rules apply identically to
+C1/C2/C3 — no rule depends on graph node/role. See
+[`docs/model-router.md`](./docs/model-router.md).
+
 ## Run tests
 
 ```bash
