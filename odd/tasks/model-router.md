@@ -29,7 +29,7 @@ Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `
 ## Tasks
 - [x] T1 — `RoutingModelAdapter` + rule evaluation + per-route usage; tests with stub adapters.
 - [x] T2 — `router` section in harness config (validation, env-var keys, custom router loading), factory, exports, docs.
-- [ ] T3 — Runner wiring for c1/c2/c3, routing usage in `run-report.json`, README, tests.
+- [x] T3 — Runner wiring for c1/c2/c3, routing usage in `run-report.json`, README, tests.
 
 ## Acceptance criteria
 - With a router config, requests over the threshold go to `longContext`, retry requests go to `retry`, everything else to `default`, in all three configurations.
@@ -74,5 +74,37 @@ Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `
   fallback, `customRouterPath` loading, and a non-function export error).
 - `cd glm && npm test`: 9 files, 94 passed. `cd glm && npm run build`: clean (tsc).
 
+### T3 (commit `45aa5b7`, experiment)
+- `experiment/runner/run-experiment.mjs`: added `createModel({ apiKey, modelId, sessionId,
+  harnessExtras, makeAdapter })` — the single code path c1/c2/c3 now call to build the run's
+  model adapter (same `sessionId`), returning a plain `GlmModelAdapter` unless
+  `harnessExtras.router` is set, in which case it delegates to glm's `createRoutedModel()`.
+  `loadHarnessExtras()` now carries `config.router` through and adds `routeNames` to
+  `report.harnessConfig` metadata when present. Added `summarizeRouting(routing)`, reducing
+  `RoutingModelAdapter.getRouting()` into `report.routing = { byRoute, decisions }` with the
+  decision log collapsed to counts per `"<route>:<reason>"` key (kept out of the report as a
+  full per-call list — unbounded over a long C2/C3 run; counts are enough to see which rule
+  fired and how often). Exported `createModel`/`summarizeRouting` for tests.
+- `experiment/harness-config.json` left untouched (no `router` section — off by default);
+  `experiment/runner/README.md` documents an example `router` config, the `routing` report
+  field, and the `routeNames` metadata addition.
+- Tests added to `run-experiment.test.mjs` (5 new): `createModel()` returns a plain
+  `GlmModelAdapter` unchanged for every no-router `harnessExtras` shape, wraps it in a
+  `RoutingModelAdapter` with the configured routes using an injected `makeAdapter` stub (no
+  network) when a router is set, and propagates a clear missing-env-var error; and
+  `summarizeRouting()`'s count reduction.
+- `cd glm && npm test`: 9 files, 94 passed. `cd glm && npm run build`: clean (tsc).
+- `node --check experiment/runner/run-experiment.mjs`: OK.
+- `node --test experiment/runner/run-experiment.test.mjs`: 9 passed.
+- `node experiment/runner/run-experiment.mjs --config c1 --dry-run`, with and without
+  `--harness-config experiment/harness-config.json`: compared byte-for-byte against the
+  pre-change commit (`experiment` `a7006d8`), ignoring `sessionId` and the workspace
+  timestamp — identical in both cases.
+
+All three tasks done; all required checks pass. No deviations from the design beyond the
+two explicit design choices already recorded under T1 (`getRouting()` instead of overloading
+`getUsage()`) and T3 (routing decisions summarized as counts, not the full list).
+
 ## Next step
-T3 — runner wiring for c1/c2/c3, `routing` in `run-report.json`, README, tests.
+Feature complete. Optional follow-up (not requested): wire an actual `longContext`/`retry`
+router config into a real experiment run to observe routing in a live `run-report.json`.
