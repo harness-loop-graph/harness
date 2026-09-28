@@ -31,6 +31,8 @@ Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `
 - [x] T2 — `router` section in harness config (validation, env-var keys, custom router loading), factory, exports, docs.
 - [x] T3 — Runner wiring for c1/c2/c3, routing usage in `run-report.json`, README, tests.
 
+- [ ] T4 — Review fixes (user-authorized 2026-09-28): glm — env-independent `createRoutedModel` test (stub `MODEL_BASE_URL`) + positive fallback test; count failed delegate calls/usage per route; `Object.hasOwn` route lookup; reject `__proto__`-style route names and empty `apiKeyEnv`. experiment — tests for `report.routing` (present with router in c1/c2/c3, absent without) and `routeNames`; retry-key fallback test distinguishes env vs default key and restores env.
+
 ## Acceptance criteria
 - With a router config, requests over the threshold go to `longContext`, retry requests go to `retry`, everything else to `default`, in all three configurations.
 - `run-report.json` shows calls/tokens per route.
