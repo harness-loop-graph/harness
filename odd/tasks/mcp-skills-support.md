@@ -157,7 +157,14 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
   and the `node --test` command.
 - Deviation: none from the review findings as scoped.
 
+### Review of T5/T6 (both approved + acknowledged)
+- glm: advisory — `localeCompare` machine-dependent order (fixed: code-point sort), spy restore outside finally (fixed), stale MCP registrations in caller's manager if skills load fails after `registerInto` (accepted: `wireHarnessConfig` throws and callers abort).
+- app: advisory — entrypoint guard built `file://` + argv[1], skipping main() for symlinked/encoded paths (fixed: realpath comparison + spawn test through a symlink with a space). Missing tests for config-failure/closeError/usage paths remain a follow-up (verified manually by the T6 writer).
+- Commits: glm 0b08ca6, app a7006d8. Checks: glm build exit 0, 65/65 tests; app `node --test runner/run-experiment.test.mjs` 5/5.
+
 ## Next step
+Feature complete. Pending decision: concrete MCP servers and skills for the experiment config. Push/PR are the user's call.
+
 Feature complete (T1-T6). Live model smoke run with a real
 `--harness-config` remains optional follow-up, not required by the
 acceptance criteria.
