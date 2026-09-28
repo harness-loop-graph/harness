@@ -29,7 +29,7 @@ parallel execution path for them.
   and `registerInto()` are split on purpose: one MCP connection can be
   shared across several `RegistryToolManager` instances, which is what the
   experiment runner does for C3 (one harness, and one tool manager, per
-  graph node — see `app/runner/run-experiment.mjs`).
+  graph node — see `experiment/runner/run-experiment.mjs`).
 - The registered handler calls `client.callTool(...)`; a result with
   `isError: true` is turned into a thrown error (`RegistryToolManager`
   turns that into a failed `ToolResult`), and a normal result's `text`
@@ -100,7 +100,7 @@ managers — a run that builds several harnesses (C3) connects a
 `McpToolProvider` and loads a `SkillCatalog` once, then calls
 `provider.registerInto(manager)` / `registerSkillTool(manager, catalog)`
 per harness directly, reusing the same MCP connection and skill catalog
-instance. `app/runner/run-experiment.mjs` does exactly this.
+instance. `experiment/runner/run-experiment.mjs` does exactly this.
 
 Tests: `tests/harness-config.spec.ts`, against `examples/harness-config.json`
 (which points at the fixture MCP server and an example `greeter` skill
@@ -109,6 +109,6 @@ under `examples/skills/`).
 ## What C1/C2/C3 get identically
 
 The runner wires the same MCP tools, `load_skill`, and guardrail allowlist
-into every configuration's harness(es) — see `app/runner/README.md`. Without
+into every configuration's harness(es) — see `experiment/runner/README.md`. Without
 `--harness-config`, none of this code path runs, so C1/C2/C3 behavior is
 unchanged.

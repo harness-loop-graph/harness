@@ -6,9 +6,9 @@ cycle), C2 (a corrective loop on top of C1), and C3 (a multi-agent graph on
 top of C2). The same harness design is implemented independently against
 several model providers as part of a broader experiment; this repo runs it
 against **GLM (glm-5.2)** through **OpenCode Go**, an OpenAI-compatible
-proxy. A sibling `app/` repository defines the fixed case study
+proxy. A sibling `experiment/` repository defines the fixed case study
 (`SPEC.md`) that every provider arm is asked to build, and orchestrates
-experiment runs (`app/runner/run-experiment.mjs`) across the C1/C2/C3
+experiment runs (`experiment/runner/run-experiment.mjs`) across the C1/C2/C3
 configurations. A sibling `claude/` repository runs the same harness
 architecture against Claude.
 

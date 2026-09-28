@@ -8,7 +8,7 @@ Advisor feedback: the harness lacks MCP and skills support. Both must be usable 
 
 ## Scope
 - `glm/`: MCP client tool provider, skills catalog + `load_skill` tool, context/adapter rendering, exports, tests, docs.
-- `app/runner/`: `--harness-config` option wiring MCP servers and skill dirs into `buildHarness` for every configuration.
+- `experiment/runner/`: `--harness-config` option wiring MCP servers and skill dirs into `buildHarness` for every configuration.
 
 ## Constraints
 - Identical MCP/skills setup across C1/C2/C3 (otherwise config differences confound the experiment).
@@ -153,7 +153,7 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
   executed directly) and exported the wiring functions used by the new
   tests; `buildHarness` additionally returns `tools`/`guardrails`/
   `availTools` for inspection. No CLI behavior change.
-- `app/runner/README.md` updated: config-failure behavior, `closeError`,
+- `experiment/runner/README.md` updated: config-failure behavior, `closeError`,
   and the `node --test` command.
 - Deviation: none from the review findings as scoped.
 
@@ -161,6 +161,9 @@ Mode: off (source: no project/session TDD configuration). Runner: `npm test` (vi
 - glm: advisory — `localeCompare` machine-dependent order (fixed: code-point sort), spy restore outside finally (fixed), stale MCP registrations in caller's manager if skills load fails after `registerInto` (accepted: `wireHarnessConfig` throws and callers abort).
 - app: advisory — entrypoint guard built `file://` + argv[1], skipping main() for symlinked/encoded paths (fixed: realpath comparison + spawn test through a symlink with a space). Missing tests for config-failure/closeError/usage paths remain a follow-up (verified manually by the T6 writer).
 - Commits: glm 0b08ca6, app a7006d8. Checks: glm build exit 0, 65/65 tests; app `node --test runner/run-experiment.test.mjs` 5/5.
+
+### Repo rename (2026-09-28)
+- `app` renamed to `experiment` (GitHub `harness-loop-graph/experiment`, local dir, remote URL): the name suggested it held the generated app. Earlier entries mentioning `app` refer to this repo.
 
 ## Next step
 Feature complete. Pending decision: concrete MCP servers and skills for the experiment config. Push/PR are the user's call.
