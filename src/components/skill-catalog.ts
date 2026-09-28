@@ -44,7 +44,7 @@ export class SkillCatalog {
     const subdirNames = entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
-      .sort((a, b) => a.localeCompare(b));
+      .sort(byCodePoint);
 
     for (const subdir of subdirNames) {
       const skillFile = path.join(dir, subdir, 'SKILL.md');
@@ -70,7 +70,7 @@ export class SkillCatalog {
   list(): SkillMeta[] {
     return [...this.entries.values()]
       .map(({ name, description }) => ({ name, description }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) => byCodePoint(a.name, b.name));
   }
 
   get(name: string): SkillEntry | undefined {
@@ -137,4 +137,9 @@ export function registerSkillTool(manager: RegistryToolManager, catalog: SkillCa
     return { name: skill.name, dir: skill.dir, body: skill.body };
   });
   return spec;
+}
+
+// localeCompare depends on the host ICU/locale; the prompt must be identical on every machine.
+function byCodePoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }

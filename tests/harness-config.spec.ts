@@ -125,11 +125,12 @@ describe('wireHarnessConfig', () => {
       const config = await loadHarnessConfig(file);
       const manager = new RegistryToolManager(new StubGuardrails());
       const closeSpy = vi.spyOn(McpToolProvider.prototype, 'close');
-
-      await expect(wireHarnessConfig(config, manager)).rejects.toThrow(/Cannot read skills directory/);
-      expect(closeSpy).toHaveBeenCalledTimes(1);
-
-      closeSpy.mockRestore();
+      try {
+        await expect(wireHarnessConfig(config, manager)).rejects.toThrow(/Cannot read skills directory/);
+        expect(closeSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        closeSpy.mockRestore();
+      }
     } finally {
       await fs.rm(workspace, { recursive: true, force: true });
     }
