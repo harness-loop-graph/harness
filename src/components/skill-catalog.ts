@@ -89,12 +89,24 @@ function parseSkillMd(raw: string, sourceFile: string): { name: string; descript
   }
 
   const fields: Record<string, string> = {};
-  for (const line of lines.slice(1, endIndex)) {
+  const header = lines.slice(1, endIndex);
+  for (let i = 0; i < header.length; i++) {
+    const line = header[i];
     if (line.trim() === '') continue;
     const sepIndex = line.indexOf(':');
     if (sepIndex === -1) continue;
     const key = line.slice(0, sepIndex).trim();
     let value = line.slice(sepIndex + 1).trim();
+    // YAML block scalar (`>` folds lines, `|` keeps them); published skills commonly use it for descriptions.
+    const block = /^([>|])[-+]?$/.exec(value);
+    if (block) {
+      const parts: string[] = [];
+      while (i + 1 < header.length && (header[i + 1].trim() === '' || /^\s/.test(header[i + 1]))) {
+        parts.push(header[++i].trim());
+      }
+      fields[key] = parts.filter((p) => p !== '').join(block[1] === '>' ? ' ' : '\n');
+      continue;
+    }
     if (
       (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
       (value.startsWith("'") && value.endsWith("'") && value.length >= 2)

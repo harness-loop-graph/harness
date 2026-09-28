@@ -83,6 +83,24 @@ describe('SkillCatalog', () => {
     await expect(SkillCatalog.load([workspace])).rejects.toThrow(path.join(dir, 'SKILL.md'));
   });
 
+  it('parses folded (>) and literal (|) block scalars in frontmatter', async () => {
+    await fs.mkdir(path.join(workspace, 'folded'));
+    await fs.writeFile(
+      path.join(workspace, 'folded', 'SKILL.md'),
+      '---\nname: folded\ndescription: >\n  First line,\n  second: with colon.\n\nversion: 1\n---\nBody',
+    );
+    await fs.mkdir(path.join(workspace, 'literal'));
+    await fs.writeFile(
+      path.join(workspace, 'literal', 'SKILL.md'),
+      '---\nname: literal\ndescription: |-\n  Line one\n  Line two\n---\nBody',
+    );
+    const catalog = await SkillCatalog.load([workspace]);
+    expect(catalog.list()).toEqual([
+      { name: 'folded', description: 'First line, second: with colon.' },
+      { name: 'literal', description: 'Line one\nLine two' },
+    ]);
+  });
+
   it('lists skills sorted by name regardless of on-disk order', async () => {
     for (const name of ['charlie', 'alpha', 'bravo']) {
       const dir = path.join(workspace, name);
