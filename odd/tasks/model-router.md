@@ -28,7 +28,7 @@ Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `
 
 ## Tasks
 - [x] T1 — `RoutingModelAdapter` + rule evaluation + per-route usage; tests with stub adapters.
-- [ ] T2 — `router` section in harness config (validation, env-var keys, custom router loading), factory, exports, docs.
+- [x] T2 — `router` section in harness config (validation, env-var keys, custom router loading), factory, exports, docs.
 - [ ] T3 — Runner wiring for c1/c2/c3, routing usage in `run-report.json`, README, tests.
 
 ## Acceptance criteria
@@ -53,5 +53,26 @@ Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `
 - `cd glm && npm test`: 9 files, 84 passed.
 - `cd glm && npm run build`: clean (tsc).
 
+### T2 (commit `62b5e89`, glm)
+- `src/harness-config.ts`: `HarnessConfigFile`/`HarnessConfig` gain an optional `router`
+  section, validated in `parseHarnessConfig` (positive `longContextThreshold`, non-empty
+  `routes`, `default` forbidden as a declared route name, each route's `model` required,
+  `baseUrl`/`apiKeyEnv` optional strings, `customRouterPath` resolved relative to the config
+  file like `skillsDirs`).
+- Added `createRoutedModel(routerConfig, defaultAdapter, { sessionId, makeAdapter? })`:
+  builds one `GlmModelAdapter` per configured route (`makeAdapter` injectable for tests),
+  resolves each route's API key from `apiKeyEnv` (falling back to `MODEL_API_KEY`) and
+  throws naming the route + missing env var if absent, dynamically `import()`s
+  `customRouterPath` and uses its default (or `route`) export as the `CustomRouter`.
+  Exported from `src/index.ts` via the existing `export * from './harness-config.js'`.
+- Docs: new `glm/docs/model-router.md` (rules/precedence, config shape, why no
+  role-based routing), linked from `docs/README.md` and `docs/architecture.md`; a short
+  section added to the top-level `README.md`.
+- Tests added to `tests/harness-config.spec.ts` (10 new): router section validation
+  (resolve + 4 error cases) and `createRoutedModel` (route construction incl. env-var
+  resolution, missing-env-var errors for both `apiKeyEnv` and the `MODEL_API_KEY`
+  fallback, `customRouterPath` loading, and a non-function export error).
+- `cd glm && npm test`: 9 files, 94 passed. `cd glm && npm run build`: clean (tsc).
+
 ## Next step
-T2 — `router` section in harness config + `createRoutedModel` factory + docs.
+T3 — runner wiring for c1/c2/c3, `routing` in `run-report.json`, README, tests.
