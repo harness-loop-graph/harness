@@ -122,12 +122,18 @@ export function parseHarnessConfig(text: string, configDir: string, resolvedPath
     if (typeof r.routes !== 'object' || r.routes === null || Array.isArray(r.routes) || Object.keys(r.routes).length === 0) {
       throw new Error(`Harness config '${resolvedPath}': router.routes must be a non-empty object`);
     }
-    const routes: Record<string, RouterRouteConfig> = {};
+    // Object.create(null) so a route named '__proto__' assigns a plain own
+    // property instead of reaching the Object.prototype accessor; rejected
+    // explicitly below anyway, for a clear error instead of silent handling.
+    const routes: Record<string, RouterRouteConfig> = Object.create(null);
     for (const [name, route] of Object.entries(r.routes)) {
       if (name === 'default') {
         throw new Error(
           `Harness config '${resolvedPath}': router.routes must not declare 'default' (the caller's existing model is always the default route)`,
         );
+      }
+      if (name === '__proto__') {
+        throw new Error(`Harness config '${resolvedPath}': router.routes must not declare '__proto__'`);
       }
       if (typeof route !== 'object' || route === null || typeof route.model !== 'string' || route.model === '') {
         throw new Error(`Harness config '${resolvedPath}': router.routes.${name}.model must be a non-empty string`);
@@ -135,8 +141,8 @@ export function parseHarnessConfig(text: string, configDir: string, resolvedPath
       if (route.baseUrl !== undefined && typeof route.baseUrl !== 'string') {
         throw new Error(`Harness config '${resolvedPath}': router.routes.${name}.baseUrl must be a string`);
       }
-      if (route.apiKeyEnv !== undefined && typeof route.apiKeyEnv !== 'string') {
-        throw new Error(`Harness config '${resolvedPath}': router.routes.${name}.apiKeyEnv must be a string`);
+      if (route.apiKeyEnv !== undefined && (typeof route.apiKeyEnv !== 'string' || route.apiKeyEnv === '')) {
+        throw new Error(`Harness config '${resolvedPath}': router.routes.${name}.apiKeyEnv must be a non-empty string`);
       }
       routes[name] = { model: route.model, baseUrl: route.baseUrl, apiKeyEnv: route.apiKeyEnv };
     }

@@ -97,11 +97,14 @@ export class RoutingModelAdapter implements ModelAdapter {
 
     const adapter = this.routes[decision.route];
     const before = hasUsage(adapter) ? adapter.getUsage() : undefined;
-    const response = await adapter.complete(request);
-    const after = hasUsage(adapter) ? adapter.getUsage() : undefined;
-    this.recordUsage(decision.route, before, after);
-
-    return response;
+    try {
+      return await adapter.complete(request);
+    } finally {
+      // Record the call (and any usage delta) even when the delegate throws,
+      // so a failed attempt still counts towards this route's usage.
+      const after = hasUsage(adapter) ? adapter.getUsage() : undefined;
+      this.recordUsage(decision.route, before, after);
+    }
   }
 
   private async decide(request: ModelRequest, estimatedTokens: number): Promise<RouteDecision> {
@@ -109,7 +112,7 @@ export class RoutingModelAdapter implements ModelAdapter {
       const routeNames = Object.keys(this.routes);
       const chosen = await this.customRouter(request, { estimatedTokens, routes: routeNames });
       if (chosen != null) {
-        if (!this.routes[chosen]) {
+        if (!Object.hasOwn(this.routes, chosen)) {
           throw new Error(`customRouter returned unknown route '${chosen}'. Configured routes: ${routeNames.join(', ')}`);
         }
         return { route: chosen, reason: 'custom' };

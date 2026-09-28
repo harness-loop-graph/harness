@@ -112,12 +112,29 @@ describe('loadHarnessConfig', () => {
     await fs.writeFile(file, JSON.stringify({ router: { longContextThreshold: -1, routes: { retry: { model: 'x' } } } }));
     await expect(loadHarnessConfig(file)).rejects.toThrow(/router\.longContextThreshold must be a positive number/);
   });
+
+  it('errors clearly when apiKeyEnv is an empty string', async () => {
+    const file = path.join(workspace, 'config.json');
+    await fs.writeFile(file, JSON.stringify({ router: { routes: { retry: { model: 'x', apiKeyEnv: '' } } } }));
+    await expect(loadHarnessConfig(file)).rejects.toThrow(/router\.routes\.retry\.apiKeyEnv must be a non-empty string/);
+  });
+
+  it('errors clearly when a route is named __proto__, instead of mutating the prototype', async () => {
+    const file = path.join(workspace, 'config.json');
+    // JSON.stringify({ routes: { __proto__: {...} } }) would drop the key (it
+    // sets the object's own prototype instead of an own property), so write
+    // the JSON text directly to reproduce what an attacker-supplied config
+    // file actually contains: a real '__proto__' own key via JSON.parse.
+    await fs.writeFile(file, '{"router":{"routes":{"__proto__":{"model":"x"}}}}');
+    await expect(loadHarnessConfig(file)).rejects.toThrow(/router\.routes must not declare '__proto__'/);
+    // Object.prototype itself must stay untouched regardless.
+    expect(Object.prototype).not.toHaveProperty('model');
+  });
 });
 
 describe('createRoutedModel', () => {
-  const ENV_BACKUP = { ...process.env };
   afterEach(() => {
-    process.env = { ...ENV_BACKUP };
+    vi.unstubAllEnvs();
   });
 
   function stubMakeAdapter(created: GlmAdapterConfig[]) {
@@ -128,8 +145,12 @@ describe('createRoutedModel', () => {
   }
 
   it('builds a RoutingModelAdapter with the default route plus every configured route', async () => {
-    process.env.MODEL_API_KEY = 'default-key';
-    process.env.BIG_KEY = 'big-key';
+    vi.stubEnv('MODEL_API_KEY', 'default-key');
+    vi.stubEnv('BIG_KEY', 'big-key');
+    // No route sets its own baseUrl, and MODEL_BASE_URL must not be
+    // ambiently set for this run, or every created adapter would fall back
+    // to it instead of the expected `undefined` below.
+    vi.stubEnv('MODEL_BASE_URL', undefined);
     const created: GlmAdapterConfig[] = [];
     const defaultAdapter = new StubModelAdapter();
 
@@ -152,9 +173,24 @@ describe('createRoutedModel', () => {
     ]);
   });
 
+  it('falls back to MODEL_BASE_URL when a route sets no baseUrl of its own', async () => {
+    vi.stubEnv('MODEL_API_KEY', 'default-key');
+    vi.stubEnv('BIG_KEY', 'big-key');
+    vi.stubEnv('MODEL_BASE_URL', 'https://example.test');
+    const created: GlmAdapterConfig[] = [];
+
+    await createRoutedModel(
+      { routes: { longContext: { model: 'big-model', apiKeyEnv: 'BIG_KEY' } } },
+      new StubModelAdapter(),
+      { sessionId: 'sess-1', makeAdapter: stubMakeAdapter(created) },
+    );
+
+    expect(created).toEqual([{ apiKey: 'big-key', model: 'big-model', baseUrl: 'https://example.test', sessionId: 'sess-1' }]);
+  });
+
   it('throws a clear error naming the route and the missing env var', async () => {
-    delete process.env.BIG_KEY;
-    process.env.MODEL_API_KEY = 'default-key';
+    vi.stubEnv('BIG_KEY', undefined);
+    vi.stubEnv('MODEL_API_KEY', 'default-key');
     await expect(
       createRoutedModel(
         { routes: { longContext: { model: 'big-model', apiKeyEnv: 'BIG_KEY' } } },
@@ -165,7 +201,7 @@ describe('createRoutedModel', () => {
   });
 
   it('throws when apiKeyEnv is omitted and MODEL_API_KEY is also unset', async () => {
-    delete process.env.MODEL_API_KEY;
+    vi.stubEnv('MODEL_API_KEY', undefined);
     await expect(
       createRoutedModel({ routes: { retry: { model: 'retry-model' } } }, new StubModelAdapter(), {
         makeAdapter: stubMakeAdapter([]),
@@ -174,7 +210,7 @@ describe('createRoutedModel', () => {
   });
 
   it('loads a customRouterPath module and wires its default export as the custom router', async () => {
-    process.env.MODEL_API_KEY = 'default-key';
+    vi.stubEnv('MODEL_API_KEY', 'default-key');
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'router-module-'));
     try {
       const modulePath = path.join(workspace, 'my-router.mjs');
@@ -194,7 +230,7 @@ describe('createRoutedModel', () => {
   });
 
   it('throws a clear error when customRouterPath does not export a function', async () => {
-    process.env.MODEL_API_KEY = 'default-key';
+    vi.stubEnv('MODEL_API_KEY', 'default-key');
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'router-module-'));
     try {
       const modulePath = path.join(workspace, 'bad-router.mjs');

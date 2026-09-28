@@ -168,6 +168,15 @@ describe('RoutingModelAdapter', () => {
     await expect(router.complete(request())).rejects.toThrow(/unknown route 'nonexistent'/);
   });
 
+  it('throws unknown-route even for inherited plain-object property names like toString or constructor', async () => {
+    const def = new UsageStubAdapter();
+    const routerToString = new RoutingModelAdapter({ routes: { default: def }, customRouter: () => 'toString' });
+    const routerConstructor = new RoutingModelAdapter({ routes: { default: def }, customRouter: () => 'constructor' });
+
+    await expect(routerToString.complete(request())).rejects.toThrow(/unknown route 'toString'/);
+    await expect(routerConstructor.complete(request())).rejects.toThrow(/unknown route 'constructor'/);
+  });
+
   it('aggregates usage across routes in getUsage(), and splits it per route in getRouting()', async () => {
     const def = new UsageStubAdapter({ type: 'finish', content: 'ok' }, { promptTokens: 10, completionTokens: 5, cost: 0.01 });
     const long = new UsageStubAdapter({ type: 'finish', content: 'ok' }, { promptTokens: 100, completionTokens: 50, cost: 0.1 });
@@ -199,6 +208,28 @@ describe('RoutingModelAdapter', () => {
     await router.complete(request());
 
     expect(router.getUsage()).toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 2, cost: 0, modelsUsed: [] });
+  });
+
+  it('records the call and any usage delta when the delegate throws, then rethrows', async () => {
+    class ThrowingAdapter implements ModelAdapter {
+      private promptTokens = 0;
+      private calls = 0;
+      async complete(): Promise<ModelResponse> {
+        this.calls += 1;
+        this.promptTokens += 10; // e.g. a provider that bills the prompt before failing on the response
+        throw new Error('delegate failed');
+      }
+      getUsage() {
+        return { promptTokens: this.promptTokens, completionTokens: 0, totalTokens: this.promptTokens, calls: this.calls, cost: 0, modelsUsed: [] };
+      }
+    }
+    const def = new ThrowingAdapter();
+    const router = new RoutingModelAdapter({ routes: { default: def } });
+
+    await expect(router.complete(request())).rejects.toThrow('delegate failed');
+
+    expect(router.getUsage()).toMatchObject({ calls: 1, promptTokens: 10 });
+    expect(router.getRouting().byRoute.default).toMatchObject({ calls: 1, promptTokens: 10 });
   });
 
   it('splits usage correctly when two route names share the same adapter instance', async () => {
