@@ -1,7 +1,7 @@
 {
   "name": "harness",
   "version": "0.1.0",
-  "description": "Model-agnostic agent harness — GLM arm (C1)",
+  "description": "Model-agnostic agent harness (C1 harness, C2 loop, C3 graph)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

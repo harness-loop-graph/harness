@@ -1,16 +1,14 @@
-# Harness (GLM arm) — internal documentation
+# Harness — internal documentation
 
-This repository is the **GLM arm** of a university thesis project (PI-I): a
-model-agnostic agent harness built in three iterations — C1 (one interaction
-cycle), C2 (a corrective loop on top of C1), and C3 (a multi-agent graph on
-top of C2). The same harness design is implemented independently against
-several model providers as part of a broader experiment; this repo runs it
-against **GLM (glm-5.2)** through **OpenCode Go**, an OpenAI-compatible
-proxy. A sibling `experiment/` repository defines the fixed case study
-(`SPEC.md`) that every provider arm is asked to build, and orchestrates
-experiment runs (`experiment/runner/run-experiment.mjs`) across the C1/C2/C3
-configurations. A sibling `claude/` repository runs the same harness
-architecture against Claude.
+This repository is the code generator of a university thesis project
+(PI-I): a model-agnostic agent harness built in three iterations — C1 (one
+interaction cycle), C2 (a corrective loop on top of C1), and C3 (a
+multi-agent graph on top of C2). It runs against **GLM (glm-5.2)** through
+**OpenCode Go**, an OpenAI-compatible proxy. A sibling `experiment/`
+repository defines the fixed case study (`SPEC.md`) the harness is asked to
+build, and orchestrates experiment runs
+(`experiment/runner/run-experiment.mjs`) across the C1/C2/C3
+configurations.
 
 The public `README.md` at the repository root is deliberately
 provider-agnostic (it describes the harness in terms of generic

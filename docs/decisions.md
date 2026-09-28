@@ -30,12 +30,11 @@ code:
 The three variables the harness reads — `MODEL_API_KEY`, `MODEL_ID`,
 `MODEL_BASE_URL` — are not named `GLM_API_KEY` / `ZAI_API_KEY` /
 `OPENCODE_...`. This is intentional: the same env var names work for any
-model-provider arm of the broader experiment (see `docs/README.md` for how
-this repo relates to the sibling `claude/` arm), even though this specific
-repo's `GlmModelAdapter` class and its default base URL are GLM/OpenCode-Go
-specific. The class name and defaults are concrete because this experiment
-run *is* GLM-specific; the configuration surface stays generic so the
-pattern is directly reusable by another provider arm.
+OpenAI-compatible provider, even though `GlmModelAdapter` and its default
+base URL are GLM/OpenCode-Go specific. The class name and defaults are
+concrete because the experiment runs against GLM; the configuration surface
+stays generic so switching provider is a configuration change, not a code
+change.
 
 ## Deterministic (non-model) decision policy in the loop and graph
 

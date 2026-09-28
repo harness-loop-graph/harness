@@ -48,7 +48,7 @@ call is involved.
 ### 2. Model Adapter — interface + `GlmModelAdapter`
 
 `ModelAdapter` is the abstraction (`complete(request): Promise<ModelResponse>`).
-The concrete implementation used by this arm, `GlmModelAdapter`, talks to
+The concrete implementation used by the experiment, `GlmModelAdapter`, talks to
 GLM through OpenCode Go; see [`model-provider.md`](./model-provider.md) for
 the full detail.
 
