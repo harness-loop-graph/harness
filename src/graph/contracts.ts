@@ -74,6 +74,8 @@ export interface GraphStepTrace {
   nodeId: string;
   loopStatus: 'SUCCESS' | 'FAILED';
   decision: GraphDecision;
+  /** Why the node's loop failed; present only when loopStatus is 'FAILED'. */
+  loopFailure?: string;
 }
 
 export type GraphRouter = (nodeId: string, loopResult: LoopResult, state: GraphState) => GraphDecision;

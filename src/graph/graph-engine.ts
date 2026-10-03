@@ -8,6 +8,30 @@ import type {
   NodeExecution,
 } from './contracts.js';
 import type { LoopFactory } from './contracts.js';
+import type { LoopResult } from '../loop/contracts.js';
+
+/** Error messages embedded in `loopFailure` are truncated past this length. */
+const MAX_LOOP_FAILURE_MESSAGE_LENGTH = 300;
+
+function truncate(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+/**
+ * Why a node's loop failed, for the graph trace. Prefers the loop's own
+ * `failure` summary, falling back to the terminal decision's reason; when
+ * the final response was a model error, its code and (truncated) message
+ * are appended so a FAILED step in run-report.json is actionable.
+ */
+function describeLoopFailure(loopResult: LoopResult): string | undefined {
+  if (loopResult.status !== 'FAILED') return undefined;
+  const reason = loopResult.failure ?? loopResult.decision.reason;
+  if (loopResult.finalResponse?.type === 'error') {
+    const { code, message } = loopResult.finalResponse;
+    return `${reason} (error ${code}: ${truncate(message, MAX_LOOP_FAILURE_MESSAGE_LENGTH)})`;
+  }
+  return reason;
+}
 
 /**
  * C3 graph engine: a state machine over nodes. Each step runs one node's
@@ -80,7 +104,14 @@ export class GraphEngine {
       decision = this.router
         ? this.router(node.id, loopResult, state)
         : this.route(node.id, loopResult.status);
-      trace.push({ step: state.step, nodeId: node.id, loopStatus: loopResult.status, decision });
+      const loopFailure = describeLoopFailure(loopResult);
+      trace.push({
+        step: state.step,
+        nodeId: node.id,
+        loopStatus: loopResult.status,
+        decision,
+        ...(loopFailure !== undefined ? { loopFailure } : {}),
+      });
 
       if (decision.action === 'NEXT') {
         state.currentNode = decision.node;

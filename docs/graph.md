@@ -41,7 +41,13 @@ instance, etc.); the engine itself never constructs harness components.
    which one node's output becomes visible to a later node or to a custom
    router.
 6. Decide the next step: `router ? router(node.id, loopResult, state) : this.route(node.id, loopResult.status)`.
-7. On `NEXT`, set `state.currentNode = decision.node` and continue the loop.
+7. Push a `GraphStepTrace` for the step. When the node's loop status was
+   `'FAILED'`, it also carries `loopFailure`: the loop's own `failure`
+   summary, or `decision.reason` when `failure` is absent; when the loop's
+   final response was a model `error`, its code and message (truncated to
+   300 characters) are appended as `` `<reason> (error <code>: <message>)` ``.
+   A successful step carries no `loopFailure` field.
+8. On `NEXT`, set `state.currentNode = decision.node` and continue the loop.
    On `FINISH` or `FAIL`, stop.
 
 `totalLoopTurns` accumulates every node loop's `turns` across the whole
@@ -88,7 +94,10 @@ reason regardless of individual node outcomes.
 - **`GraphDecision`** — union of `{ action: 'NEXT', node, reason }`,
   `{ action: 'FINISH', reason }`, `{ action: 'FAIL', reason }`.
 - **`GraphResult`** — `{ status, steps, decision, state, trace, totalLoopTurns, failure? }`.
-- **`GraphStepTrace`** — `{ step, nodeId, loopStatus, decision }`.
+- **`GraphStepTrace`** — `{ step, nodeId, loopStatus, decision, loopFailure? }`;
+  `loopFailure` is present only when `loopStatus` is `'FAILED'` (see step 7
+  above) — it is what makes a `FAILED` entry in `run-report.json`'s trace
+  actionable instead of a bare status.
 - **`GraphRouter`** — `(nodeId, loopResult, state) => GraphDecision`.
 - **`LoopFactory`** — `(node: GraphNode) => AgentLoop`.
 
@@ -102,5 +111,8 @@ builder and converging once the reviewer's cross-layer verification
 passes; a `maxSteps` failure when builder/reviewer keep bouncing without
 convergence; a `FAIL` when a node fails with no `on_failure` edge defined;
 a custom `GraphRouter` overriding static edges based on `state.shared`
-content; static edge fallback when no router is given; and an immediate
-`FAIL` when `initialNode` doesn't match any declared node.
+content; static edge fallback when no router is given; an immediate
+`FAIL` when `initialNode` doesn't match any declared node; a failed step's
+trace entry carrying `loopFailure` (including the model error code/message
+and its truncation when the final response was an `error`); and a
+successful step's trace entry carrying no `loopFailure` field at all.

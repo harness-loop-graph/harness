@@ -290,6 +290,68 @@ describe('C3 multi-agent graph', () => {
     }
   });
 
+  it('records why a failed node loop failed in the step trace', async () => {
+    const { factory, attempts } = makeLoopFactory();
+    attempts.solo = [[{ type: 'finish', content: 'done (nothing written)' }]];
+
+    const engine = new GraphEngine(factory, {
+      task: 'Create missing.txt',
+      initialNode: 'solo',
+      nodes: [{ id: 'solo', role: 'backend', task: 'Create missing.txt', verification: { command: 'test -f missing.txt' }, maxTurns: 1 }],
+      edges: [],
+      maxSteps: 3,
+    });
+
+    const result = await engine.run();
+
+    expect(result.status).toBe('FAILED');
+    expect(result.trace).toHaveLength(1);
+    expect(result.trace[0].loopStatus).toBe('FAILED');
+    expect(result.trace[0].loopFailure).toBe('max_turns (1) reached without success');
+  });
+
+  it('includes the model error code and message in loopFailure when the final response is an error', async () => {
+    const { factory, attempts } = makeLoopFactory();
+    const longMessage = 'x'.repeat(400);
+    attempts.solo = [[{ type: 'error', code: 'rate_limited', message: longMessage }]];
+
+    const engine = new GraphEngine(factory, {
+      task: 'Produce output',
+      initialNode: 'solo',
+      nodes: [{ id: 'solo', role: 'backend', task: 'Do something', maxTurns: 1 }],
+      edges: [],
+      maxSteps: 2,
+    });
+
+    const result = await engine.run();
+
+    expect(result.status).toBe('FAILED');
+    expect(result.trace[0].loopFailure).toBeDefined();
+    expect(result.trace[0].loopFailure).toContain('error rate_limited:');
+    expect(result.trace[0].loopFailure).toContain('x'.repeat(300));
+    expect(result.trace[0].loopFailure).not.toContain('x'.repeat(301));
+  });
+
+  it('leaves loopFailure unset on a successful step', async () => {
+    const { factory, attempts } = makeLoopFactory();
+    attempts.alpha = [[{ type: 'finish', content: 'alpha done' }]];
+
+    const engine = new GraphEngine(factory, {
+      task: 'Single success step',
+      initialNode: 'alpha',
+      nodes: [{ id: 'alpha', role: 'test', task: 'Step alpha', maxTurns: 1 }],
+      edges: [],
+      maxSteps: 2,
+    });
+
+    const result = await engine.run();
+
+    expect(result.status).toBe('SUCCESS');
+    expect(result.trace[0].loopStatus).toBe('SUCCESS');
+    expect(result.trace[0].loopFailure).toBeUndefined();
+    expect('loopFailure' in result.trace[0]).toBe(false);
+  });
+
   it('FAILs immediately on an unknown initial node', async () => {
     const { factory } = makeLoopFactory();
     const engine = new GraphEngine(factory, {
