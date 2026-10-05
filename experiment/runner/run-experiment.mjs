@@ -39,7 +39,9 @@ function parseArgs(argv) {
   const args = argv.slice(2);
   const parsed = {
     config: null,
-    runsDir: path.resolve(__dirname, '..', 'runs'),
+    // Sibling of the monorepo root (one level above `experiment/runner`'s
+    // grandparent), so generated apps never land inside this repository.
+    runsDir: path.resolve(__dirname, '..', '..', '..', 'pi-runs'),
     spec: path.resolve(__dirname, '..', 'SPEC.md'),
     taskFile: null,
     maxTurns: 8,
@@ -50,6 +52,8 @@ function parseArgs(argv) {
     keep: false,
     dryRun: false,
     harnessConfig: null,
+    publish: false,
+    publishOrg: 'harness-loop-graph',
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -64,6 +68,8 @@ function parseArgs(argv) {
     else if (a === '--with-batteries') parsed.withBatteries = true;
     else if (a === '--keep') parsed.keep = true;
     else if (a === '--dry-run') parsed.dryRun = true;
+    else if (a === '--publish') parsed.publish = true;
+    else if (a === '--publish-org') parsed.publishOrg = args[++i];
     else if (a === '--harness-config') {
       const value = args[++i];
       if (value === undefined) {
@@ -107,13 +113,184 @@ async function loadCredentials() {
   return { apiKey, modelId };
 }
 
-async function createWorkspace(runsDir, config, specPath, { dryRun = false } = {}) {
-  const ts = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
-  const ws = path.join(runsDir, `${config}-${ts}`);
+// Lowercases a model id and collapses anything that is not [a-z0-9] into a
+// single '-', trimmed at both ends, so it is safe to use in a directory name.
+function slugifyModelId(modelId) {
+  return modelId
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// YYYYMMDDTHHMMSS in UTC, matching the workspace dir naming contract exactly
+// (ISO-minus-separators would keep the ':'/'.' positions misaligned).
+function timestampForWorkspace(now = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return (
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
+    `T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`
+  );
+}
+
+async function createWorkspace(runsDir, config, modelId, specPath, { dryRun = false } = {}) {
+  const ts = timestampForWorkspace();
+  const ws = path.join(runsDir, `${slugifyModelId(modelId)}-${config}-${ts}`);
   if (dryRun) return ws;
   await fs.mkdir(ws, { recursive: true });
   await fs.copyFile(specPath, path.join(ws, 'SPEC.md'));
   return ws;
+}
+
+// Patterns always ignored in a per-run workspace repo: dependency/build
+// output that should never be committed, and any .env* file (credentials).
+const RUN_GITIGNORE_LINES = ['node_modules/', 'dist/', 'build/', 'coverage/', '.env*'];
+
+// Writes the workspace .gitignore, only adding lines the agent's own
+// .gitignore (if any) doesn't already have, so a generated project's own
+// ignores are preserved.
+async function ensureRunGitignore(ws) {
+  const gitignorePath = path.join(ws, '.gitignore');
+  let existing = '';
+  try {
+    existing = await fs.readFile(gitignorePath, 'utf-8');
+  } catch { /* no .gitignore yet */ }
+  const existingLines = new Set(existing.split('\n').map((l) => l.trim()).filter(Boolean));
+  const missing = RUN_GITIGNORE_LINES.filter((l) => !existingLines.has(l));
+  if (missing.length === 0) return;
+  const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+  await fs.appendFile(gitignorePath, `${prefix}${missing.join('\n')}\n`);
+}
+
+// Turns a finished run workspace into its own git repo with one commit, using
+// a fixed local identity so the operator's own git identity is never
+// required. Real `git`: callers decide what to do if this throws (the run
+// itself must never be lost because of a git failure).
+async function initWorkspaceRepo(ws, message) {
+  await spawnCommand('git', ['init', '-b', 'main'], { cwd: ws });
+  await ensureRunGitignore(ws);
+  await spawnCommand('git', ['add', '-A'], { cwd: ws });
+  await spawnCommand(
+    'git',
+    ['-c', 'user.name=pi-runner', '-c', 'user.email=pi-runner@users.noreply.github.com', 'commit', '-m', message],
+    { cwd: ws },
+  );
+}
+
+// Lists every path under `ws` (files and directories, '/'-joined, relative to
+// `ws`), skipping `.git`. Used by both the secret guard and the acceptance-
+// bench assertion below.
+async function walkWorkspaceEntries(ws) {
+  const entries = [];
+  const stack = [ws];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    const dirEntries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of dirEntries) {
+      if (entry.name === '.git') continue;
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(ws, full).split(path.sep).join('/');
+      entries.push({ rel, full, isDirectory: entry.isDirectory() });
+      if (entry.isDirectory()) stack.push(full);
+    }
+  }
+  return entries;
+}
+
+// The runner never copies experiment/acceptance/ into a generated workspace;
+// this is a defensive assertion that refuses to publish if it ever did.
+async function findAcceptancePathInWorkspace(ws) {
+  const entries = await walkWorkspaceEntries(ws);
+  const hit = entries.find((e) => /(^|\/)acceptance(\/|$)/.test(e.rel));
+  return hit ? hit.rel : null;
+}
+
+// Secret values to refuse publishing on: the model API key actually used for
+// this run, plus (when a router is configured) the value of every route's
+// own apiKeyEnv. Values that are unset are dropped, never compared as ''.
+function collectSecretValues({ apiKey, harnessExtras }) {
+  const secrets = [{ label: 'MODEL_API_KEY', value: apiKey }];
+  const router = harnessExtras?.router;
+  if (router?.routes) {
+    for (const route of Object.values(router.routes)) {
+      if (route.apiKeyEnv) secrets.push({ label: route.apiKeyEnv, value: process.env[route.apiKeyEnv] });
+    }
+  }
+  return secrets.filter((s) => s.value);
+}
+
+// Scans every committed file for any of `secrets`' values. Returns the first
+// hit as { file, label } (never the matched value itself) or null.
+async function scanWorkspaceForSecrets(ws, secrets) {
+  if (secrets.length === 0) return null;
+  const entries = await walkWorkspaceEntries(ws);
+  for (const entry of entries) {
+    if (entry.isDirectory) continue;
+    let content;
+    try {
+      content = await fs.readFile(entry.full, 'utf-8');
+    } catch {
+      continue; // unreadable/binary: nothing a plain string check can find anyway
+    }
+    for (const { label, value } of secrets) {
+      if (content.includes(value)) return { file: entry.rel, label };
+    }
+  }
+  return null;
+}
+
+async function checkGhAuthenticated(run = spawnCommand) {
+  try {
+    await run('gh', ['auth', 'status'], {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Publishes a finished, already-committed workspace as a public repo under
+// `org`, guarded by the acceptance-bench assertion and the secret scan.
+// `run` is injectable so tests can stub `gh`/`git` without network or a real
+// GitHub call. Mutates `report` in place (`repository` or `publishError`);
+// never throws — callers decide exit status from `report.publishError`.
+async function publishWorkspace({ ws, report, modelId, config, org, secrets, run = spawnCommand }) {
+  const acceptancePath = await findAcceptancePathInWorkspace(ws);
+  if (acceptancePath) {
+    report.publishError = `workspace contains acceptance path: ${acceptancePath}`;
+    return;
+  }
+
+  const secretHit = await scanWorkspaceForSecrets(ws, secrets);
+  if (secretHit) {
+    report.publishError = `secret detected in ${secretHit.file}`;
+    return;
+  }
+
+  const repoName = `${org}/run-${path.basename(ws)}`;
+  const description = `${modelId} ${config} run generated by the PI-I harness`;
+  try {
+    const result = await run(
+      'gh',
+      ['repo', 'create', repoName, '--public', '--source', ws, '--push', '--description', description],
+      {},
+    );
+    const url = (result?.stdout ?? '').trim().split('\n').filter(Boolean).pop() || `https://github.com/${repoName}`;
+    report.repository = { name: repoName, url };
+
+    // Commit the updated report (now carrying `repository`) and push again,
+    // rather than writing the URL before the first commit, so the first
+    // commit/push never depends on a repo name `gh repo create` hasn't
+    // confirmed yet.
+    await fs.writeFile(path.join(ws, 'run-report.json'), JSON.stringify(report, null, 2));
+    await run('git', ['add', 'run-report.json'], { cwd: ws });
+    await run(
+      'git',
+      ['-c', 'user.name=pi-runner', '-c', 'user.email=pi-runner@users.noreply.github.com', 'commit', '-m', 'run: record repository metadata'],
+      { cwd: ws },
+    );
+    await run('git', ['push'], { cwd: ws });
+  } catch (err) {
+    report.publishError = err instanceof Error ? err.message : String(err);
+  }
 }
 
 function spawnCommand(cmd, args, opts = {}) {
@@ -478,9 +655,15 @@ function truncate(s, n) {
 
 async function main() {
   const parsed = parseArgs(process.argv);
+
+  if (parsed.publish && !(await checkGhAuthenticated())) {
+    console.error('Usage: --publish requires an authenticated gh CLI. Run `gh auth login` first.');
+    process.exit(1);
+  }
+
   const { apiKey, modelId } = await loadCredentials();
   const sessionId = randomUUID();
-  const ws = await createWorkspace(parsed.runsDir, parsed.config, parsed.spec, { dryRun: parsed.dryRun });
+  const ws = await createWorkspace(parsed.runsDir, parsed.config, modelId, parsed.spec, { dryRun: parsed.dryRun });
 
   let task = DEFAULT_TASK;
   if (parsed.taskFile) {
@@ -640,6 +823,30 @@ async function main() {
   const reportPath = path.join(ws, 'run-report.json');
   await fs.writeFile(reportPath, JSON.stringify(report, null, 2));
 
+  // Turn the workspace into a git repo regardless of run outcome: a run that
+  // FAILED is still worth keeping. A git failure here is recorded, never
+  // thrown — it must not lose the run.
+  try {
+    await initWorkspaceRepo(ws, `run: ${modelId} ${parsed.config} (${report.status})`);
+  } catch (err) {
+    report.repoError = err instanceof Error ? err.message : String(err);
+    console.error(`Warning: failed to create workspace git repo: ${report.repoError}`);
+  }
+
+  if (parsed.publish) {
+    if (report.repoError) {
+      report.publishError = 'workspace repo was not created; see repoError';
+    } else {
+      const secrets = collectSecretValues({ apiKey, harnessExtras });
+      await publishWorkspace({ ws, report, modelId, config: parsed.config, org: parsed.publishOrg, secrets });
+    }
+    if (report.publishError) console.error(`Publish failed: ${report.publishError}`);
+  }
+
+  // Re-persist: initWorkspaceRepo()/publishWorkspace() may have added
+  // repoError/publishError/repository after the write above.
+  await fs.writeFile(reportPath, JSON.stringify(report, null, 2));
+
   console.error(`Run complete`);
   console.error(`  Config:     ${report.config}`);
   console.error(`  Model:      ${report.model}`);
@@ -656,7 +863,7 @@ async function main() {
   }
   console.log(reportPath);
 
-  if (configFailure) process.exitCode = 1;
+  if (configFailure || report.publishError) process.exitCode = 1;
 }
 
 // Node realpath-resolves the main module; argv[1] is not, and import.meta.url is percent-encoded.
@@ -680,5 +887,14 @@ export {
   summarizeRouting,
   attachUsageAndRouting,
   compactTraceC3,
+  slugifyModelId,
+  timestampForWorkspace,
+  initWorkspaceRepo,
+  ensureRunGitignore,
+  findAcceptancePathInWorkspace,
+  collectSecretValues,
+  scanWorkspaceForSecrets,
+  checkGhAuthenticated,
+  publishWorkspace,
   main,
 };

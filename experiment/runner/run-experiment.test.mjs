@@ -9,13 +9,23 @@ import { fileURLToPath } from 'node:url';
 
 import { McpToolProvider, GlmModelAdapter, RoutingModelAdapter } from '../../harness/dist/index.js';
 import {
+  parseArgs,
   buildNodes,
   loadHarnessExtras,
   buildHarness,
   createModel,
+  createWorkspace,
   summarizeRouting,
   attachUsageAndRouting,
   compactTraceC3,
+  slugifyModelId,
+  timestampForWorkspace,
+  initWorkspaceRepo,
+  findAcceptancePathInWorkspace,
+  collectSecretValues,
+  scanWorkspaceForSecrets,
+  checkGhAuthenticated,
+  publishWorkspace,
 } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -369,6 +379,234 @@ test('compactTraceC3() copies loopFailure into a failed trace entry and omits it
 
   assert.equal(compact[0].loopFailure, 'max_turns (1) reached without success');
   assert.equal('loopFailure' in compact[1], false);
+});
+
+// --- T3: runs dir outside the repo, per-run git repo, opt-in publish ---
+
+test('parseArgs() default --runs-dir resolves outside the monorepo (sibling pi-runs)', () => {
+  const monorepoRoot = path.resolve(__dirname, '..', '..');
+  const parsed = parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']);
+  assert.equal(parsed.runsDir, path.join(path.dirname(monorepoRoot), 'pi-runs'));
+  assert.ok(!parsed.runsDir.startsWith(monorepoRoot + path.sep));
+  assert.equal(parsed.publish, false);
+  assert.equal(parsed.publishOrg, 'harness-loop-graph');
+});
+
+test('parseArgs() --publish and --publish-org', () => {
+  const parsed = parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--publish', '--publish-org', 'some-org']);
+  assert.equal(parsed.publish, true);
+  assert.equal(parsed.publishOrg, 'some-org');
+});
+
+test('slugifyModelId() lowercases and collapses non [a-z0-9] runs into single trimmed hyphens', () => {
+  assert.equal(slugifyModelId('GLM-5.2'), 'glm-5-2');
+  assert.equal(slugifyModelId('  Some/Model_ID!! '), 'some-model-id');
+  assert.equal(slugifyModelId('already-lower'), 'already-lower');
+});
+
+test('timestampForWorkspace() formats YYYYMMDDTHHMMSS in UTC', () => {
+  const d = new Date(Date.UTC(2026, 0, 5, 3, 4, 5));
+  assert.equal(timestampForWorkspace(d), '20260105T030405');
+});
+
+test('createWorkspace() names the dir <slug>-<config>-<timestamp>, and --dry-run creates nothing', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runsdir-'));
+  try {
+    const runsDir = path.join(dir, 'runs');
+    const ws = await createWorkspace(runsDir, 'c2', 'GLM-5.2', '/nonexistent/SPEC.md', { dryRun: true });
+    assert.equal(path.dirname(ws), runsDir);
+    assert.match(path.basename(ws), /^glm-5-2-c2-\d{8}T\d{6}$/);
+    await assert.rejects(fs.access(runsDir));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('c1 --dry-run plan workspace is outside the monorepo and nothing is created on disk', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const monorepoRoot = path.resolve(__dirname, '..', '..');
+  const res = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run'],
+    { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  const plan = JSON.parse(res.stdout);
+  assert.ok(!plan.workspace.startsWith(monorepoRoot + path.sep), `workspace ${plan.workspace} must be outside ${monorepoRoot}`);
+  await assert.rejects(fs.access(path.dirname(plan.workspace)), 'the planned runs dir must not have been created');
+});
+
+test('initWorkspaceRepo() creates a git repo with one commit, a .gitignore, and a fixed local identity', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-repo-'));
+  try {
+    await fs.writeFile(path.join(ws, 'run-report.json'), '{}');
+    await fs.writeFile(path.join(ws, 'audit.jsonl'), '{}\n');
+    await fs.mkdir(path.join(ws, 'node_modules'));
+    await fs.writeFile(path.join(ws, 'node_modules', 'x.txt'), 'should be ignored');
+
+    await initWorkspaceRepo(ws, 'run: glm-5.2 c1 (SUCCESS)');
+
+    const branch = execFileSync('git', ['-C', ws, 'branch', '--show-current'], { encoding: 'utf8' }).trim();
+    assert.equal(branch, 'main');
+
+    const log = execFileSync('git', ['-C', ws, 'log', '--format=%s|%an|%ae'], { encoding: 'utf8' }).trim();
+    assert.equal(log, 'run: glm-5.2 c1 (SUCCESS)|pi-runner|pi-runner@users.noreply.github.com');
+
+    const tracked = execFileSync('git', ['-C', ws, 'ls-files'], { encoding: 'utf8' }).trim().split('\n');
+    assert.ok(tracked.includes('run-report.json'));
+    assert.ok(tracked.includes('audit.jsonl'));
+    assert.ok(tracked.includes('.gitignore'));
+    assert.ok(!tracked.some((f) => f.startsWith('node_modules/')));
+
+    const gitignore = await fs.readFile(path.join(ws, '.gitignore'), 'utf-8');
+    for (const line of ['node_modules/', 'dist/', 'build/', 'coverage/', '.env*']) {
+      assert.ok(gitignore.includes(line), `expected .gitignore to include '${line}'`);
+    }
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceForSecrets() detects a planted API key value and reports its relative path, never the value', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-secret-'));
+  try {
+    await fs.mkdir(path.join(ws, 'src'));
+    await fs.writeFile(path.join(ws, 'src', 'config.js'), "export const KEY = 'sk-super-secret-123';\n");
+    const secrets = collectSecretValues({ apiKey: 'sk-super-secret-123', harnessExtras: null });
+    const hit = await scanWorkspaceForSecrets(ws, secrets);
+    assert.deepEqual(hit, { file: 'src/config.js', label: 'MODEL_API_KEY' });
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceForSecrets() finds nothing when the key is absent from the workspace', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-secret-clean-'));
+  try {
+    await fs.writeFile(path.join(ws, 'README.md'), 'nothing secret here');
+    const secrets = collectSecretValues({ apiKey: 'sk-super-secret-123', harnessExtras: null });
+    assert.equal(await scanWorkspaceForSecrets(ws, secrets), null);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test("collectSecretValues() also includes each router route's apiKeyEnv value when configured", () => {
+  const previous = process.env.TEST_ROUTE_KEY;
+  process.env.TEST_ROUTE_KEY = 'route-secret-xyz';
+  try {
+    const secrets = collectSecretValues({
+      apiKey: 'default-secret',
+      harnessExtras: { router: { routes: { longContext: { model: 'm', apiKeyEnv: 'TEST_ROUTE_KEY' }, retry: { model: 'm2' } } } },
+    });
+    assert.deepEqual(
+      secrets.sort((a, b) => a.label.localeCompare(b.label)),
+      [
+        { label: 'MODEL_API_KEY', value: 'default-secret' },
+        { label: 'TEST_ROUTE_KEY', value: 'route-secret-xyz' },
+      ],
+    );
+  } finally {
+    if (previous === undefined) delete process.env.TEST_ROUTE_KEY;
+    else process.env.TEST_ROUTE_KEY = previous;
+  }
+});
+
+test('findAcceptancePathInWorkspace() flags any path containing an acceptance/ segment', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-acceptance-'));
+  try {
+    assert.equal(await findAcceptancePathInWorkspace(ws), null);
+    await fs.mkdir(path.join(ws, 'experiment', 'acceptance'), { recursive: true });
+    await fs.writeFile(path.join(ws, 'experiment', 'acceptance', 'run-all.mjs'), '// hidden battery');
+    const hit = await findAcceptancePathInWorkspace(ws);
+    assert.ok(hit === 'experiment/acceptance' || hit.startsWith('experiment/acceptance/'), hit);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('checkGhAuthenticated() reflects whether the injected run resolves or rejects', async () => {
+  assert.equal(await checkGhAuthenticated(async () => ({ stdout: '', stderr: '' })), true);
+  assert.equal(
+    await checkGhAuthenticated(async () => { throw new Error('not logged in'); }),
+    false,
+  );
+});
+
+test('publishWorkspace() builds the gh repo create command and records repository in run-report.json', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-'));
+  try {
+    await fs.writeFile(path.join(ws, 'run-report.json'), '{}');
+    const wsName = path.basename(ws);
+    const expectedUrl = `https://github.com/harness-loop-graph/run-${wsName}`;
+    const calls = [];
+    const run = async (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      if (cmd === 'gh') return { stdout: `${expectedUrl}\n`, stderr: '' };
+      return { stdout: '', stderr: '' };
+    };
+    const report = { status: 'SUCCESS' };
+
+    await publishWorkspace({ ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph', secrets: [], run });
+
+    assert.equal(report.publishError, undefined);
+    assert.deepEqual(report.repository, { name: `harness-loop-graph/run-${wsName}`, url: expectedUrl });
+
+    const ghCall = calls.find((c) => c.cmd === 'gh');
+    assert.deepEqual(ghCall.args, [
+      'repo', 'create', `harness-loop-graph/run-${wsName}`,
+      '--public', '--source', ws, '--push',
+      '--description', 'glm-5.2 c1 run generated by the PI-I harness',
+    ]);
+    assert.ok(calls.some((c) => c.cmd === 'git' && c.args.includes('push')), 'the updated report must be pushed');
+
+    const persisted = JSON.parse(await fs.readFile(path.join(ws, 'run-report.json'), 'utf-8'));
+    assert.deepEqual(persisted.repository, report.repository);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('publishWorkspace() refuses to publish and never calls gh/git when a secret is found', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-secret-'));
+  try {
+    await fs.mkdir(path.join(ws, 'src'));
+    await fs.writeFile(path.join(ws, 'src', 'leak.js'), "const key = 'leaked-key-abc';\n");
+    const calls = [];
+    const run = async (cmd) => { calls.push(cmd); return { stdout: '', stderr: '' }; };
+    const report = {};
+
+    await publishWorkspace({
+      ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph',
+      secrets: [{ label: 'MODEL_API_KEY', value: 'leaked-key-abc' }],
+      run,
+    });
+
+    assert.equal(report.publishError, 'secret detected in src/leak.js');
+    assert.equal(report.repository, undefined);
+    assert.equal(calls.length, 0, 'gh/git must never be invoked once a secret is found');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('publishWorkspace() refuses to publish when the workspace contains an acceptance/ path', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-acceptance-'));
+  try {
+    await fs.mkdir(path.join(ws, 'acceptance'), { recursive: true });
+    await fs.writeFile(path.join(ws, 'acceptance', 'run-all.mjs'), '// hidden battery');
+    const calls = [];
+    const run = async (cmd) => { calls.push(cmd); return { stdout: '', stderr: '' }; };
+    const report = {};
+
+    await publishWorkspace({ ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run });
+
+    assert.match(report.publishError, /acceptance/);
+    assert.equal(calls.length, 0, 'gh/git must never be invoked once the acceptance guard trips');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
 });
 
 test('c3 nodes keep topology and verifications but use the --task-file task', () => {
