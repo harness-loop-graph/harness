@@ -7,7 +7,7 @@ import { SkillCatalog, registerSkillTool } from '../src/components/skill-catalog
 import { RegistryToolManager } from '../src/components/tool-manager.js';
 import { StubGuardrails } from '../src/components/guardrails.js';
 import { FsContextManager } from '../src/components/context-manager.js';
-import { GlmModelAdapter } from '../src/components/glm-adapter.js';
+import { OpenAICompatibleModelAdapter } from '../src/components/openai-compatible-adapter.js';
 import type { ModelRequest } from '../src/contracts/core.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -140,9 +140,10 @@ describe('Context rendering with skills', () => {
     expect(ctx.skills).toBeUndefined();
   });
 
-  it('the GLM adapter renders an Available skills section only when skills exist', async () => {
+  it('the adapter renders an Available skills section only when skills exist', async () => {
     vi.stubEnv('MODEL_API_KEY', 'test-key');
     vi.stubEnv('MODEL_ID', 'test-model');
+    vi.stubEnv('MODEL_BASE_URL', 'https://test.example/v1');
     let capturedBody: any;
     const fetchImpl = (async (_url: string, init: RequestInit) => {
       capturedBody = JSON.parse(init.body as string);
@@ -151,7 +152,7 @@ describe('Context rendering with skills', () => {
         headers: { 'Content-Type': 'application/json' },
       });
     }) as unknown as typeof fetch;
-    const adapter = new GlmModelAdapter({ fetchImpl });
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl });
 
     const withSkills: ModelRequest = {
       task: 'do something',

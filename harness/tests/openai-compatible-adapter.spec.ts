@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { GlmModelAdapter } from '../src/components/glm-adapter.js';
+import { OpenAICompatibleModelAdapter } from '../src/components/openai-compatible-adapter.js';
 import type { Context, ModelRequest, ToolSpec } from '../src/contracts/core.js';
 
 const TOOLS: ToolSpec[] = [
@@ -29,17 +29,24 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('GlmModelAdapter', () => {
+describe('OpenAICompatibleModelAdapter', () => {
   it('throws a clear error when MODEL_API_KEY is missing', () => {
     delete process.env.MODEL_API_KEY;
-    process.env.MODEL_ID = 'glm-4.7';
-    expect(() => new GlmModelAdapter()).toThrow(/MODEL_API_KEY/);
+    process.env.MODEL_ID = 'test-model';
+    expect(() => new OpenAICompatibleModelAdapter()).toThrow(/MODEL_API_KEY/);
   });
 
   it('throws a clear error when MODEL_ID is missing', () => {
     process.env.MODEL_API_KEY = 'test-key';
     delete process.env.MODEL_ID;
-    expect(() => new GlmModelAdapter()).toThrow(/MODEL_ID/);
+    expect(() => new OpenAICompatibleModelAdapter()).toThrow(/MODEL_ID/);
+  });
+
+  it('throws a clear error when MODEL_BASE_URL is missing and no baseUrl is given', () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'test-model';
+    delete process.env.MODEL_BASE_URL;
+    expect(() => new OpenAICompatibleModelAdapter()).toThrow(/MODEL_BASE_URL/);
   });
 
   it('maps a tool_calls response to a tool_call ModelResponse', async () => {
@@ -76,9 +83,9 @@ describe('GlmModelAdapter', () => {
         ),
     );
 
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       apiKey: 'test-key',
-      baseUrl: 'https://opencode.ai/zen/go/v1',
+      baseUrl: 'https://api.example.test/v1',
       model: 'test-model',
       fetchImpl,
     });
@@ -97,12 +104,13 @@ describe('GlmModelAdapter', () => {
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
 
     expect(url).toBe(
-        'https://opencode.ai/zen/go/v1/chat/completions',
+        'https://api.example.test/v1/chat/completions',
     );
 
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer test-key');
     expect(headers['Content-Type']).toBe('application/json');
+    expect(headers['User-Agent']).toBe('pi-harness/0.1.0');
 
     const body = JSON.parse(String(init.body));
 
@@ -111,15 +119,41 @@ describe('GlmModelAdapter', () => {
     expect(body.tools).toBeDefined();
   });
 
+  it('merges a configured headers object into every request, without dropping the built-in ones', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }],
+      }),
+    );
+
+    const adapter = new OpenAICompatibleModelAdapter({
+      apiKey: 'test-key',
+      baseUrl: 'https://api.example.test/v1',
+      model: 'test-model',
+      userAgent: 'custom-agent/1.0.0',
+      headers: { 'x-custom-routing': 'session-123' },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await adapter.complete(request());
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers['x-custom-routing']).toBe('session-123');
+    expect(headers.Authorization).toBe('Bearer test-key');
+    expect(headers['User-Agent']).toBe('custom-agent/1.0.0');
+  });
+
   it('maps a content response to a finish ModelResponse', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'All done.' } }],
       }),
     );
-    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
 
     const response = await adapter.complete(request());
 
@@ -134,9 +168,8 @@ describe('GlmModelAdapter', () => {
         choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }],
       }),
     );
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       baseUrl: 'https://api.openai.com/v1',
-      sessionId: 'session-openai',
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
@@ -153,11 +186,12 @@ describe('GlmModelAdapter', () => {
 
   it('maps HTTP errors to an error ModelResponse', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(401, { error: { code: 401, message: 'Invalid API key' } }),
     );
-    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
 
     const response = await adapter.complete(request());
 
@@ -170,9 +204,10 @@ describe('GlmModelAdapter', () => {
 
   it('maps network failures to an error ModelResponse', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
 
     const response = await adapter.complete(request());
 
@@ -235,7 +270,7 @@ describe('GlmModelAdapter', () => {
             ),
         );
 
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       apiKey: 'test-key',
       baseUrl: 'https://test.example/v1',
       model: 'test-model',
@@ -275,7 +310,7 @@ describe('GlmModelAdapter', () => {
         ),
     );
 
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       apiKey: 'test-key',
       baseUrl: 'https://test.example/v1',
       model: 'test-model',
@@ -301,13 +336,14 @@ describe('GlmModelAdapter', () => {
 
   it('feeds history back as assistant tool_calls plus tool-role messages', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }],
       }),
     );
-    const adapter = new GlmModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
 
     await adapter.complete(
       request([
@@ -324,10 +360,10 @@ describe('GlmModelAdapter', () => {
     expect(body.messages[3].tool_call_id).toBe('call_write_file');
   });
 
-  // adding a couple more unit test for the GLM Adapter functionality
   it('returns invalid_tool_arguments when a tool call has malformed JSON arguments', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
 
     const fetchImpl = vi.fn().mockResolvedValue(
         jsonResponse(200, {
@@ -353,7 +389,7 @@ describe('GlmModelAdapter', () => {
         }),
     );
 
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
@@ -368,7 +404,8 @@ describe('GlmModelAdapter', () => {
 
   it('returns empty_response when the API returns no choices', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
 
     const fetchImpl = vi.fn().mockResolvedValue(
         jsonResponse(200, {
@@ -376,7 +413,7 @@ describe('GlmModelAdapter', () => {
         }),
     );
 
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
@@ -391,7 +428,8 @@ describe('GlmModelAdapter', () => {
 
   it('returns empty_content when the model returns neither content nor tool calls', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
 
     const fetchImpl = vi.fn().mockResolvedValue(
         jsonResponse(200, {
@@ -407,7 +445,7 @@ describe('GlmModelAdapter', () => {
         }),
     );
 
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
@@ -422,7 +460,8 @@ describe('GlmModelAdapter', () => {
 
   it('reconstructs multiple tool-call/tool-result history entries correctly', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
 
     const fetchImpl = vi.fn().mockResolvedValue(
         jsonResponse(200, {
@@ -438,7 +477,7 @@ describe('GlmModelAdapter', () => {
         }),
     );
 
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     const testRequest = request([
@@ -507,7 +546,8 @@ describe('GlmModelAdapter', () => {
 
   it('includes previous-attempt feedback in the user message', async () => {
     process.env.MODEL_API_KEY = 'test-key';
-    process.env.MODEL_ID = 'glm-4.7';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
 
     const fetchImpl = vi.fn().mockResolvedValue(
         jsonResponse(200, {
@@ -523,7 +563,7 @@ describe('GlmModelAdapter', () => {
         }),
     );
 
-    const adapter = new GlmModelAdapter({
+    const adapter = new OpenAICompatibleModelAdapter({
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 

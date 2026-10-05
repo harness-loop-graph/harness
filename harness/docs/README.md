@@ -3,8 +3,10 @@
 `harness/` is the code generator of a university thesis project
 (PI-I): a model-agnostic agent harness built in three iterations — C1 (one
 interaction cycle), C2 (a corrective loop on top of C1), and C3 (a
-multi-agent graph on top of C2). It runs against **GLM (glm-5.2)** through
-**OpenCode Go**, an OpenAI-compatible proxy. The `experiment/` directory at the repository root defines the fixed case study
+multi-agent graph on top of C2). It runs against any OpenAI-compatible
+chat-completions endpoint, configured by `MODEL_BASE_URL`/`MODEL_API_KEY`/
+`MODEL_ID` (the first experiment runs used GLM through OpenCode Go — see
+[`decisions.md`](./decisions.md)). The `experiment/` directory at the repository root defines the fixed case study
 (`SPEC.md`) the harness is asked to build, and orchestrates experiment runs
 (`experiment/runner/run-experiment.mjs`) across the C1/C2/C3 configurations.
 
@@ -23,8 +25,9 @@ so the thesis writeup can cite exact implementation evidence.
 - [`graph.md`](./graph.md) — C3: the multi-agent graph (`GraphEngine`), node
   and edge model, and `maxSteps` loop prevention.
 - [`model-provider.md`](./model-provider.md) — the real model adapter
-  (`GlmModelAdapter`), GLM access through OpenCode Go, environment
-  variables, and why the adapter stays provider-generic in shape.
+  (`OpenAICompatibleModelAdapter`), the OpenAI-compatible chat-completions
+  request/response shape, environment variables, and why the adapter stays
+  provider-generic in shape.
 - [`decisions.md`](./decisions.md) — implementation decisions worth
   recording for the thesis: provider choice, env var naming, deterministic
   decision policy, guardrails design.

@@ -1,10 +1,9 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { Harness } from './harness.js';
 import { FsContextManager } from './components/context-manager.js';
-import { GlmModelAdapter } from './components/glm-adapter.js';
+import { OpenAICompatibleModelAdapter } from './components/openai-compatible-adapter.js';
 import { LocalExecutionManager } from './components/execution-manager.js';
 import { PolicyGuardrails } from './components/guardrails.js';
 import { RegistryToolManager, registerBuiltinTools } from './components/tool-manager.js';
@@ -26,7 +25,7 @@ async function main(): Promise<void> {
   );
   const tools = new RegistryToolManager(guardrails);
   const availTools = registerBuiltinTools(tools, { execution, workspaceRoot: workspace });
-  const model = new GlmModelAdapter({ sessionId: randomUUID() });
+  const model = new OpenAICompatibleModelAdapter();
 
   const harness = new Harness(
     {
@@ -52,10 +51,10 @@ async function main(): Promise<void> {
   );
 
   console.log(`Workspace: ${workspace}`);
-  console.log('Task: create a file named smoke.txt containing the text "GLM harness alive", then finish.\n');
+  console.log('Task: create a file named smoke.txt containing the text "harness alive", then finish.\n');
 
   const result = await harness.run(
-    'Create a file named smoke.txt containing exactly the text "GLM harness alive", then report you are done.',
+    'Create a file named smoke.txt containing exactly the text "harness alive", then report you are done.',
   );
 
   console.log('--- Trace ---');
@@ -87,7 +86,7 @@ async function main(): Promise<void> {
 
   const smokePath = path.join(workspace, 'smoke.txt');
   const content = await fs.readFile(smokePath, 'utf8').catch(() => null);
-  const ok = content !== null && content.includes('GLM harness alive');
+  const ok = content !== null && content.includes('harness alive');
 
   console.log(`\nsmoke.txt present and correct: ${ok}`);
   if (!ok || result.finalResponse.type !== 'finish') {

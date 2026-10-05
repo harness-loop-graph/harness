@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { readFileSync, realpathSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
@@ -12,7 +12,7 @@ import {
   Harness,
   AgentLoop,
   GraphEngine,
-  GlmModelAdapter,
+  OpenAICompatibleModelAdapter,
   FsContextManager,
   LocalExecutionManager,
   PolicyGuardrails,
@@ -542,15 +542,15 @@ async function loadHarnessExtras(configPath) {
 /**
  * Builds the model adapter for a run: identical code path for c1/c2/c3.
  * When the harness config has a `router` section, wraps a plain
- * GlmModelAdapter (the 'default' route) with a RoutingModelAdapter using
- * the same sessionId as the run; without one, returns the plain adapter
- * unchanged, so output without --harness-config (or without a router
- * section) is unaffected.
+ * OpenAICompatibleModelAdapter (the 'default' route) with a
+ * RoutingModelAdapter; without one, returns the plain adapter unchanged, so
+ * output without --harness-config (or without a router section) is
+ * unaffected.
  */
-async function createModel({ apiKey, modelId, sessionId, harnessExtras, makeAdapter }) {
-  const defaultAdapter = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
+async function createModel({ apiKey, modelId, harnessExtras, makeAdapter }) {
+  const defaultAdapter = new OpenAICompatibleModelAdapter({ apiKey, model: modelId });
   if (!harnessExtras?.router) return defaultAdapter;
-  return createRoutedModel(harnessExtras.router, defaultAdapter, { sessionId, makeAdapter });
+  return createRoutedModel(harnessExtras.router, defaultAdapter, { makeAdapter });
 }
 
 /**
@@ -809,7 +809,6 @@ async function main() {
   }
 
   const { apiKey, modelId } = await loadCredentials();
-  const sessionId = randomUUID();
   const ws = await createWorkspace(parsed.runsDir, parsed.config, modelId, parsed.spec, { dryRun: parsed.dryRun });
 
   if (parsed.dryRun) {
@@ -818,7 +817,6 @@ async function main() {
       config: parsed.config,
       wiring: {
         model: modelId,
-        sessionId,
         maxTurns: parsed.maxTurns,
         maxSteps: parsed.maxSteps,
         toolRoundsPerTurn: parsed.toolRounds,
@@ -874,7 +872,7 @@ async function main() {
   let runException = null;
   if (!configFailure) try {
     if (parsed.config === 'c1') {
-      const model = await createModel({ apiKey, modelId, sessionId, harnessExtras });
+      const model = await createModel({ apiKey, modelId, harnessExtras });
       const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
       report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
@@ -887,7 +885,7 @@ async function main() {
         report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
       }
     } else if (parsed.config === 'c2') {
-      const model = await createModel({ apiKey, modelId, sessionId, harnessExtras });
+      const model = await createModel({ apiKey, modelId, harnessExtras });
       const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
       const loopResult = await loop.run({
@@ -906,7 +904,7 @@ async function main() {
         report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
       }
     } else if (parsed.config === 'c3') {
-      const model = await createModel({ apiKey, modelId, sessionId, harnessExtras });
+      const model = await createModel({ apiKey, modelId, harnessExtras });
       const factory = (node) => {
         if (node.id === 'reviewer') clearStaleReviewVerdict(ws);
         const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`), harnessExtras);

@@ -1,11 +1,10 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { AgentLoop } from './loop/agent-loop.js';
 import { Harness } from './harness.js';
 import { FsContextManager } from './components/context-manager.js';
-import { GlmModelAdapter } from './components/glm-adapter.js';
+import { OpenAICompatibleModelAdapter } from './components/openai-compatible-adapter.js';
 import { LocalExecutionManager } from './components/execution-manager.js';
 import { PolicyGuardrails } from './components/guardrails.js';
 import { RegistryToolManager, registerBuiltinTools } from './components/tool-manager.js';
@@ -28,7 +27,7 @@ async function main(): Promise<void> {
   const tools = new RegistryToolManager(guardrails);
   const availTools = registerBuiltinTools(tools, { execution, workspaceRoot: workspace });
   const verification = new RecordingVerificationManager(path.join(workspace, 'verifications.jsonl'));
-  const model = new GlmModelAdapter({ sessionId: randomUUID() });
+  const model = new OpenAICompatibleModelAdapter();
 
   const harness = new Harness(
     {

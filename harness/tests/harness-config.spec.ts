@@ -9,7 +9,7 @@ import { RegistryToolManager } from '../src/components/tool-manager.js';
 import { StubGuardrails } from '../src/components/guardrails.js';
 import { StubModelAdapter } from '../src/components/model-adapter.js';
 import type { ModelAdapter } from '../src/components/model-adapter.js';
-import type { GlmAdapterConfig } from '../src/components/glm-adapter.js';
+import type { OpenAICompatibleAdapterConfig } from '../src/components/openai-compatible-adapter.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EXAMPLE_CONFIG = path.resolve(__dirname, '..', 'examples', 'harness-config.json');
@@ -137,8 +137,8 @@ describe('createRoutedModel', () => {
     vi.unstubAllEnvs();
   });
 
-  function stubMakeAdapter(created: GlmAdapterConfig[]) {
-    return (config: GlmAdapterConfig): ModelAdapter => {
+  function stubMakeAdapter(created: OpenAICompatibleAdapterConfig[]) {
+    return (config: OpenAICompatibleAdapterConfig): ModelAdapter => {
       created.push(config);
       return new StubModelAdapter();
     };
@@ -151,7 +151,7 @@ describe('createRoutedModel', () => {
     // ambiently set for this run, or every created adapter would fall back
     // to it instead of the expected `undefined` below.
     vi.stubEnv('MODEL_BASE_URL', undefined);
-    const created: GlmAdapterConfig[] = [];
+    const created: OpenAICompatibleAdapterConfig[] = [];
     const defaultAdapter = new StubModelAdapter();
 
     const model = await createRoutedModel(
@@ -162,14 +162,14 @@ describe('createRoutedModel', () => {
         },
       },
       defaultAdapter,
-      { sessionId: 'sess-1', makeAdapter: stubMakeAdapter(created) },
+      { makeAdapter: stubMakeAdapter(created) },
     );
 
     expect(typeof model.getUsage).toBe('function');
     expect(typeof model.getRouting).toBe('function');
     expect(created).toEqual([
-      { apiKey: 'big-key', model: 'big-model', baseUrl: undefined, sessionId: 'sess-1' },
-      { apiKey: 'default-key', model: 'retry-model', baseUrl: undefined, sessionId: 'sess-1' },
+      { apiKey: 'big-key', model: 'big-model', baseUrl: undefined },
+      { apiKey: 'default-key', model: 'retry-model', baseUrl: undefined },
     ]);
   });
 
@@ -177,15 +177,15 @@ describe('createRoutedModel', () => {
     vi.stubEnv('MODEL_API_KEY', 'default-key');
     vi.stubEnv('BIG_KEY', 'big-key');
     vi.stubEnv('MODEL_BASE_URL', 'https://example.test');
-    const created: GlmAdapterConfig[] = [];
+    const created: OpenAICompatibleAdapterConfig[] = [];
 
     await createRoutedModel(
       { routes: { longContext: { model: 'big-model', apiKeyEnv: 'BIG_KEY' } } },
       new StubModelAdapter(),
-      { sessionId: 'sess-1', makeAdapter: stubMakeAdapter(created) },
+      { makeAdapter: stubMakeAdapter(created) },
     );
 
-    expect(created).toEqual([{ apiKey: 'big-key', model: 'big-model', baseUrl: 'https://example.test', sessionId: 'sess-1' }]);
+    expect(created).toEqual([{ apiKey: 'big-key', model: 'big-model', baseUrl: 'https://example.test' }]);
   });
 
   it('throws a clear error naming the route and the missing env var', async () => {

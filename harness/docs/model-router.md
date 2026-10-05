@@ -46,15 +46,15 @@ rough heuristic, not a tokenizer: the serialized character length of
 ```ts
 const router = new RoutingModelAdapter({
   routes: {
-    default: new GlmModelAdapter({ apiKey, model: 'glm-5.2' }),
-    longContext: new GlmModelAdapter({ apiKey, model: 'glm-5.2-long' }),
-    retry: new GlmModelAdapter({ apiKey, model: 'glm-5.2' }),
+    default: new OpenAICompatibleModelAdapter({ apiKey, model: 'gpt-4o-mini' }),
+    longContext: new OpenAICompatibleModelAdapter({ apiKey, model: 'gpt-4o-mini-long-context' }),
+    retry: new OpenAICompatibleModelAdapter({ apiKey, model: 'gpt-4o-mini' }),
   },
   longContextThreshold: 60_000,
 });
 ```
 
-`getUsage()` returns the same shape as `GlmModelAdapter.getUsage()`
+`getUsage()` returns the same shape as `OpenAICompatibleModelAdapter.getUsage()`
 (`promptTokens`, `completionTokens`, `totalTokens`, `calls`, `cost`,
 `modelsUsed`), aggregated across every route — so a caller that only
 reads `getUsage()` (e.g. the experiment runner's `report.usage`) needs no
@@ -72,8 +72,8 @@ optional `router` section:
   "router": {
     "longContextThreshold": 60000,
     "routes": {
-      "longContext": { "model": "glm-5.2-long", "apiKeyEnv": "LONG_MODEL_API_KEY" },
-      "retry": { "model": "glm-5.2" }
+      "longContext": { "model": "gpt-4o-mini-long-context", "apiKeyEnv": "LONG_MODEL_API_KEY" },
+      "retry": { "model": "gpt-4o-mini" }
     },
     "customRouterPath": "./my-custom-router.mjs"
   }
@@ -96,8 +96,8 @@ optional `router` section:
 
 `parseHarnessConfig`/`loadHarnessConfig` validate this section (see
 `src/harness-config.ts`); `createRoutedModel(routerConfig, defaultAdapter,
-{ sessionId, makeAdapter? })` builds the `RoutingModelAdapter` from it —
-`makeAdapter` defaults to `GlmModelAdapter` and is injectable for tests.
+{ makeAdapter? })` builds the `RoutingModelAdapter` from it — `makeAdapter`
+defaults to `OpenAICompatibleModelAdapter` and is injectable for tests.
 
 ## Why no role-based routing
 

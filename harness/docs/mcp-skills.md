@@ -60,8 +60,8 @@ fails fast, naming the file.
 
 Progressive disclosure: `catalog.list()` returns only `{ name,
 description }` pairs, which `FsContextManager` (constructor now takes an
-optional `SkillCatalog`) puts on `Context.skills`, and `GlmModelAdapter`
-renders as an "Available skills" system-message section — only when at
+optional `SkillCatalog`) puts on `Context.skills`, and
+`OpenAICompatibleModelAdapter` renders as an "Available skills" system-message section — only when at
 least one skill is loaded — instructing the model to call `load_skill`
 before doing work a skill covers. The full body (frontmatter stripped)
 and the skill's directory (so the model can `read_file` files the skill

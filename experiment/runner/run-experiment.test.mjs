@@ -7,7 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { McpToolProvider, GlmModelAdapter, RoutingModelAdapter } from '../../harness/dist/index.js';
+import { McpToolProvider, OpenAICompatibleModelAdapter, RoutingModelAdapter } from '../../harness/dist/index.js';
 import {
   parseArgs,
   buildNodes,
@@ -34,9 +34,9 @@ import {
 } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const GLM_TESTS_DIR = path.resolve(__dirname, '..', '..', 'harness', 'tests');
-const FIXTURE_MCP_SERVER = path.join(GLM_TESTS_DIR, 'fixtures', 'mcp-fixture-server.mjs');
-const FIXTURE_SKILLS_DIR = path.join(GLM_TESTS_DIR, 'fixtures', 'skills');
+const HARNESS_TESTS_DIR = path.resolve(__dirname, '..', '..', 'harness', 'tests');
+const FIXTURE_MCP_SERVER = path.join(HARNESS_TESTS_DIR, 'fixtures', 'mcp-fixture-server.mjs');
+const FIXTURE_SKILLS_DIR = path.join(HARNESS_TESTS_DIR, 'fixtures', 'skills');
 
 async function writeHarnessConfigFile(dir, { skillsDirs } = {}) {
   const file = path.join(dir, 'harness-config.json');
@@ -138,10 +138,17 @@ test('loadHarnessExtras() closes the MCP provider when the skills load fails', a
   }
 });
 
-test('createModel() returns the plain GlmModelAdapter unchanged without a router (identical for every config)', async () => {
-  for (const harnessExtras of [null, {}, { router: undefined }]) {
-    const model = await createModel({ apiKey: 'k', modelId: 'm', sessionId: 's', harnessExtras });
-    assert.ok(model instanceof GlmModelAdapter, 'expected a plain GlmModelAdapter, not a router wrapper');
+test('createModel() returns the plain OpenAICompatibleModelAdapter unchanged without a router (identical for every config)', async () => {
+  const previousBaseUrl = process.env.MODEL_BASE_URL;
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  try {
+    for (const harnessExtras of [null, {}, { router: undefined }]) {
+      const model = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras });
+      assert.ok(model instanceof OpenAICompatibleModelAdapter, 'expected a plain OpenAICompatibleModelAdapter, not a router wrapper');
+    }
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.MODEL_BASE_URL;
+    else process.env.MODEL_BASE_URL = previousBaseUrl;
   }
 });
 
@@ -153,6 +160,7 @@ test('createModel() wraps the default adapter in a RoutingModelAdapter with the 
   };
   const previousLongKey = process.env.LONG_KEY;
   const previousModelApiKey = process.env.MODEL_API_KEY;
+  const previousBaseUrl = process.env.MODEL_BASE_URL;
   process.env.LONG_KEY = 'long-key';
   // The 'retry' route has no apiKeyEnv, so it must fall back to
   // MODEL_API_KEY. Use a distinct value from the `apiKey` passed to
@@ -160,11 +168,13 @@ test('createModel() wraps the default adapter in a RoutingModelAdapter with the 
   // assertion can actually tell the fallback came from MODEL_API_KEY and
   // not from the createModel() call's own apiKey argument.
   process.env.MODEL_API_KEY = 'env-fallback-key';
+  // The default adapter construction inside createModel() now requires a
+  // base URL (no provider default) even though this test never calls it.
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
   try {
     const model = await createModel({
       apiKey: 'run-default-key',
       modelId: 'default-model',
-      sessionId: 'sess-1',
       harnessExtras: {
         router: {
           routes: {
@@ -180,30 +190,38 @@ test('createModel() wraps the default adapter in a RoutingModelAdapter with the 
     assert.equal(typeof model.getUsage, 'function');
     assert.equal(typeof model.getRouting, 'function');
     assert.deepEqual(created, [
-      { apiKey: 'long-key', model: 'long-model', baseUrl: undefined, sessionId: 'sess-1' },
-      { apiKey: 'env-fallback-key', model: 'retry-model', baseUrl: undefined, sessionId: 'sess-1' },
+      { apiKey: 'long-key', model: 'long-model', baseUrl: 'https://test.example/v1' },
+      { apiKey: 'env-fallback-key', model: 'retry-model', baseUrl: 'https://test.example/v1' },
     ]);
   } finally {
     if (previousLongKey === undefined) delete process.env.LONG_KEY;
     else process.env.LONG_KEY = previousLongKey;
     if (previousModelApiKey === undefined) delete process.env.MODEL_API_KEY;
     else process.env.MODEL_API_KEY = previousModelApiKey;
+    if (previousBaseUrl === undefined) delete process.env.MODEL_BASE_URL;
+    else process.env.MODEL_BASE_URL = previousBaseUrl;
   }
 });
 
 test('createModel() propagates a clear error naming the route and env var when apiKeyEnv is unset', async () => {
   delete process.env.MISSING_KEY;
-  await assert.rejects(
-    () =>
-      createModel({
-        apiKey: 'default-key',
-        modelId: 'default-model',
-        sessionId: 'sess-1',
-        harnessExtras: { router: { routes: { longContext: { model: 'long-model', apiKeyEnv: 'MISSING_KEY' } } } },
-        makeAdapter: () => ({ async complete() { return { type: 'finish', content: 'stub' }; } }),
-      }),
-    /route 'longContext' needs env var 'MISSING_KEY'/,
-  );
+  const previousBaseUrl = process.env.MODEL_BASE_URL;
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  try {
+    await assert.rejects(
+      () =>
+        createModel({
+          apiKey: 'default-key',
+          modelId: 'default-model',
+          harnessExtras: { router: { routes: { longContext: { model: 'long-model', apiKeyEnv: 'MISSING_KEY' } } } },
+          makeAdapter: () => ({ async complete() { return { type: 'finish', content: 'stub' }; } }),
+        }),
+      /route 'longContext' needs env var 'MISSING_KEY'/,
+    );
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.MODEL_BASE_URL;
+    else process.env.MODEL_BASE_URL = previousBaseUrl;
+  }
 });
 
 test('attachUsageAndRouting() sets report.routing from a router model (shared by c1/c2/c3)', async () => {
@@ -213,12 +231,13 @@ test('attachUsageAndRouting() sets report.routing from a router model (shared by
     return { async complete() { return { type: 'finish', content: 'stub' }; } };
   };
   const previousModelApiKey = process.env.MODEL_API_KEY;
+  const previousBaseUrl = process.env.MODEL_BASE_URL;
   process.env.MODEL_API_KEY = 'default-key';
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
   try {
     const model = await createModel({
       apiKey: 'default-key',
       modelId: 'default-model',
-      sessionId: 'sess-1',
       harnessExtras: { router: { routes: { retry: { model: 'retry-model' } } } },
       makeAdapter,
     });
@@ -236,18 +255,28 @@ test('attachUsageAndRouting() sets report.routing from a router model (shared by
   } finally {
     if (previousModelApiKey === undefined) delete process.env.MODEL_API_KEY;
     else process.env.MODEL_API_KEY = previousModelApiKey;
+    if (previousBaseUrl === undefined) delete process.env.MODEL_BASE_URL;
+    else process.env.MODEL_BASE_URL = previousBaseUrl;
   }
 });
 
 test('attachUsageAndRouting() leaves report.routing unset for a plain (non-router) model', async () => {
-  const model = await createModel({ apiKey: 'k', modelId: 'm', sessionId: 's', harnessExtras: null });
-  // A plain GlmModelAdapter never made a real call, so getUsage() just
-  // needs to exist and be callable; the point here is the absent `routing`.
-  const report = { status: 'SUCCESS' };
-  attachUsageAndRouting(report, model);
+  const previousBaseUrl = process.env.MODEL_BASE_URL;
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  try {
+    const model = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null });
+    // A plain OpenAICompatibleModelAdapter never made a real call, so
+    // getUsage() just needs to exist and be callable; the point here is the
+    // absent `routing`.
+    const report = { status: 'SUCCESS' };
+    attachUsageAndRouting(report, model);
 
-  assert.equal(typeof report.usage, 'object');
-  assert.equal('routing' in report, false);
+    assert.equal(typeof report.usage, 'object');
+    assert.equal('routing' in report, false);
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.MODEL_BASE_URL;
+    else process.env.MODEL_BASE_URL = previousBaseUrl;
+  }
 });
 
 test('loadHarnessExtras() adds routeNames metadata (["default", ...routes]) only when a router is configured', async () => {
@@ -404,7 +433,7 @@ test('parseArgs() --publish and --publish-org', () => {
 });
 
 test('slugifyModelId() lowercases and collapses non [a-z0-9] runs into single trimmed hyphens', () => {
-  assert.equal(slugifyModelId('GLM-5.2'), 'glm-5-2');
+  assert.equal(slugifyModelId('Test-Model-5.2'), 'test-model-5-2');
   assert.equal(slugifyModelId('  Some/Model_ID!! '), 'some-model-id');
   assert.equal(slugifyModelId('already-lower'), 'already-lower');
 });
@@ -418,9 +447,9 @@ test('createWorkspace() names the dir <slug>-<config>-<timestamp>, and --dry-run
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runsdir-'));
   try {
     const runsDir = path.join(dir, 'runs');
-    const ws = await createWorkspace(runsDir, 'c2', 'GLM-5.2', '/nonexistent/SPEC.md', { dryRun: true });
+    const ws = await createWorkspace(runsDir, 'c2', 'Test-Model-5.2', '/nonexistent/SPEC.md', { dryRun: true });
     assert.equal(path.dirname(ws), runsDir);
-    assert.match(path.basename(ws), /^glm-5-2-c2-\d{8}T\d{6}$/);
+    assert.match(path.basename(ws), /^test-model-5-2-c2-\d{8}T\d{6}$/);
     await assert.rejects(fs.access(runsDir));
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
@@ -458,13 +487,13 @@ test('initWorkspaceRepo() creates a git repo with one commit, a .gitignore, and 
     await fs.mkdir(path.join(ws, 'node_modules'));
     await fs.writeFile(path.join(ws, 'node_modules', 'x.txt'), 'should be ignored');
 
-    await initWorkspaceRepo(ws, 'run: glm-5.2 c1 (SUCCESS)');
+    await initWorkspaceRepo(ws, 'run: test-model-5.2 c1 (SUCCESS)');
 
     const branch = execFileSync('git', ['-C', ws, 'branch', '--show-current'], { encoding: 'utf8' }).trim();
     assert.equal(branch, 'main');
 
     const log = execFileSync('git', ['-C', ws, 'log', '--format=%s|%an|%ae'], { encoding: 'utf8' }).trim();
-    assert.equal(log, 'run: glm-5.2 c1 (SUCCESS)|pi-runner|pi-runner@users.noreply.github.com');
+    assert.equal(log, 'run: test-model-5.2 c1 (SUCCESS)|pi-runner|pi-runner@users.noreply.github.com');
 
     const tracked = execFileSync('git', ['-C', ws, 'ls-files'], { encoding: 'utf8' }).trim().split('\n');
     assert.ok(tracked.includes('run-report.json'));
@@ -660,7 +689,7 @@ test('publishWorkspace() builds the gh repo create command and records repositor
     };
     const report = { status: 'SUCCESS' };
 
-    await publishWorkspace({ ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir });
+    await publishWorkspace({ ws, report, modelId: 'test-model-5.2', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir });
 
     assert.equal(report.publishError, undefined);
     assert.deepEqual(report.repository, { name: `harness-loop-graph/run-${wsName}`, url: expectedUrl });
@@ -669,7 +698,7 @@ test('publishWorkspace() builds the gh repo create command and records repositor
     assert.deepEqual(ghCall.args, [
       'repo', 'create', `harness-loop-graph/run-${wsName}`,
       '--public', '--source', ws, '--push',
-      '--description', 'glm-5.2 c1 run generated by the PI-I harness',
+      '--description', 'test-model-5.2 c1 run generated by the PI-I harness',
     ]);
     assert.ok(calls.some((c) => c.cmd === 'git' && c.args.includes('push')), 'the updated report must be pushed');
 
@@ -693,7 +722,7 @@ test('publishWorkspace() refuses to publish and never calls gh/git when a secret
     const report = {};
 
     await publishWorkspace({
-      ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph',
+      ws, report, modelId: 'test-model-5.2', config: 'c1', org: 'harness-loop-graph',
       secrets: [{ label: 'MODEL_API_KEY', value: 'leaked-key-abc' }],
       run, benchDir,
     });
@@ -721,7 +750,7 @@ test('publishWorkspace() never flags a secret planted only in a gitignored .env 
     const report = {};
 
     await publishWorkspace({
-      ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph',
+      ws, report, modelId: 'test-model-5.2', config: 'c1', org: 'harness-loop-graph',
       secrets: [{ label: 'MODEL_API_KEY', value: 'leaked-key-abc' }],
       run, benchDir,
     });
@@ -808,7 +837,12 @@ test('a thrown exception during the run phase (e.g. createModel() with a missing
       configPath,
       JSON.stringify({ router: { routes: { longContext: { model: 'm', apiKeyEnv: 'RUNNER_TEST_UNSET_ENV_VAR' } } } }),
     );
-    const childEnv = { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' };
+    const childEnv = {
+      ...process.env,
+      MODEL_API_KEY: 'dummy-key',
+      MODEL_ID: 'dummy-model',
+      MODEL_BASE_URL: 'https://test.example/v1',
+    };
     delete childEnv.RUNNER_TEST_UNSET_ENV_VAR;
 
     const res = spawnSync(

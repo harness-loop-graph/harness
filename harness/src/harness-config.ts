@@ -5,7 +5,7 @@ import type { ToolSpec } from './contracts/core.js';
 import { McpToolProvider, type McpServerConfig } from './components/mcp-tool-provider.js';
 import { SkillCatalog, registerSkillTool } from './components/skill-catalog.js';
 import type { RegistryToolManager } from './components/tool-manager.js';
-import { GlmModelAdapter, type GlmAdapterConfig } from './components/glm-adapter.js';
+import { OpenAICompatibleModelAdapter, type OpenAICompatibleAdapterConfig } from './components/openai-compatible-adapter.js';
 import { RoutingModelAdapter, type CustomRouter } from './components/routing-model-adapter.js';
 import type { ModelAdapter } from './components/model-adapter.js';
 
@@ -228,9 +228,8 @@ export async function wireHarnessConfig(config: HarnessConfig, manager: Registry
 }
 
 export interface CreateRoutedModelOptions {
-  sessionId?: string;
-  /** Adapter constructor for named routes; defaults to `GlmModelAdapter`. Injectable for tests. */
-  makeAdapter?: (config: GlmAdapterConfig) => ModelAdapter;
+  /** Adapter constructor for named routes; defaults to `OpenAICompatibleModelAdapter`. Injectable for tests. */
+  makeAdapter?: (config: OpenAICompatibleAdapterConfig) => ModelAdapter;
 }
 
 /**
@@ -247,7 +246,8 @@ export async function createRoutedModel(
   defaultAdapter: ModelAdapter,
   options: CreateRoutedModelOptions = {},
 ): Promise<RoutingModelAdapter> {
-  const makeAdapter = options.makeAdapter ?? ((config: GlmAdapterConfig) => new GlmModelAdapter(config));
+  const makeAdapter =
+    options.makeAdapter ?? ((config: OpenAICompatibleAdapterConfig) => new OpenAICompatibleModelAdapter(config));
 
   const routes: Record<string, ModelAdapter> = { default: defaultAdapter };
   for (const [name, route] of Object.entries(routerConfig.routes)) {
@@ -260,7 +260,6 @@ export async function createRoutedModel(
       apiKey,
       model: route.model,
       baseUrl: route.baseUrl ?? process.env.MODEL_BASE_URL,
-      sessionId: options.sessionId,
     });
   }
 

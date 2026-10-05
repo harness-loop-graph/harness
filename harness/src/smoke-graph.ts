@@ -1,13 +1,12 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { GraphEngine } from './graph/graph-engine.js';
 import type { GraphNode, LoopFactory } from './graph/contracts.js';
 import { AgentLoop } from './loop/agent-loop.js';
 import { Harness } from './harness.js';
 import { FsContextManager } from './components/context-manager.js';
-import { GlmModelAdapter } from './components/glm-adapter.js';
+import { OpenAICompatibleModelAdapter } from './components/openai-compatible-adapter.js';
 import { LocalExecutionManager } from './components/execution-manager.js';
 import { PolicyGuardrails } from './components/guardrails.js';
 import { RegistryToolManager, registerBuiltinTools } from './components/tool-manager.js';
@@ -16,8 +15,7 @@ import { RecordingVerificationManager } from './components/verification-manager.
 /** Live C3 smoke: architect -> builder graph, each node runs its own C2 loop. */
 async function main(): Promise<void> {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-graph-smoke-'));
-  const sessionId = randomUUID();
-  const models: GlmModelAdapter[] = [];
+  const models: OpenAICompatibleModelAdapter[] = [];
 
   const createLoop: LoopFactory = (node: GraphNode) => {
     const execution = new LocalExecutionManager({ workspaceRoot: workspace, timeoutMs: 30_000 });
@@ -34,9 +32,7 @@ async function main(): Promise<void> {
     const availTools = registerBuiltinTools(tools, { execution, workspaceRoot: workspace });
     const verification = new RecordingVerificationManager();
 
-    // Same provider session across nodes: one conversation per graph run
-    // keeps provider-side prompt caching effective.
-    const model = new GlmModelAdapter({ sessionId });
+    const model = new OpenAICompatibleModelAdapter();
     models.push(model);
 
     const harness = new Harness(

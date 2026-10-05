@@ -3,38 +3,35 @@
 Decisions worth recording for the thesis writeup, with the code evidence
 that backs each one.
 
-## Provider access: OpenCode Go, not direct Z.ai/GLM API
+## Provider access: the first runs used GLM through OpenCode Go
 
-`GlmModelAdapter` (`src/components/glm-adapter.ts`) defaults its base URL
-to `DEFAULT_GLM_BASE_URL = 'https://opencode.ai/zen/go/v1'` — OpenCode Go —
-rather than a Z.ai/GLM-native endpoint. The adapter's own doc comment names
-this explicitly: *"Default endpoint: OpenCode Go
-(https://opencode.ai/docs/go/), the provider this experiment accesses GLM
-through."* Two consequences of that choice are visible directly in the
-code:
-
-- OpenCode Go **requires** a custom `User-Agent` header
-  (`harness-glm/0.1.0` by default) and a stable per-conversation
-  `x-opencode-session` header for routing and prompt caching — both are
-  sent unconditionally when a `sessionId` is configured
-  (`src/components/glm-adapter.ts:103-113`).
-- Because OpenCode Go speaks the OpenAI chat-completions dialect, the
-  adapter's request/response shape is generic OpenAI-compatible JSON
-  (`messages`, `tools`, `choices[0].message.tool_calls`). `MODEL_BASE_URL`
-  can be pointed at any other OpenAI-compatible endpoint with no code
-  change — proven by `tests/glm-adapter.spec.ts`'s test that reuses
-  `GlmModelAdapter` against `https://api.openai.com/v1`.
+The earliest experiment runs pointed the adapter at **GLM**, accessed
+through **OpenCode Go** (https://opencode.ai/docs/go/) rather than a
+Z.ai/GLM-native endpoint, because OpenCode Go speaks the OpenAI
+chat-completions dialect — the adapter's request/response shape is generic
+OpenAI-compatible JSON (`messages`, `tools`,
+`choices[0].message.tool_calls`), so no endpoint-specific parsing was
+needed. That historical choice is no longer baked into the code: the
+adapter (`OpenAICompatibleModelAdapter`,
+`src/components/openai-compatible-adapter.ts`) carries no provider-specific
+class name, default base URL, or hardcoded header. `MODEL_BASE_URL` has no
+default and must be set explicitly, pointed at whichever OpenAI-compatible
+endpoint the run uses (OpenCode Go, OpenRouter, or any other) — proven by
+`tests/openai-compatible-adapter.spec.ts`'s test that reuses the same class
+against `https://api.openai.com/v1` with no code change. A caller that
+needs a custom header for its endpoint (OpenCode Go's routing/session
+header, for instance) sets it generically through the adapter's `headers`
+config, never through adapter code specific to one provider.
 
 ## Environment variable naming is provider-generic
 
 The three variables the harness reads — `MODEL_API_KEY`, `MODEL_ID`,
 `MODEL_BASE_URL` — are not named `GLM_API_KEY` / `ZAI_API_KEY` /
 `OPENCODE_...`. This is intentional: the same env var names work for any
-OpenAI-compatible provider, even though `GlmModelAdapter` and its default
-base URL are GLM/OpenCode-Go specific. The class name and defaults are
-concrete because the experiment runs against GLM; the configuration surface
-stays generic so switching provider is a configuration change, not a code
-change.
+OpenAI-compatible provider. The adapter class, its config, and its defaults
+are all provider-agnostic by design, so switching provider is purely a
+configuration change (`MODEL_BASE_URL`/`MODEL_API_KEY`/`MODEL_ID`, plus an
+optional `headers` entry), never a code change.
 
 ## Deterministic (non-model) decision policy in the loop and graph
 

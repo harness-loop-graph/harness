@@ -23,8 +23,9 @@ so the second command still runs from the root, not from `harness/`):
 node experiment/runner/run-experiment.mjs --config c1 --dry-run
 ```
 
-Model credentials (`MODEL_API_KEY`, `MODEL_ID`, optional `MODEL_BASE_URL`) are
-read from the environment or from `.env` at the repository root (gitignored).
+Model credentials (`MODEL_API_KEY`, `MODEL_ID`, `MODEL_BASE_URL` — all
+required, no provider default) are read from the environment or from `.env`
+at the repository root (gitignored).
 
 This repository merges the former `harness` and `experiment` repositories with
 their full history.

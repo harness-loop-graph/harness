@@ -23,7 +23,7 @@ task ──► ContextManager ──► ModelRequest ──► ModelAdapter
 | # | Role | Interface | Real implementation | File |
 |---|------|-----------|----------------------|------|
 | 1 | Context Manager | `ContextManager` | `FsContextManager` | `src/components/context-manager.ts` |
-| 2 | Model Adapter | `ModelAdapter` | `GlmModelAdapter` | `src/components/model-adapter.ts`, `src/components/glm-adapter.ts` |
+| 2 | Model Adapter | `ModelAdapter` | `OpenAICompatibleModelAdapter` | `src/components/model-adapter.ts`, `src/components/openai-compatible-adapter.ts` |
 | 3 | Tool Manager | `ToolManager` | `RegistryToolManager` | `src/components/tool-manager.ts` |
 | 4 | Execution Manager | `ExecutionManager` | `LocalExecutionManager` | `src/components/execution-manager.ts` |
 | 5 | Verification Manager | `VerificationManager` | `RecordingVerificationManager` | `src/components/verification-manager.ts` |
@@ -45,12 +45,12 @@ from file extensions (`typescript`, `javascript`, `python`, `go`, or
 `undefined`), and the task string. This is a deterministic scan — no model
 call is involved.
 
-### 2. Model Adapter — interface + `GlmModelAdapter`
+### 2. Model Adapter — interface + `OpenAICompatibleModelAdapter`
 
 `ModelAdapter` is the abstraction (`complete(request): Promise<ModelResponse>`).
-The concrete implementation used by the experiment, `GlmModelAdapter`, talks to
-GLM through OpenCode Go; see [`model-provider.md`](./model-provider.md) for
-the full detail.
+The concrete implementation used by the experiment, `OpenAICompatibleModelAdapter`,
+talks to any OpenAI-compatible chat-completions endpoint; see
+[`model-provider.md`](./model-provider.md) for the full detail.
 
 ### 3. Tool Manager — `RegistryToolManager`
 

@@ -1,6 +1,6 @@
 # Experiment Runner
 
-Plain-ESM CLI that orchestrates the GLM harness over the fixed `SPEC.md` in isolated workspaces.
+Plain-ESM CLI that orchestrates the model-agnostic harness over the fixed `SPEC.md` in isolated workspaces, against any OpenAI-compatible chat-completions endpoint.
 
 ## Usage
 
@@ -29,7 +29,7 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 
 ### Credentials
 
-`MODEL_API_KEY` and `MODEL_ID` are read from `process.env`, falling back to `.env` at the repository root (simple `key=value` parse). A clear error is raised if both are missing.
+`MODEL_API_KEY` and `MODEL_ID` are read from `process.env`, falling back to `.env` at the repository root (simple `key=value` parse). A clear error is raised if both are missing. `MODEL_BASE_URL` must also be set (read directly by the adapter, with no provider default): a run that reaches model construction without it fails fast with a clear error naming `MODEL_BASE_URL`. `--dry-run` never constructs a model, so it does not require `MODEL_BASE_URL`.
 
 ### Validation
 
@@ -42,7 +42,7 @@ directory next to this monorepo, resolved from the runner's own file
 location — so generated apps are never written inside this repository, even
 accidentally). The workspace dir name is
 `<model-slug>-<config>-<YYYYMMDDTHHMMSS>` (UTC), e.g.
-`glm-5-2-c1-20260105T030405`; the slug is the model id lowercased with every
+`test-model-5-2-c1-20260105T030405`; the slug is the model id lowercased with every
 run of non-`[a-z0-9]` characters collapsed to a single `-`, trimmed.
 `--dry-run` only prints the planned workspace path and creates nothing.
 
@@ -110,7 +110,7 @@ so they can never reach a published repo either.
 
 ### Tests
 
-`node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against the harness's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. Also covers `createModel()` (returns a plain `GlmModelAdapter` without a router, wraps it in a `RoutingModelAdapter` with the configured routes using an injected `makeAdapter` stub — no network — when one is configured, and propagates a clear missing-env-var error) and `summarizeRouting()` (decision log → counts per route/reason). `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
+`node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against the harness's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. Also covers `createModel()` (returns a plain `OpenAICompatibleModelAdapter` without a router, wraps it in a `RoutingModelAdapter` with the configured routes using an injected `makeAdapter` stub — no network — when one is configured, and propagates a clear missing-env-var error) and `summarizeRouting()` (decision log → counts per route/reason). `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
 
 `--task-file` wiring is covered by spawning the real CLI with `--dry-run` (dummy `MODEL_API_KEY`/`MODEL_ID` in the child env, since `loadCredentials()` runs before the dry-run branch): the printed plan's c3 node tasks carry the override text and never mention `SPEC`, and an empty/whitespace-only task file exits non-zero with a `Usage: --task-file ...` message on stderr and no stdout. `compactTraceC3()` is exported and tested directly for copying `loopFailure` into a failed trace entry while leaving it off a successful one.
 
@@ -202,16 +202,16 @@ default — but a config that opts in looks like:
   "router": {
     "longContextThreshold": 60000,
     "routes": {
-      "longContext": { "model": "glm-5.2-long", "apiKeyEnv": "LONG_MODEL_API_KEY" },
-      "retry": { "model": "glm-5.2" }
+      "longContext": { "model": "gpt-4o-mini-long-context", "apiKeyEnv": "LONG_MODEL_API_KEY" },
+      "retry": { "model": "gpt-4o-mini" }
     }
   }
 }
 ```
 
 When set, the runner wraps the model it builds for the run in a
-`RoutingModelAdapter` — identically for c1, c2 and c3, using the same
-`sessionId` — so requests over `longContextThreshold` go to `longContext`,
+`RoutingModelAdapter` — identically for c1, c2 and c3 — so requests over
+`longContextThreshold` go to `longContext`,
 retry turns (verification feedback present) go to `retry`, and everything
 else keeps going to the default model. Without a `router` section (or
 without `--harness-config` at all), the model is unwrapped and behavior
@@ -259,7 +259,7 @@ Every run writes `run-report.json` into the workspace:
 ```json
 {
   "config": "c1|c2|c3",
-  "model": "glm-5.2",
+  "model": "gpt-4o-mini",
   "startedAt": "...",
   "finishedAt": "...",
   "durationMs": 0,

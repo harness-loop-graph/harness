@@ -1,30 +1,25 @@
 import type { ModelRequest, ModelResponse } from '../contracts/core.js';
 import type { ModelAdapter } from './model-adapter.js';
 
-/**
- * Default endpoint: OpenCode Go (https://opencode.ai/docs/go/), the
- * provider this experiment accesses GLM through. Override with
- * MODEL_BASE_URL for any other OpenAI-compatible endpoint.
- */
-export const DEFAULT_GLM_BASE_URL = 'https://opencode.ai/zen/go/v1';
-
-export interface GlmAdapterConfig {
+export interface OpenAICompatibleAdapterConfig {
   /** API key. Falls back to process.env.MODEL_API_KEY. */
   apiKey?: string;
-  /** Base URL. Falls back to process.env.MODEL_BASE_URL, then OpenCode Go. */
+  /**
+   * Base URL of an OpenAI-compatible chat-completions endpoint, e.g.
+   * 'https://openrouter.ai/api/v1' or 'https://opencode.ai/zen/go/v1'.
+   * Falls back to process.env.MODEL_BASE_URL. There is no provider
+   * default: one of the two must be set, or construction fails fast.
+   */
   baseUrl?: string;
-  /** Model identifier, e.g. 'glm-5.2'. Falls back to process.env.MODEL_ID. */
+  /** Model identifier, e.g. 'gpt-4o-mini'. Falls back to process.env.MODEL_ID. */
   model?: string;
   /** Injectable fetch for tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
   /** Request timeout in ms. Default 120_000. */
   timeoutMs?: number;
-  /**
-   * Stable per-conversation session id, sent as x-opencode-session.
-   * OpenCode Go requires it for routing and prompt caching.
-   */
-  sessionId?: string;
-  /** Custom user agent identifying this harness. OpenCode Go requires it. */
+  /** Extra headers merged into every request, for endpoints that need one (e.g. a session/routing header). */
+  headers?: Record<string, string>;
+  /** Custom user agent identifying this harness. Default 'pi-harness/0.1.0'. */
   userAgent?: string;
 }
 
@@ -64,17 +59,17 @@ interface ChatCompletionResponse {
 }
 
 /**
- * OpenAI-compatible chat-completions adapter (OpenCode Go by default).
- * The only harness component that knows how to talk to a provider;
- * swapping providers means swapping or reconfiguring this class.
+ * OpenAI-compatible chat-completions adapter. The only harness component
+ * that knows how to talk to a provider; swapping providers means pointing
+ * this class at a different `baseUrl`/`model`, never swapping the class.
  */
-export class GlmModelAdapter implements ModelAdapter {
+export class OpenAICompatibleModelAdapter implements ModelAdapter {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
-  private readonly sessionId?: string;
+  private readonly headers: Record<string, string>;
   private readonly userAgent: string;
   private promptTokens = 0;
   private completionTokens = 0;
@@ -82,20 +77,26 @@ export class GlmModelAdapter implements ModelAdapter {
   private calls = 0;
   private modelsUsed = new Set<string>();
 
-  constructor(config: GlmAdapterConfig = {}) {
+  constructor(config: OpenAICompatibleAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.MODEL_API_KEY ?? '';
-    this.baseUrl = (config.baseUrl ?? process.env.MODEL_BASE_URL ?? DEFAULT_GLM_BASE_URL).replace(/\/$/, '');
+    const baseUrl = config.baseUrl ?? process.env.MODEL_BASE_URL ?? '';
+    this.baseUrl = baseUrl.replace(/\/$/, '');
     this.model = config.model ?? process.env.MODEL_ID ?? '';
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.timeoutMs = config.timeoutMs ?? 120_000;
-    this.sessionId = config.sessionId;
-    this.userAgent = config.userAgent ?? 'harness-glm/0.1.0';
+    this.headers = config.headers ?? {};
+    this.userAgent = config.userAgent ?? 'pi-harness/0.1.0';
 
     if (this.apiKey === '') {
-      throw new Error('MODEL_API_KEY is not set. Export it before constructing GlmModelAdapter.');
+      throw new Error('MODEL_API_KEY is not set. Export it before constructing OpenAICompatibleModelAdapter.');
     }
     if (this.model === '') {
-      throw new Error('MODEL_ID is not set. Export it (e.g. MODEL_ID=glm-5.2) before constructing GlmModelAdapter.');
+      throw new Error('MODEL_ID is not set. Export it (e.g. MODEL_ID=gpt-4o-mini) before constructing OpenAICompatibleModelAdapter.');
+    }
+    if (this.baseUrl === '') {
+      throw new Error(
+        'MODEL_BASE_URL is not set. Export it (e.g. MODEL_BASE_URL=https://api.openai.com/v1) or pass baseUrl before constructing OpenAICompatibleModelAdapter.',
+      );
     }
   }
 
@@ -115,7 +116,7 @@ export class GlmModelAdapter implements ModelAdapter {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
           'User-Agent': this.userAgent,
-          ...(this.sessionId ? { 'x-opencode-session': this.sessionId } : {}),
+          ...this.headers,
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(this.timeoutMs),

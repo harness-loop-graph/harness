@@ -131,13 +131,15 @@ not finish successfully.
 | --- | --- | --- | --- |
 | `MODEL_API_KEY` | yes | — | API key of the provider you point at |
 | `MODEL_ID` | yes | — | Model id, any OpenAI-compatible model |
-| `MODEL_BASE_URL` | no | provider default | Any OpenAI-compatible base URL works |
+| `MODEL_BASE_URL` | yes | — (no provider default) | Any OpenAI-compatible base URL, e.g. `https://openrouter.ai/api/v1` |
 
 Variables are provider-generic on purpose: the adapter speaks the
 OpenAI-compatible dialect, so pointing `MODEL_BASE_URL` at a different
-provider works with no code changes (see the adapter tests). The adapter
-also sends a custom `User-Agent` identifying the harness and a stable
-session header per conversation, configurable through adapter options.
+provider works with no code changes (see the adapter tests). There is no
+provider default for `MODEL_BASE_URL`: it must be set, or construction
+fails fast with a clear error. The adapter also sends a custom `User-Agent`
+identifying the harness, and merges any configured `headers` into every
+request, for an endpoint that needs a custom header.
 
 ## Build
 

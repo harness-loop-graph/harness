@@ -151,7 +151,7 @@ export class RoutingModelAdapter implements ModelAdapter {
     this.usageByRoute.set(route, entry);
   }
 
-  /** Aggregated usage across every route, in the same shape as `GlmModelAdapter.getUsage()`. */
+  /** Aggregated usage across every route, in the same shape as `OpenAICompatibleModelAdapter.getUsage()`. */
   getUsage(): {
     promptTokens: number;
     completionTokens: number;

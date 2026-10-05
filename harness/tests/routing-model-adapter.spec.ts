@@ -8,7 +8,7 @@ function request(overrides: Partial<ModelRequest> = {}): ModelRequest {
   return { task: 'do something', context, availTools: [], ...overrides };
 }
 
-/** Stub adapter with a controllable per-call usage delta, matching GlmModelAdapter's getUsage() shape. */
+/** Stub adapter with a controllable per-call usage delta, matching OpenAICompatibleModelAdapter's getUsage() shape. */
 class UsageStubAdapter implements ModelAdapter {
   private promptTokens = 0;
   private completionTokens = 0;
