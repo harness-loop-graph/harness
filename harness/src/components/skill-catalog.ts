@@ -3,6 +3,11 @@ import * as path from 'node:path';
 import type { ToolSpec } from '../contracts/core.js';
 import { MAX_READ_BYTES, type RegistryToolManager } from './tool-manager.js';
 
+// localeCompare depends on the host ICU/locale; the prompt must be identical on every machine.
+function byCodePoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 export interface SkillMeta {
   name: string;
   description: string;
@@ -273,9 +278,4 @@ export function registerSkillTool(manager: RegistryToolManager, catalog: SkillCa
     return { name: skill.name, dir: skill.dir, body: skill.body, files: skill.files };
   });
   return spec;
-}
-
-// localeCompare depends on the host ICU/locale; the prompt must be identical on every machine.
-function byCodePoint(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
 }
