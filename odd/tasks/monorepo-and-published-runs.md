@@ -26,8 +26,8 @@ One repository (`harness-loop-graph/harness`) holds the generator (`harness/`) a
 Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `npm run build` in `harness/`; `node --test experiment/runner/run-experiment.test.mjs`.
 
 ## Tasks
-- [ ] T1 — Merge: move glm into `harness/`, experiment into `experiment/`, merge with unrelated histories; root README + .gitignore.
-- [ ] T2 — Fix paths (runner import, tests, docs) so all checks pass in the new layout.
+- [x] T1 — Merge: move glm into `harness/`, experiment into `experiment/`, merge with unrelated histories; root README + .gitignore.
+- [x] T2 — Fix paths (runner import, tests, docs) so all checks pass in the new layout.
 - [ ] T3 — Runner: default runs dir outside the repo; per-run git repo + commit; `--publish` to GitHub with secret guard; report records repo URL; tests + README.
 - [ ] T4 — Delivery (user approval): push, archive `experiment` with pointer, update repo description, notify teammate.
 
@@ -37,7 +37,8 @@ Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `
 - A run without `--publish` creates a local git repo outside the monorepo; with `--publish` it creates and pushes a public org repo, refusing if the API key appears in any file.
 
 ## Progress / Evidence
-(pending)
+- T1: glm moved to `harness/` (862f030), experiment moved to `experiment/` in its repo (9a58639), merged with unrelated histories (1a04258); 60 commits reachable. Root `.gitignore` protects `.env` (left at repo root by user permission rules), `experiment/acceptance/` copied and ignored.
+- T2: 2615d15 — runner imports `../../harness/dist`, falls back to root `.env`; tests use `harness/tests` fixtures; docs updated; root README. Checks: harness build 0, 102/102 tests; runner 16/16; c1 dry-run OK.
 
 ## Next step
-T1.
+T3.
