@@ -45,6 +45,34 @@ describe('SkillCatalog', () => {
     expect(skill?.files).toEqual(['helper.md', 'reference/page-object-model.md']);
   });
 
+  it('does not hang or crash on a directory symlink cycle among companion files', async () => {
+    const dir = path.join(workspace, 'cyclical-skill');
+    const nested = path.join(dir, 'nested');
+    await fs.mkdir(nested, { recursive: true });
+    await fs.writeFile(path.join(dir, 'SKILL.md'), '---\nname: cyclical\ndescription: has a cyclical companion dir\n---\nBody');
+    await fs.writeFile(path.join(nested, 'note.md'), 'note');
+    await fs.symlink(dir, path.join(nested, 'back-to-root'), 'dir'); // cycle: nested/back-to-root -> dir
+
+    const catalog = await SkillCatalog.load([workspace]);
+    expect(catalog.get('cyclical')?.files).toEqual(['nested/note.md']);
+  });
+
+  it('skips a companion directory it cannot read instead of failing the whole skill', async () => {
+    const dir = path.join(workspace, 'locked-skill');
+    const locked = path.join(dir, 'locked');
+    await fs.mkdir(locked, { recursive: true });
+    await fs.writeFile(path.join(dir, 'SKILL.md'), '---\nname: locked\ndescription: has an unreadable companion dir\n---\nBody');
+    await fs.writeFile(path.join(dir, 'ok.md'), 'ok');
+    await fs.chmod(locked, 0o000);
+
+    try {
+      const catalog = await SkillCatalog.load([workspace]);
+      expect(catalog.get('locked')?.files).toEqual(['ok.md']);
+    } finally {
+      await fs.chmod(locked, 0o755); // restore so afterEach can remove the workspace
+    }
+  });
+
   it('errors naming the file when frontmatter is missing', async () => {
     const dir = path.join(workspace, 'bad-skill');
     await fs.mkdir(dir, { recursive: true });

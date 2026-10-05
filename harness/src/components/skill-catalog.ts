@@ -130,17 +130,30 @@ function parseSkillMd(raw: string, sourceFile: string): { name: string; descript
   return { name, description, body };
 }
 
+const MAX_COMPANION_DEPTH = 6;
+
 /**
  * Recursively lists every file under `dir` (POSIX-style relative paths, sorted),
  * excluding the top-level `SKILL.md`. Uses `fs.stat` (follows symlinks) so a
  * symlinked file or directory is listed like a regular one; a broken symlink
- * is silently skipped rather than failing catalog loading.
+ * is silently skipped rather than failing catalog loading. A directory whose
+ * real path was already visited (a symlink cycle) or that is past
+ * `MAX_COMPANION_DEPTH` is skipped instead of recursed into, and any `readdir`
+ * failure (permissions, concurrent deletion) skips that directory rather than
+ * failing the whole skill — and therefore the whole catalog.
  */
 async function listCompanionFiles(dir: string): Promise<string[]> {
   const files: string[] = [];
+  const visitedRealDirs = new Set<string>();
 
-  async function walk(current: string, relPrefix: string): Promise<void> {
-    const names = (await fs.readdir(current)).sort(byCodePoint);
+  async function walk(current: string, relPrefix: string, depth: number): Promise<void> {
+    if (depth > MAX_COMPANION_DEPTH) return;
+    let names: string[];
+    try {
+      names = (await fs.readdir(current)).sort(byCodePoint);
+    } catch {
+      return; // unreadable directory: skip it, never fail the whole skill
+    }
     for (const name of names) {
       if (relPrefix === '' && name === 'SKILL.md') continue;
       const abs = path.join(current, name);
@@ -152,14 +165,18 @@ async function listCompanionFiles(dir: string): Promise<string[]> {
         continue; // broken symlink or disappeared between readdir and stat
       }
       if (stat.isDirectory()) {
-        await walk(abs, rel);
+        const realDir = await fs.realpath(abs).catch(() => abs);
+        if (visitedRealDirs.has(realDir)) continue; // symlink cycle
+        visitedRealDirs.add(realDir);
+        await walk(abs, rel, depth + 1);
       } else if (stat.isFile()) {
         files.push(rel);
       }
     }
   }
 
-  await walk(dir, '');
+  visitedRealDirs.add(await fs.realpath(dir).catch(() => dir));
+  await walk(dir, '', 0);
   return files;
 }
 
