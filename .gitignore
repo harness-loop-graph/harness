@@ -5,3 +5,4 @@ dist/
 .DS_Store
 experiment/acceptance/
 experiment/runs/
+odd/
