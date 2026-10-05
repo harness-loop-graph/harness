@@ -139,6 +139,24 @@ provider works with no code changes (see the adapter tests). The adapter
 also sends a custom `User-Agent` identifying the harness and a stable
 session header per conversation, configurable through adapter options.
 
+## Skill: caveman
+
+Project-level OpenCode skill at `.opencode/skills/caveman/SKILL.md`
+(verbatim copy of the community `opencode-caveman` skill). Ultra-compressed
+communication mode: cuts token usage ~75% while keeping full technical
+accuracy — code blocks, error messages and technical terms stay exact.
+
+- **Activate:** say `caveman mode`, `talk like caveman`, `be brief`, or
+  `/caveman lite|full|ultra` (default level: `full`).
+- **Deactivate:** `stop caveman` or `normal mode`.
+- **Intensity levels:** `lite`, `full`, `ultra`, plus `wenyan-lite`,
+  `wenyan-full`, `wenyan-ultra`.
+- **Auto-clarity:** drops to normal prose for security warnings and
+  irreversible action confirmations, then resumes.
+
+OpenCode discovers the skill from the frontmatter and loads its body on
+demand via the `skill` tool, so it costs no prompt space until activated.
+
 ## Build
 
 ```bash
