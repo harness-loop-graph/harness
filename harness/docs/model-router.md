@@ -1,17 +1,19 @@
-# Model router
+# Router de modelos
 
-Optional, off-by-default request routing on top of the `ModelAdapter`
-interface: send each request to a different model/endpoint by rule,
-inspired by [claude-code-router](https://github.com/musistudio/claude-code-router).
-Unlike that project, this router carries no per-agent/role configuration —
-see "Why no role-based routing" below.
+Enrutamiento de solicitudes opcional y desactivado por defecto, encima de la
+interfaz `ModelAdapter`: envía cada solicitud a un modelo/endpoint distinto
+según una regla, inspirado en
+[claude-code-router](https://github.com/musistudio/claude-code-router). A
+diferencia de ese proyecto, este *router* no lleva ninguna configuración por
+agente/rol — ver "Por qué no hay enrutamiento por rol" más abajo.
 
-## What it is
+## Qué es
 
-`RoutingModelAdapter` (`src/components/routing-model-adapter.ts`) wraps a
-set of named `ModelAdapter`s behind one `ModelAdapter`. Callers (the
-harness, the loop, the graph engine) never see the router — they call
-`complete(request)` exactly as they would on any adapter.
+`RoutingModelAdapter` (`src/components/routing-model-adapter.ts`) envuelve un
+conjunto de `ModelAdapter`s nombrados detrás de un único `ModelAdapter`. Los
+llamadores (el *harness*, el *loop*, el motor de grafo) nunca ven el *router*
+— llaman a `complete(request)` exactamente como lo harían con cualquier
+adaptador.
 
 ```
 ModelRequest ──► RoutingModelAdapter ──► decide route ──► routes[route].complete(request)
@@ -19,29 +21,29 @@ ModelRequest ──► RoutingModelAdapter ──► decide route ──► rout
                                   custom → longContext → retry → default
 ```
 
-## Rules and precedence
+## Reglas y precedencia
 
-Evaluated in this fixed order; the first matching rule wins:
+Evaluadas en este orden fijo; la primera regla que coincide gana:
 
-1. **custom** — if a `customRouter(request, ctx)` is configured, it runs
-   first. Returning a route name forces that route (reason `'custom'`);
-   returning `null` falls through to the rules below. Returning an
-   unknown route name throws.
-2. **longContext** — if a `longContext` route is configured and the
-   request's estimated token count exceeds `longContextThreshold`
-   (default 60000).
-3. **retry** — if a `retry` route is configured and `request.feedback` is
-   a non-empty string (verification feedback from a previous failed
-   attempt — see `ModelRequest.feedback` in `src/contracts/core.ts`).
-4. **default** — otherwise. This is always the adapter the caller already
-   had; it is never declared in a config file.
+1. **custom** — si hay un `customRouter(request, ctx)` configurado, corre
+   primero. Devolver un nombre de ruta fuerza esa ruta (motivo `'custom'`);
+   devolver `null` cae a las reglas de abajo. Devolver un nombre de ruta
+   desconocido lanza error.
+2. **longContext** — si hay una ruta `longContext` configurada y el conteo
+   estimado de tokens de la solicitud supera `longContextThreshold` (60000
+   por defecto).
+3. **retry** — si hay una ruta `retry` configurada y `request.feedback` es un
+   string no vacío (feedback de verificación de un intento fallido anterior —
+   ver `ModelRequest.feedback` en `src/contracts/core.ts`).
+4. **default** — en cualquier otro caso. Es siempre el adaptador que ya tenía
+   el llamador; nunca se declara en un archivo de configuración.
 
-The token estimate (when no `estimateTokens` override is given) is a
-rough heuristic, not a tokenizer: the serialized character length of
-`task` + `context` + `instructions` + `history` + `feedback`, divided by
-4.
+La estimación de tokens (cuando no se da una anulación `estimateTokens`) es
+una heurística aproximada, no un tokenizador: la longitud en caracteres
+serializada de `task` + `context` + `instructions` + `history` + `feedback`,
+dividida por 4.
 
-## Usage
+## Uso
 
 ```ts
 const router = new RoutingModelAdapter({
@@ -54,18 +56,19 @@ const router = new RoutingModelAdapter({
 });
 ```
 
-`getUsage()` returns the same shape as `OpenAICompatibleModelAdapter.getUsage()`
-(`promptTokens`, `completionTokens`, `totalTokens`, `calls`, `cost`,
-`modelsUsed`), aggregated across every route — so a caller that only
-reads `getUsage()` (e.g. the experiment runner's `report.usage`) needs no
-changes when a router is introduced. `getRouting()` is the router-specific
-surface: `{ byRoute: { <name>: { calls, promptTokens, completionTokens,
+`getUsage()` devuelve la misma forma que
+`OpenAICompatibleModelAdapter.getUsage()` (`promptTokens`,
+`completionTokens`, `totalTokens`, `calls`, `cost`, `modelsUsed`), agregada a
+través de cada ruta — de modo que un llamador que solo lee `getUsage()` (p.
+ej. `report.usage` del runner del experimento) no necesita ningún cambio
+cuando se introduce un *router*. `getRouting()` es la superficie específica
+del *router*: `{ byRoute: { <name>: { calls, promptTokens, completionTokens,
 totalTokens, cost } }, decisions: { route, reason }[] }`.
 
-## Harness config wiring
+## Conexión en la configuración del harness
 
-A harness config file (see `docs/mcp-skills.md`) can carry an
-optional `router` section:
+Un archivo de configuración del *harness* (ver `docs/mcp-skills.md`) puede
+llevar una sección `router` opcional:
 
 ```json
 {
@@ -80,44 +83,48 @@ optional `router` section:
 }
 ```
 
-- `default` is never declared here — it is always the caller's existing
-  model adapter.
-- Route names are `longContext`, `retry`, or any other name only ever
-  returned by a custom router (built-in rules only ever pick
-  `longContext`/`retry`/`default`).
-- API keys are never literal in the config file: `apiKeyEnv` names an
-  environment variable; a route without `apiKeyEnv` falls back to the
-  default model's own env vars (`MODEL_API_KEY`, and `MODEL_BASE_URL` if
-  `baseUrl` is also omitted). A missing env var fails fast, naming the
-  route and the variable.
-- `customRouterPath` is resolved relative to the config file and
-  dynamically `import()`-ed; its default export (or a named `route`
-  export) must be a function `(request, ctx) => routeName | null`.
+- `default` nunca se declara aquí — es siempre el adaptador de modelo que ya
+  tenía el llamador.
+- Los nombres de ruta son `longContext`, `retry`, o cualquier otro nombre que
+  solo un *router* personalizado pueda devolver (las reglas incorporadas solo
+  eligen `longContext`/`retry`/`default`).
+- Las claves de API nunca son literales en el archivo de configuración:
+  `apiKeyEnv` nombra una variable de entorno; una ruta sin `apiKeyEnv` recurre
+  a las propias variables de entorno del modelo por defecto
+  (`MODEL_API_KEY`, y `MODEL_BASE_URL` si `baseUrl` también se omite). Una
+  variable de entorno faltante falla rápido, nombrando la ruta y la variable.
+- `customRouterPath` se resuelve relativo al archivo de configuración y se
+  importa dinámicamente con `import()`; su exportación por defecto (o una
+  exportación nombrada `route`) debe ser una función
+  `(request, ctx) => routeName | null`.
 
-`parseHarnessConfig`/`loadHarnessConfig` validate this section (see
+`parseHarnessConfig`/`loadHarnessConfig` validan esta sección (ver
 `src/harness-config.ts`); `createRoutedModel(routerConfig, defaultAdapter,
-{ makeAdapter? })` builds the `RoutingModelAdapter` from it — `makeAdapter`
-defaults to `OpenAICompatibleModelAdapter` and is injectable for tests.
+{ makeAdapter? })` construye el `RoutingModelAdapter` a partir de ella —
+`makeAdapter` tiene por defecto `OpenAICompatibleModelAdapter` y es
+inyectable para tests.
 
-## Why no role-based routing
+## Por qué no hay enrutamiento por rol
 
-`claude-code-router` (and similar tools) often route by which agent/role
-is calling — e.g. a "planner" role gets a stronger model than a "coder"
-role. This harness deliberately does not: `ModelRequest`/`Context` carry
-no node/role identity, and no routing rule may depend on one. The reason
-is the experiment this harness supports: C1/C2/C3 (one interaction, a
-corrective loop, a multi-agent graph) are compared against each other
-holding the model fixed. Role-based routing would let C3's graph
-structure quietly buy itself a stronger model per node, confounding the
-graph-vs-loop-vs-single-shot comparison with a model choice. The same
-router rules therefore apply identically to C1, C2 and C3, and are off
-unless a harness config opts in.
+`claude-code-router` (y herramientas similares) a menudo enrutan según qué
+agente/rol está llamando — p. ej. un rol "planner" recibe un modelo más
+potente que un rol "coder". Este *harness* deliberadamente no lo hace:
+`ModelRequest`/`Context` no llevan ninguna identidad de nodo/rol, y ninguna
+regla de enrutamiento puede depender de una. La razón es el experimento al
+que da soporte este *harness*: C1/C2/C3 (una interacción, un *loop*
+correctivo, un grafo multiagente) se comparan entre sí manteniendo fijo el
+modelo. El enrutamiento por rol permitiría que la estructura de grafo de C3 se
+"comprara" en silencio un modelo más potente por nodo, confundiendo la
+comparación grafo-vs-loop-vs-interacción-única con una elección de modelo. Las
+mismas reglas de *router* por lo tanto aplican idénticamente a C1, C2 y C3, y
+están desactivadas salvo que una configuración del *harness* las habilite.
 
 ## Tests
 
-- `tests/routing-model-adapter.spec.ts` — every rule, precedence,
-  custom-router null fallback, unknown-route error, usage aggregation
-  (including two route names sharing one adapter instance).
-- `tests/harness-config.spec.ts` — `router` section validation and
-  `createRoutedModel` (route construction, missing-env-var errors,
-  `customRouterPath` loading).
+- `tests/routing-model-adapter.spec.ts` — cada regla, precedencia, el
+  fallback a `null` del *router* personalizado, el error de ruta desconocida,
+  la agregación de uso (incluyendo dos nombres de ruta compartiendo una misma
+  instancia de adaptador).
+- `tests/harness-config.spec.ts` — validación de la sección `router` y
+  `createRoutedModel` (construcción de rutas, errores de variable de entorno
+  faltante, carga de `customRouterPath`).

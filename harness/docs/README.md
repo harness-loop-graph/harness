@@ -1,42 +1,27 @@
-# Harness — internal documentation
+# Documentación del harness — empezar aquí
 
-`harness/` is the code generator of a university thesis project
-(PI-I): a model-agnostic agent harness built in three iterations — C1 (one
-interaction cycle), C2 (a corrective loop on top of C1), and C3 (a
-multi-agent graph on top of C2). It runs against any OpenAI-compatible
-chat-completions endpoint, configured by `MODEL_BASE_URL`/`MODEL_API_KEY`/
-`MODEL_ID` (the first experiment runs used GLM through OpenCode Go — see
-[`decisions.md`](./decisions.md)). The `experiment/` directory at the repository root defines the fixed case study
-(`SPEC.md`) the harness is asked to build, and orchestrates experiment runs
-(`experiment/runner/run-experiment.mjs`) across the C1/C2/C3 configurations.
+Documentación interna, a nivel de implementación, de `harness/`: los nombres de
+clase, archivos y detalles de proveedor reales detrás del
+[`harness/README.md`](../README.md) público. Leer una página de esta carpeta
+cuando haga falta verificar una afirmación concreta contra el código fuente, no
+solo el comportamiento de alto nivel. El propio `harness/README.md` se mantiene
+deliberadamente agnóstico de proveedor (`ModelAdapter`, "endpoint compatible con
+OpenAI"); esta carpeta nombra las implementaciones concretas.
 
-The public `harness/README.md` is deliberately
-provider-agnostic (it describes the harness in terms of generic
-"ModelAdapter" and "OpenAI-compatible endpoint" language). This `docs/`
-folder is internal: it names the real classes, files, and provider details
-so the thesis writeup can cite exact implementation evidence.
+Cada afirmación en estos documentos está respaldada por el código bajo `src/` y
+por el comportamiento verificado por los tests bajo `tests/`.
 
-## Contents
+## Orden de lectura
 
-- [`architecture.md`](./architecture.md) — C1: the six components, the
-  interaction cycle, `Harness`, and the core contracts.
-- [`loop.md`](./loop.md) — C2: the corrective loop (`AgentLoop`), its state
-  machine, and the deterministic FINISH/RETRY/FAIL decision policy.
-- [`graph.md`](./graph.md) — C3: the multi-agent graph (`GraphEngine`), node
-  and edge model, and `maxSteps` loop prevention.
-- [`model-provider.md`](./model-provider.md) — the real model adapter
-  (`OpenAICompatibleModelAdapter`), the OpenAI-compatible chat-completions
-  request/response shape, environment variables, and why the adapter stays
-  provider-generic in shape.
-- [`decisions.md`](./decisions.md) — implementation decisions worth
-  recording for the thesis: provider choice, env var naming, deterministic
-  decision policy, guardrails design.
-- [`mcp-skills.md`](./mcp-skills.md) — MCP tool provider (`McpToolProvider`),
-  skill catalog + `load_skill`, and the harness-config loader that wires
-  both into C1/C2/C3 identically.
-- [`model-router.md`](./model-router.md) — `RoutingModelAdapter`, the
-  `router` harness-config section, and why routing rules never depend on
-  graph node/role.
+| # | Documento | Qué cubre |
+|---|----------|--------|
+| 1 | [`architecture.md`](./architecture.md) | C1: los seis componentes, el ciclo de interacción, `Harness`, y los contratos centrales — **empezar aquí** |
+| 2 | [`loop.md`](./loop.md) | C2: el *loop* correctivo (`AgentLoop`), su máquina de estados, y la política determinista de decisión FINISH/RETRY/FAIL |
+| 3 | [`graph.md`](./graph.md) | C3: el grafo multiagente (`GraphEngine`), el modelo de nodos y aristas, y la prevención de bucles infinitos con `maxSteps` |
+| 4 | [`model-provider.md`](./model-provider.md) | El adaptador de modelo real (`OpenAICompatibleModelAdapter`), la forma de la solicitud/respuesta, y las variables de entorno |
+| 5 | [`model-router.md`](./model-router.md) | El `RoutingModelAdapter` opcional, la sección `router` de la configuración del *harness*, y por qué las reglas de enrutamiento nunca dependen del nodo/rol del grafo |
+| 6 | [`mcp-skills.md`](./mcp-skills.md) | El proveedor de herramientas MCP, el catálogo de *skills*, y el cargador de configuración del *harness* que conecta ambos a C1/C2/C3 de forma idéntica |
+| 7 | [`decisions.md`](./decisions.md) | Registro de decisiones de arquitectura: elección de proveedor, nomenclatura de variables de entorno, la política determinista de decisión, el diseño de *guardrails* |
 
-Every claim in these documents is grounded in the source under `src/` and
-the behavior asserted by the tests under `tests/`.
+Los documentos 2–7 son independientes una vez leído `architecture.md`; léanse
+en el orden que corresponda a lo que se esté verificando.

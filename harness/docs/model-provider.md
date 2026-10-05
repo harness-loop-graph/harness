@@ -1,141 +1,145 @@
-# Model provider — OpenAI-compatible chat completions
+# Proveedor de modelo — chat completions compatible con OpenAI
 
-This experiment run of the harness talks to a model through any
-OpenAI-compatible chat-completions endpoint (configured by
-`MODEL_BASE_URL`/`MODEL_API_KEY`/`MODEL_ID`). Historically the first runs
-pointed this at **GLM** through **OpenCode Go**
-(https://opencode.ai/docs/go/); OpenRouter and OpenCode Go are two examples
-of endpoints that work, not a requirement. The concrete adapter is
-`OpenAICompatibleModelAdapter` in `src/components/openai-compatible-adapter.ts`.
+El *harness* habla con un modelo a través de cualquier endpoint de
+chat-completions compatible con OpenAI (configurado mediante
+`MODEL_BASE_URL`/`MODEL_API_KEY`/`MODEL_ID`). Históricamente las primeras
+corridas apuntaron esto a **GLM** a través de **OpenCode Go**
+(https://opencode.ai/docs/go/); OpenRouter y OpenCode Go son dos ejemplos de
+endpoints que funcionan, no un requisito. El adaptador concreto es
+`OpenAICompatibleModelAdapter` en `src/components/openai-compatible-adapter.ts`.
 
-## Why a generic interface
+## Por qué una interfaz genérica
 
-`ModelAdapter` (`src/components/model-adapter.ts`) is a one-method
-interface: `complete(request: ModelRequest): Promise<ModelResponse>`. Every
-other harness component (`ContextManager`, `ToolManager`,
-`ExecutionManager`, `VerificationManager`, `Guardrails`) is provider-blind;
-`OpenAICompatibleModelAdapter` is the **only** component that knows how to
-speak to a specific endpoint, and it carries no provider-specific class
-name, default base URL, or hardcoded header — any OpenAI-compatible
-endpoint is plugged in by constructing the adapter with a different
-`baseUrl`/`model` (and, if the endpoint needs one, a custom header via
-`headers`). This is demonstrated directly by
-`tests/openai-compatible-adapter.spec.ts`'s `'works unchanged against any
-OpenAI-compatible endpoint (e.g., OpenAI)'` test, which points the same
-class at `https://api.openai.com/v1` and asserts the request shape is
-identical. See [`decisions.md`](./decisions.md) for the history of why the
-first experiment runs used GLM through OpenCode Go, and why the design
-itself stays provider-agnostic.
+`ModelAdapter` (`src/components/model-adapter.ts`) es una interfaz de un solo
+método: `complete(request: ModelRequest): Promise<ModelResponse>`. Cualquier
+otro componente del *harness* (`ContextManager`, `ToolManager`,
+`ExecutionManager`, `VerificationManager`, `Guardrails`) es ciego al
+proveedor; `OpenAICompatibleModelAdapter` es el **único** componente que sabe
+hablar con un endpoint específico, y no lleva ningún nombre de clase
+específico de proveedor, URL base por defecto, ni encabezado fijo — cualquier
+endpoint compatible con OpenAI se conecta construyendo el adaptador con un
+`baseUrl`/`model` distinto (y, si el endpoint lo necesita, un encabezado
+personalizado vía `headers`). Esto queda demostrado directamente por el test
+`'works unchanged against any OpenAI-compatible endpoint (e.g., OpenAI)'` de
+`tests/openai-compatible-adapter.spec.ts`, que apunta la misma clase a
+`https://api.openai.com/v1` y verifica que la forma de la solicitud es
+idéntica. Ver [`decisions.md`](./decisions.md) para la historia de por qué las
+primeras corridas del experimento usaron GLM a través de OpenCode Go, y por
+qué el diseño en sí se mantiene agnóstico de proveedor.
 
-## Configuration — `OpenAICompatibleAdapterConfig`
+## Configuración — `OpenAICompatibleAdapterConfig`
 
-| Field | Source | Fallback |
+| Campo | Fuente | Valor de respaldo |
 |---|---|---|
-| `apiKey` | constructor arg | `process.env.MODEL_API_KEY` |
-| `baseUrl` | constructor arg | `process.env.MODEL_BASE_URL` — **no provider default**; construction throws if neither is set |
-| `model` | constructor arg | `process.env.MODEL_ID` (e.g. `gpt-4o-mini`) |
-| `fetchImpl` | constructor arg | global `fetch` (injectable for tests) |
-| `timeoutMs` | constructor arg | `120_000` |
-| `headers` | constructor arg | `{}` — merged into every request, for an endpoint that needs a custom header |
-| `userAgent` | constructor arg | `'pi-harness/0.1.0'` |
+| `apiKey` | argumento del constructor | `process.env.MODEL_API_KEY` |
+| `baseUrl` | argumento del constructor | `process.env.MODEL_BASE_URL` — **sin valor por defecto de proveedor**; la construcción lanza error si ninguno está configurado |
+| `model` | argumento del constructor | `process.env.MODEL_ID` (p. ej. `gpt-4o-mini`) |
+| `fetchImpl` | argumento del constructor | `fetch` global (inyectable para tests) |
+| `timeoutMs` | argumento del constructor | `120_000` |
+| `headers` | argumento del constructor | `{}` — combinado en cada solicitud, para un endpoint que necesite un encabezado personalizado |
+| `userAgent` | argumento del constructor | `'pi-harness/0.1.0'` |
 
-The constructor throws immediately (`MODEL_API_KEY is not set...` /
-`MODEL_ID is not set...` / `MODEL_BASE_URL is not set...`) if the key,
-model, or base URL resolve to an empty string, so a misconfigured run fails
-fast rather than making a doomed HTTP call.
+El constructor lanza error inmediatamente (`MODEL_API_KEY is not set...` /
+`MODEL_ID is not set...` / `MODEL_BASE_URL is not set...`) si la clave, el
+modelo, o la URL base resuelven a un string vacío, de modo que una corrida mal
+configurada falla rápido en lugar de hacer una llamada HTTP condenada al
+fracaso.
 
-### Environment variables
+### Variables de entorno
 
-`MODEL_API_KEY`, `MODEL_ID`, `MODEL_BASE_URL` are the three variables the
-harness reads. Their names are deliberately **provider-generic**, not
-`GLM_API_KEY` / `ZAI_API_KEY` / etc. — see
-[`decisions.md`](./decisions.md#env-var-naming). `MODEL_BASE_URL` is
-**required** (there is no provider default); point it at any
-OpenAI-compatible endpoint, e.g. `https://openrouter.ai/api/v1` or
-`https://opencode.ai/zen/go/v1`.
+`MODEL_API_KEY`, `MODEL_ID`, `MODEL_BASE_URL` son las tres variables que lee
+el *harness*. Sus nombres son deliberadamente **genéricos de proveedor**, no
+`GLM_API_KEY` / `ZAI_API_KEY` / etc. — ver [`decisions.md`](./decisions.md)
+(ADR 2). `MODEL_BASE_URL` es **obligatoria** (no hay valor por defecto de
+proveedor); apunta a cualquier endpoint compatible con OpenAI, p. ej.
+`https://openrouter.ai/api/v1` o `https://opencode.ai/zen/go/v1`.
 
-## Request shape
+## Forma de la solicitud
 
-`complete(request)` POSTs to `` `${baseUrl}/chat/completions` `` with:
+`complete(request)` hace POST a `` `${baseUrl}/chat/completions` `` con:
 
 ```json
 {
   "model": "<MODEL_ID>",
   "messages": [ ... ],
-  "tools": [ ... ]   // omitted when availTools is empty
+  "tools": [ ... ]   // se omite cuando availTools está vacío
 }
 ```
 
-Headers:
+Encabezados:
 
 ```
 Content-Type: application/json
 Authorization: Bearer <MODEL_API_KEY>
-User-Agent: pi-harness/0.1.0          (or configured userAgent)
-...headers                            (any configured `headers` merged in)
+User-Agent: pi-harness/0.1.0          (o el userAgent configurado)
+...headers                            (cualquier `headers` configurado combinado)
 ```
 
-`headers` lets a caller add whatever a specific endpoint needs (e.g. a
-session/routing header some proxies require); the adapter itself has no
-opinion about what, if anything, goes there.
+`headers` permite que un llamador agregue lo que un endpoint específico
+necesite (p. ej. un encabezado de sesión/enrutamiento que algunos proxies
+requieren); el adaptador en sí no tiene ninguna opinión sobre qué, si acaso
+algo, va ahí.
 
-Requests time out via `AbortSignal.timeout(timeoutMs)` (default 120 s).
+Las solicitudes expiran mediante `AbortSignal.timeout(timeoutMs)` (120 s por
+defecto).
 
-## Message construction — `buildMessages`
+## Construcción de mensajes — `buildMessages`
 
-- A `system` message is emitted only if there is something to put in it:
-  `request.instructions` and/or a rendered list of `request.availTools`
-  (`- name: description` lines under `Available tools:`).
-- The task becomes a `user` message, appended with the first 200
-  files of `request.context.files`, the workspace root, and the guessed
-  language; if `request.feedback` is present (loop retry) it's appended
-  under a `[feedback from previous failed attempt]` marker.
-- `request.history` (prior `ModelResponse | ToolResult` entries) is replayed
-  as OpenAI-style messages: a `tool_call` becomes an `assistant` message
-  with `tool_calls` (synthetic id `` call_${tool} ``); a `tool_result`
-  becomes a `role: 'tool'` message with the matching `tool_call_id`,
-  content capped at 8000 characters; a `finish` becomes a plain `assistant`
-  message; anything else (an `error`) becomes an `assistant` message
-  summarizing the error code and text.
+- Un mensaje `system` se emite solo si hay algo para poner en él:
+  `request.instructions` y/o una lista renderizada de `request.availTools`
+  (líneas `- name: description` bajo `Available tools:`).
+- La tarea se convierte en un mensaje `user`, con los primeros 200 archivos de
+  `request.context.files` agregados, la raíz del espacio de trabajo, y el
+  lenguaje estimado; si `request.feedback` está presente (reintento del
+  *loop*) se agrega bajo un marcador
+  `[feedback from previous failed attempt]`.
+- `request.history` (entradas previas `ModelResponse | ToolResult`) se
+  reproduce como mensajes al estilo OpenAI: un `tool_call` se convierte en un
+  mensaje `assistant` con `tool_calls` (id sintético `` call_${tool} ``); un
+  `tool_result` se convierte en un mensaje `role: 'tool'` con el
+  `tool_call_id` correspondiente, contenido topeado a 8000 caracteres; un
+  `finish` se convierte en un mensaje `assistant` simple; cualquier otra cosa
+  (un `error`) se convierte en un mensaje `assistant` que resume el código y
+  el texto del error.
 
-## Response mapping — `complete`
+## Mapeo de respuesta — `complete`
 
-- Network failure (fetch throws) → `{ type: 'error', code: 'network_error', message }`.
-- Non-2xx HTTP → `{ type: 'error', code: 'http_<status>', message }` (body
-  truncated to 2000 characters).
-- Non-JSON body → `{ type: 'error', code: 'invalid_json', ... }`.
-- A JSON `error` field in the payload → `{ type: 'error', code, message }`.
-- No `choices[0].message` → `{ type: 'error', code: 'empty_response', ... }`.
-- `message.tool_calls[0]` present → parses `function.arguments` as JSON and
-  returns `{ type: 'tool_call', tool, args }`; unparseable arguments become
-  `{ type: 'error', code: 'invalid_tool_arguments', ... }`.
-- `message.content` is a non-empty string → `{ type: 'finish', content }`.
-- Neither → `{ type: 'error', code: 'empty_content', ... }`.
+- Fallo de red (fetch lanza error) → `{ type: 'error', code: 'network_error', message }`.
+- HTTP no 2xx → `{ type: 'error', code: 'http_<status>', message }` (cuerpo
+  truncado a 2000 caracteres).
+- Cuerpo no JSON → `{ type: 'error', code: 'invalid_json', ... }`.
+- Un campo `error` JSON en el payload → `{ type: 'error', code, message }`.
+- Sin `choices[0].message` → `{ type: 'error', code: 'empty_response', ... }`.
+- `message.tool_calls[0]` presente → parsea `function.arguments` como JSON y
+  devuelve `{ type: 'tool_call', tool, args }`; argumentos no parseables se
+  convierten en `{ type: 'error', code: 'invalid_tool_arguments', ... }`.
+- `message.content` es un string no vacío → `{ type: 'finish', content }`.
+- Ninguno de los anteriores → `{ type: 'error', code: 'empty_content', ... }`.
 
-Token usage (`payload.usage.prompt_tokens` / `completion_tokens`) is
-accumulated across every call on the instance and exposed via
+El uso de tokens (`payload.usage.prompt_tokens` / `completion_tokens`) se
+acumula a través de cada llamada en la instancia y se expone mediante
 `getUsage(): { promptTokens, completionTokens, totalTokens, calls }`.
 
-## Where it's wired in
+## Dónde está conectado
 
-`OpenAICompatibleModelAdapter` is instantiated directly (no factory/registry
-indirection) in the three live smoke entry points:
+`OpenAICompatibleModelAdapter` se instancia directamente (sin indirección de
+fábrica/registro) en los tres puntos de entrada de prueba de humo en vivo:
 
-- `src/smoke.ts` — one `OpenAICompatibleModelAdapter()` for a single C1
-  interaction.
-- `src/smoke-loop.ts` — one adapter reused across every turn of a C2
-  `AgentLoop`.
-- `src/smoke-graph.ts` — one adapter constructed per node inside the
+- `src/smoke.ts` — un `OpenAICompatibleModelAdapter()` para una única
+  interacción de C1.
+- `src/smoke-loop.ts` — un adaptador reutilizado a través de cada turno de un
+  `AgentLoop` de C2.
+- `src/smoke-graph.ts` — un adaptador construido por nodo dentro del
   `LoopFactory`.
 
-## Behavior verified by `tests/openai-compatible-adapter.spec.ts`
+## Comportamiento verificado por `tests/openai-compatible-adapter.spec.ts`
 
-Missing `MODEL_API_KEY` / `MODEL_ID` / `MODEL_BASE_URL` throw with a message
-naming the missing variable; a `tool_calls` response maps to `tool_call`;
-configured `headers` are merged into the request alongside `Authorization`
-and `User-Agent`; a plain content response maps to `finish`; pointing
-`baseUrl` at `https://api.openai.com/v1` produces the identical request
-shape against a different provider; HTTP 401 and network failures both map
-to typed `error` responses; usage accumulates across calls and defaults to
-zero when the payload omits it; and `history` round-trips correctly into
-`assistant`/`tool` messages.
+La ausencia de `MODEL_API_KEY` / `MODEL_ID` / `MODEL_BASE_URL` lanza error con
+un mensaje que nombra la variable faltante; una respuesta `tool_calls` se
+mapea a `tool_call`; los `headers` configurados se combinan en la solicitud
+junto con `Authorization` y `User-Agent`; una respuesta de contenido simple se
+mapea a `finish`; apuntar `baseUrl` a `https://api.openai.com/v1` produce la
+forma de solicitud idéntica contra un proveedor distinto; HTTP 401 y fallos de
+red se mapean ambos a respuestas `error` tipadas; el uso se acumula a través
+de llamadas y vuelve a cero por defecto cuando el payload lo omite; y
+`history` se reconstruye correctamente en mensajes `assistant`/`tool`.

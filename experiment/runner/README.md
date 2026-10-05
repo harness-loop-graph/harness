@@ -1,203 +1,99 @@
-# Experiment Runner
+# Runner del experimento
 
-Plain-ESM CLI that orchestrates the model-agnostic harness over the fixed `SPEC.md` in isolated workspaces, against any OpenAI-compatible chat-completions endpoint.
+CLI en ESM plano que orquesta el *harness* agnóstico de proveedor sobre el
+`SPEC.md` fijo, en espacios de trabajo aislados, contra cualquier endpoint de
+chat-completions compatible con OpenAI. Es el punto de entrada único para
+correr las tres configuraciones del experimento (C1/C2/C3), publicar sus
+resultados, y producir el `run-report.json` que se usa para comparar las
+capas de ingeniería entre sí.
 
-## Usage
+## Inicio rápido
 
 ```bash
 node runner/run-experiment.mjs --config c1|c2|c3 [options]
 ```
 
-### Flags
+Una corrida de validación sin llamar al modelo (imprime el plan y no crea
+nada en disco):
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--config c1\|c2\|c3` | **required** | Experiment configuration |
-| `--runs-dir <path>` | `<monorepo>/../pi-runs` (sibling of this repo, never inside it) | Run workspace root |
-| `--spec <path>` | `experiment/SPEC.md` | Fixed specification file |
-| `--task-file <path>` | — | Override generation task (cheap validation runs). In c3 every node keeps its role and verification but works on this task instead of the SPEC, and the `GraphEngine`'s graph-level task is set to the override too (nodes are what the engine actually runs, but the graph-level task no longer contradicts it). The file is validated (exists, readable, not empty/whitespace-only) **before** the run's workspace is created, with a usage error and a non-zero exit on failure, for every `--config` — so a bad `--task-file` never leaves an orphan workspace directory behind |
-| `--max-turns <n>` | 8 | Loop budget (C2/C3 nodes). Must be a positive integer |
-| `--max-steps <n>` | 12 | Graph step budget (C3 only). Must be a positive integer |
-| `--tool-rounds <n>` | 80 (c1), 30 (c2/c3) | Tool-call budget per interaction. Must be a positive integer |
-| `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf http://localhost:3000/health` | C2 verification command |
-| `--with-batteries` | off | After generation, start the stack and run acceptance batteries |
-| `--keep` | off | With `--with-batteries`, do **not** tear the stack down |
-| `--dry-run` | off | Print the plan JSON and exit without calling the model; creates nothing on disk |
-| `--harness-config <path>` | — | JSON `{ mcpServers, skillsDirs }`; wires MCP tools + skills into every harness the run builds |
-| `--publish` | off | After the run (and its local git commit), create a **public** GitHub repo for the workspace via `gh` and push it (see below) |
-| `--publish-org <org>` | `harness-loop-graph` | GitHub org/user the `--publish` repo is created under |
+```bash
+MODEL_API_KEY=dummy MODEL_ID=dummy node runner/run-experiment.mjs --config c1 --dry-run
+```
 
-### Credentials
+Una corrida real necesita `MODEL_API_KEY`/`MODEL_ID`/`MODEL_BASE_URL` (ver
+"Credenciales" más abajo) y, salvo que se pase `--harness-config`, construye
+sobre `experiment/SPEC.md` por defecto.
 
-`MODEL_API_KEY`, `MODEL_ID` and `MODEL_BASE_URL` are read from `process.env`; any that are missing are filled from `.env` at the repository root (simple `key=value` parse, exported to `process.env` so router routes see the same values; the environment always wins). A clear error is raised if the key or model id is missing. `MODEL_BASE_URL` has no provider default: a run that reaches model construction without it fails fast with a clear error naming `MODEL_BASE_URL`. `--dry-run` never constructs a model, so it does not require `MODEL_BASE_URL`.
+## Configuraciones
 
-### Validation
+- **c1** — Una única interacción `Harness.run(task)`. Sin verificación, sin
+  reintento. La más rápida, la más débil.
+- **c2** — `AgentLoop` con turnos correctivos. Cada turno ejecuta el
+  *harness*, y luego el comando de verificación decide FINISH / RETRY / FAIL.
+- **c3** — `GraphEngine` con una topología fija de 5 nodos y un *router*
+  personalizado.
 
-A missing value, non-numeric, fractional, zero or negative `--max-turns`/`--max-steps`/`--tool-rounds` is a usage error (`Usage: --<flag> <n> must be a positive integer ...`) with a non-zero exit, before any workspace or model call. `--task-file` is validated the same way (see the flags table above) before the workspace is created.
+### Topología de C3
 
-## Generated apps live outside the repo
-
-Every run gets its own workspace under `--runs-dir` (default: a `pi-runs`
-directory next to this monorepo, resolved from the runner's own file
-location — so generated apps are never written inside this repository, even
-accidentally). The workspace dir name is
-`<model-slug>-<config>-<YYYYMMDDTHHMMSS>` (UTC), e.g.
-`test-model-5-2-c1-20260105T030405`; the slug is the model id lowercased with every
-run of non-`[a-z0-9]` characters collapsed to a single `-`, trimmed.
-`--dry-run` only prints the planned workspace path and creates nothing.
-
-### Per-run repo
-
-After a run finishes — **success or failure** — the workspace is turned into
-its own git repo:
-
-1. `git init -b main`.
-2. A `.gitignore` is added (or extended) with `node_modules/`, `dist/`,
-   `build/`, `coverage/` and `.env*`.
-3. Everything is committed (including `run-report.json` and the
-   `audit*.jsonl` logs) with message `run: <model> <config> (<status>)`,
-   using a fixed local git identity (`pi-runner
-   <pi-runner@users.noreply.github.com>`) passed via `-c user.name=`/
-   `-c user.email=` — the operator's own git identity is never required.
-
-A failure during this step never loses the run: it's recorded as
-`run-report.json`'s `repoError` field and the process continues.
-
-### Publishing (`--publish`, off by default)
-
-`--publish` requires an authenticated `gh` CLI; `gh auth status` is checked
-**before** any model call, failing with a usage-style error if it's not
-authenticated. After the local commit above, publishing:
-
-Both guards below only ever look at **tracked** files — the exact list
-`git -C <workspace> ls-files` returns, i.e. exactly what the per-run commit
-(and `--publish`) ships — never the whole working tree, so a gitignored
-`.env`, `node_modules/`, `dist/`, etc. can never trip (or hide from) either
-guard.
-
-1. Refuses (and never calls `gh`/`git`) if any tracked file is a
-   byte-identical copy (sha256 over raw bytes) of a file under
-   `experiment/acceptance/` (the hidden bench) — a defensive assertion,
-   since the runner never copies that directory into a generated workspace.
-   This is a **content** check, not a path check: a generated app's own
-   folder that happens to be named `acceptance/` is never flagged, only an
-   actual copy of a bench file is, regardless of where it ends up in the
-   workspace.
-2. Scans every tracked file's raw bytes (so a binary file is matched
-   honestly instead of silently skipped) for the exact model API key value
-   used by the run, for the value of any `--harness-config` router route's
-   `apiKeyEnv`, and for every non-empty `env` value of 8 characters or more
-   configured on a `--harness-config` MCP server (shorter values are
-   dropped to avoid false positives on non-secret-looking short strings).
-   On a hit, it refuses to publish and records `run-report.json`'s
-   `publishError: "secret detected in <relative path>"` — the secret's
-   **value** is never printed or stored.
-3. Otherwise creates a public repo `<org>/run-<workspace dir name>` with
-   `gh repo create <repo> --public --source <workspace> --push
-   --description "<model> <config> run generated by the PI-I harness"`,
-   records `repository: { name, url }` in `run-report.json`, then commits
-   and pushes that updated report as a second commit (`run: record
-   repository metadata`) rather than guessing the URL before the repo
-   exists.
-
-Any failure in this flow (missing `gh` auth, secret found, bench leakage,
-`gh`/`git` failure) is recorded in `run-report.json` and makes the process
-exit non-zero; the run itself is never lost.
-
-The hidden acceptance batteries (`experiment/acceptance/`) always stay in
-this bench repo — the runner never copies them into a generated workspace,
-so they can never reach a published repo either.
-
-### Tests
-
-`node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against the harness's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. Also covers `createModel()` (returns a plain `OpenAICompatibleModelAdapter` without a router, wraps it in a `RoutingModelAdapter` with the configured routes using an injected `makeAdapter` stub — no network — when one is configured, and propagates a clear missing-env-var error) and `summarizeRouting()` (decision log → counts per route/reason). `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
-
-`--task-file` wiring is covered by spawning the real CLI with `--dry-run` (dummy `MODEL_API_KEY`/`MODEL_ID` in the child env, since `loadCredentials()` runs before the dry-run branch): the printed plan's c3 node tasks carry the override text and never mention `SPEC`, and an empty/whitespace-only task file exits non-zero with a `Usage: --task-file ...` message on stderr and no stdout. `compactTraceC3()` is exported and tested directly for copying `loopFailure` into a failed trace entry while leaving it off a successful one.
-
-T3 (runs dir, per-run repo, publish) is covered with no network and no real GitHub: `parseArgs()`'s default `--runs-dir` resolving outside the monorepo and the new `--publish`/`--publish-org` flags; `slugifyModelId()` and `timestampForWorkspace()`; `createWorkspace()`'s `<slug>-<config>-<timestamp>` naming and that `--dry-run` creates nothing (also exercised end-to-end via a real `--dry-run` CLI spawn); `initWorkspaceRepo()` against a real local git repo in a temp dir (branch `main`, one commit with the fixed `pi-runner` identity, `.gitignore` covering `node_modules/`/`dist/`/`build/`/`coverage/`/`.env*`); `scanWorkspaceForSecrets()`/`collectSecretValues()` detecting a planted key (and a configured route's `apiKeyEnv`) without ever asserting on the value itself; `findAcceptancePathInWorkspace()`; and `publishWorkspace()`/`checkGhAuthenticated()` with an injected command-runner stub in place of `gh`, covering the built `gh repo create` command, the `repository` field written to `run-report.json`, and that the secret/acceptance guards refuse before `gh`/`git` is ever invoked.
-
-## Configurations
-
-- **c1** — Single `Harness.run(task)` interaction. No verification, no retry. Fastest, weakest.
-- **c2** — `AgentLoop` with corrective turns. Each turn runs the harness, then the verification command decides FINISH / RETRY / FAIL.
-- **c3** — `GraphEngine` with a 5-node fixed topology and a custom router.
-
-### C2 docker compose teardown
-
-C2's default `--verify-cmd` starts a docker compose stack
-(`docker compose up -d --build`) to run the health check against, which
-would otherwise keep running after the process exits and make the next run
-on the same (fixed) ports fail. At the end of a c2 run — success, failure,
-or a thrown exception, via a `finally` — the runner tears that stack down
-(`docker compose down -v`) in the workspace whenever the verify command
-mentions `docker compose`, or whenever the workspace has its own
-`docker-compose.yml`/`compose.yaml` (the SPEC requires one) regardless of
-what `--verify-cmd` says. A teardown failure is recorded as
-`run-report.json`'s `teardownError`, never masking the run's own result.
-Teardown is skipped when `--with-batteries --keep` was requested together,
-since the battery phase already intentionally left the stack up for
-inspection. The battery phase below (which starts its own stack) reuses the
-same teardown helper.
-
-### C3 topology
-
-| Node | Role | Task essence | Verification |
+| Nodo | Rol | Esencia de la tarea | Verificación |
 |------|------|--------------|--------------|
-| architect | architect | Write `docs/architecture.md` | `test -f docs/architecture.md` |
-| data | data | Implement data layer (migrations + seed) | none |
-| backend | backend | Implement NestJS backend (EP-01..EP-20) | none |
-| frontend | frontend | Implement React SPA (SCR-01..SCR-08) | none |
-| reviewer | reviewer | Review system, write `review-verdict.json` | `test -f review-verdict.json` |
+| architect | architect | Escribir `docs/architecture.md` | `test -f docs/architecture.md` |
+| data | data | Implementar la capa de datos (migraciones + seed) | ninguna |
+| backend | backend | Implementar el backend NestJS (EP-01..EP-20) | ninguna |
+| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) | ninguna |
+| reviewer | reviewer | Revisar el sistema, escribir `review-verdict.json` | `test -f review-verdict.json` |
 
 Router:
-- Non-reviewer nodes flow linearly: architect → data → backend → frontend → reviewer.
-- A failed node is retried once (same node), then the graph fails.
-- After reviewer: `acceptable: true` → FINISH; `responsible: X` → NEXT X; otherwise retry reviewer once, then FAIL.
-- Before every reviewer visit (including a retry), any `review-verdict.json`
-  already in the workspace is deleted first, so a stale verdict from an
-  earlier visit can never satisfy this visit's `test -f review-verdict.json`
-  verification or be misread by the router above as this visit's result.
+- Los nodos no-revisores fluyen linealmente: architect → data → backend → frontend → reviewer.
+- Un nodo fallido se reintenta una vez (mismo nodo), luego el grafo falla.
+- Después del reviewer: `acceptable: true` → FINISH; `responsible: X` → NEXT X; en otro caso, reintentar reviewer una vez, luego FAIL.
+- Antes de cada visita al reviewer (incluyendo un reintento), cualquier
+  `review-verdict.json` ya presente en el espacio de trabajo se borra primero,
+  de modo que un veredicto obsoleto de una visita anterior nunca pueda
+  satisfacer la verificación `test -f review-verdict.json` de esta visita, ni
+  ser malinterpretado por el router de arriba como el resultado de esta
+  visita.
 
-## MCP tools and skills (`--harness-config`)
+## Flags
 
-A JSON config (see `harness/examples/harness-config.json`) can add MCP tools
-and agent skills identically to C1, C2 and C3:
+| Flag | Valor por defecto | Descripción |
+|------|---------|-------------|
+| `--config c1\|c2\|c3` | **requerido** | Configuración del experimento |
+| `--runs-dir <path>` | `<monorepo>/../pi-runs` (hermano de este repositorio, nunca dentro de él) | Raíz del espacio de trabajo de la corrida |
+| `--spec <path>` | `experiment/SPEC.md` | Archivo de especificación fija |
+| `--task-file <path>` | — | Sobrescribe la tarea de generación (corridas de validación económicas). En c3, cada nodo conserva su rol y verificación pero trabaja sobre esta tarea en lugar de la SPEC, y la tarea a nivel de grafo del `GraphEngine` también se fija al valor sobrescrito (los nodos son lo que el motor realmente ejecuta, pero la tarea a nivel de grafo ya no lo contradice). El archivo se valida (existe, es legible, no está vacío ni es solo espacios en blanco) **antes** de crear el espacio de trabajo de la corrida, con un error de uso y salida distinta de cero si falla, para cada `--config` — de modo que un `--task-file` inválido nunca deja un directorio de espacio de trabajo huérfano |
+| `--max-turns <n>` | 8 | Presupuesto de turnos del *loop* (nodos C2/C3). Debe ser un entero positivo |
+| `--max-steps <n>` | 12 | Presupuesto de pasos del grafo (solo C3). Debe ser un entero positivo |
+| `--tool-rounds <n>` | 80 (c1), 30 (c2/c3) | Presupuesto de llamadas a herramienta por interacción. Debe ser un entero positivo |
+| `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf http://localhost:3000/health` | Comando de verificación de C2 |
+| `--with-batteries` | desactivado | Después de la generación, levanta el stack y corre las baterías de aceptación |
+| `--keep` | desactivado | Con `--with-batteries`, **no** desmonta el stack al final |
+| `--dry-run` | desactivado | Imprime el plan en JSON y termina sin llamar al modelo; no crea nada en disco |
+| `--harness-config <path>` | — | JSON `{ mcpServers, skillsDirs }`; conecta herramientas MCP + *skills* a cada *harness* que construye la corrida |
+| `--publish` | desactivado | Después de la corrida (y su commit local de git), crea un repositorio **público** de GitHub para el espacio de trabajo vía `gh` y lo empuja (ver abajo) |
+| `--publish-org <org>` | `harness-loop-graph` | Organización/usuario de GitHub bajo el que se crea el repositorio de `--publish` |
+
+### Credenciales
+
+`MODEL_API_KEY`, `MODEL_ID` y `MODEL_BASE_URL` se leen de `process.env`;
+cualquiera que falte se completa desde `.env` en la raíz del repositorio
+(parseo simple `key=value`, exportado a `process.env` de modo que las rutas
+del *router* vean los mismos valores; el entorno siempre tiene prioridad). Se
+lanza un error claro si falta la clave o el id del modelo. `MODEL_BASE_URL`
+no tiene valor por defecto de proveedor: una corrida que llega a la
+construcción del modelo sin ella falla rápido con un error claro que nombra
+`MODEL_BASE_URL`. `--dry-run` nunca construye un modelo, así que no requiere
+`MODEL_BASE_URL`.
+
+## Harness config: MCP, skills y router de modelos
+
+Un JSON de configuración (ver `harness/examples/harness-config.json`) puede
+agregar herramientas MCP, *skills* de agente, y un *router* de modelos de
+forma idéntica a C1, C2 y C3:
 
 ```json
 {
   "mcpServers": { "name": { "command": "...", "args": [], "env": {}, "cwd": "." } },
-  "skillsDirs": ["./skills"]
-}
-```
-
-The runner loads it once per run: one MCP connection (`McpToolProvider`)
-is opened and shared across every harness the run builds (C3 builds one
-per graph node), and one `SkillCatalog` is loaded once. Each harness's
-tool manager gets the same MCP tools plus `load_skill` registered into it,
-and the guardrail `allowedTools` list is extended with those tool names —
-so guardrails and the audit log apply to MCP/skill calls exactly like the
-built-in tools. The connection is always closed at the end of the run
-(`finally`), even on failure; a failure while closing it is logged and
-recorded under `run-report.json`'s `closeError` field without replacing
-the run's own failure. Without `--harness-config`, none of this runs and
-output is unchanged.
-
-A missing/invalid config file, a server that fails to connect, or a
-skills directory that fails to load are recorded like any other run
-failure: `run-report.json` is still written, with `status: "FAILED"` and
-`failure: "harness-config: <message>"`, and the process exits non-zero.
-`--harness-config` with no path value is a usage error (matching
-`--config`), not a raw stack trace.
-
-## Model router (`--harness-config` with a `router` section)
-
-The same `--harness-config` file can also carry an optional `router`
-section (see `harness/docs/model-router.md`). It is **not** set in this
-repo's own `experiment/harness-config.json` — routing stays off by
-default — but a config that opts in looks like:
-
-```json
-{
   "skillsDirs": ["./skills"],
   "router": {
     "longContextThreshold": 60000,
@@ -209,17 +105,41 @@ default — but a config that opts in looks like:
 }
 ```
 
-When set, the runner wraps the model it builds for the run in a
-`RoutingModelAdapter` — identically for c1, c2 and c3 — so requests over
-`longContextThreshold` go to `longContext`,
-retry turns (verification feedback present) go to `retry`, and everything
-else keeps going to the default model. Without a `router` section (or
-without `--harness-config` at all), the model is unwrapped and behavior
-is unchanged.
+El runner lo carga una vez por corrida: se abre y comparte una única conexión
+MCP (`McpToolProvider`) entre cada *harness* que construye la corrida (C3
+construye uno por nodo del grafo), y se carga un único `SkillCatalog` una
+vez. El tool manager de cada *harness* recibe las mismas herramientas MCP más
+`load_skill` registradas en él, y la lista `allowedTools` de *guardrails* se
+extiende con esos nombres de herramienta — de modo que los *guardrails* y el
+log de auditoría aplican a las llamadas MCP/skill exactamente igual que a las
+herramientas incorporadas. La conexión siempre se cierra al final de la
+corrida (`finally`), incluso en caso de fallo; un fallo al cerrarla se
+registra en el campo `closeError` de `run-report.json` sin reemplazar el
+propio fallo de la corrida. Sin `--harness-config`, nada de esto corre y la
+salida no cambia.
 
-## Metrics recorded — `routing`
+Un archivo de configuración faltante o inválido, un servidor que falla al
+conectarse, o un directorio de *skills* que falla al cargar, se registran
+como cualquier otro fallo de corrida: `run-report.json` igual se escribe, con
+`status: "FAILED"` y `failure: "harness-config: <message>"`, y el proceso
+termina con código distinto de cero. `--harness-config` sin un valor de ruta
+es un error de uso (igual que `--config`), no una traza cruda.
 
-When a router is active, `run-report.json` gains a `routing` field:
+La sección `router` es opcional (ver [`harness/docs/model-router.md`](../../harness/docs/model-router.md)
+para el detalle completo) y **no** está configurada en el
+`experiment/harness-config.json` propio de este repositorio — el
+enrutamiento permanece desactivado por defecto. Cuando está presente, el
+runner envuelve el modelo que construye para la corrida en un
+`RoutingModelAdapter` — idénticamente para c1, c2 y c3 — de modo que las
+solicitudes por encima de `longContextThreshold` van a `longContext`, los
+turnos de reintento (con feedback de verificación presente) van a `retry`, y
+todo lo demás sigue yendo al modelo por defecto. Sin una sección `router` (o
+sin `--harness-config`), el modelo no se envuelve y el comportamiento no
+cambia.
+
+### Métricas registradas — `routing`
+
+Cuando un *router* está activo, `run-report.json` gana un campo `routing`:
 
 ```json
 {
@@ -230,31 +150,117 @@ When a router is active, `run-report.json` gains a `routing` field:
 }
 ```
 
-`byRoute` is the per-route usage from `RoutingModelAdapter.getRouting()`.
-`decisions` is the route-decision log collapsed into counts per
-`"<route>:<reason>"` key rather than the full per-call list, which would
-otherwise grow unbounded over a long C2/C3 run; per-route/per-reason
-counts are enough to see which rule fired and how often. `harnessConfig`
-metadata also gains a `routeNames` array (`["default", ...]`) when a
-router is configured.
+`byRoute` es el uso por ruta de `RoutingModelAdapter.getRouting()`.
+`decisions` es el registro de decisiones de ruta colapsado en conteos por
+clave `"<route>:<reason>"` en lugar de la lista completa por llamada, que de
+otro modo crecería sin límite en una corrida larga de C2/C3; los conteos por
+ruta/por motivo alcanzan para ver qué regla se disparó y cuántas veces. Los
+metadatos de `harnessConfig` también ganan un arreglo `routeNames`
+(`["default", ...]`) cuando hay un *router* configurado.
 
-## Battery phase (`--with-batteries`)
+## Apps generadas y publicación
 
-1. `docker compose up -d --build` in the workspace.
-2. Poll `GET http://localhost:3000/health` up to 120 s.
-3. Run `node run-all.mjs` **from `experiment/acceptance/` as its working
-   directory** (the hidden bench, never copied into the workspace) against
-   the generated app, with `WORKSPACE` set to the workspace path plus
-   `BACKEND_URL`/`FRONTEND_URL`/`DB_URL` for the running stack.
-4. Save the aggregated report as `batteries-report.json` in the workspace.
-5. `docker compose down -v` (unless `--keep`) — the same teardown helper the
-   c2 run-end teardown above uses.
+### Las apps generadas viven fuera del repositorio
 
-> **Warning:** Ports 5432, 3000 and 8080 are fixed. Run one experiment at a time; concurrent runs will conflict.
+Cada corrida recibe su propio espacio de trabajo bajo `--runs-dir` (por
+defecto: un directorio `pi-runs` junto a este monorepo, resuelto desde la
+ubicación del propio archivo del runner — de modo que las apps generadas
+nunca se escriben dentro de este repositorio, ni siquiera por accidente). El
+nombre del directorio del espacio de trabajo es
+`<model-slug>-<config>-<YYYYMMDDTHHMMSS>` (UTC), p. ej.
+`test-model-5-2-c1-20260105T030405`; el slug es el id del modelo en minúsculas
+con cada racha de caracteres que no sean `[a-z0-9]` colapsada a un único `-`,
+recortado. `--dry-run` solo imprime la ruta planeada del espacio de trabajo y
+no crea nada.
 
-## Metrics recorded
+### Repositorio por corrida
 
-Every run writes `run-report.json` into the workspace:
+Al terminar una corrida — **éxito o fallo** — el espacio de trabajo se
+convierte en su propio repositorio git:
+
+1. `git init -b main`.
+2. Se agrega (o extiende) un `.gitignore` con `node_modules/`, `dist/`,
+   `build/`, `coverage/` y `.env*`.
+3. Todo se commitea (incluyendo `run-report.json` y los logs
+   `audit*.jsonl`) con el mensaje `run: <model> <config> (<status>)`, usando
+   una identidad local fija de git (`pi-runner
+   <pi-runner@users.noreply.github.com>`) pasada vía `-c user.name=`/
+   `-c user.email=` — nunca se requiere la propia identidad de git del
+   operador.
+
+Un fallo durante este paso nunca pierde la corrida: se registra en el campo
+`repoError` de `run-report.json` y el proceso continúa.
+
+### Publicación (`--publish`, desactivado por defecto)
+
+`--publish` requiere una CLI `gh` autenticada; `gh auth status` se verifica
+**antes** de cualquier llamada al modelo, fallando con un error de estilo de
+uso si no está autenticada. Después del commit local de arriba, la
+publicación:
+
+Las dos salvaguardas de abajo solo miran **archivos rastreados** —
+exactamente la lista que devuelve `git -C <workspace> ls-files`, es decir
+exactamente lo que embarca el commit por corrida (y `--publish`) — nunca todo
+el árbol de trabajo, de modo que un `.env` ignorado por git, `node_modules/`,
+`dist/`, etc. nunca pueden activar (ni esconderse de) ninguna de las dos
+salvaguardas.
+
+1. Se rehúsa (y nunca llama a `gh`/`git`) si algún archivo rastreado es una
+   copia byte-a-byte (sha256 sobre los bytes crudos) de un archivo bajo
+   `experiment/acceptance/` (el banco oculto) — una aserción defensiva, ya
+   que el runner nunca copia ese directorio a un espacio de trabajo generado.
+   Es una verificación de **contenido**, no de ruta: una carpeta propia de
+   una app generada que resulte llamarse `acceptance/` nunca se marca, solo
+   una copia real de un archivo del banco se marca, sin importar dónde
+   termine en el espacio de trabajo.
+2. Escanea los bytes crudos de cada archivo rastreado (de modo que un archivo
+   binario se compara honestamente en lugar de omitirse en silencio) en
+   busca del valor exacto de la clave de API del modelo usada por la
+   corrida, del valor de `apiKeyEnv` de cualquier ruta de *router* de
+   `--harness-config`, y de cada valor `env` no vacío de 8 caracteres o más
+   configurado en un servidor MCP de `--harness-config` (los valores más
+   cortos se descartan para evitar falsos positivos en strings cortos que no
+   parecen secretos). Si hay coincidencia, se rehúsa a publicar y registra
+   `publishError: "secret detected in <relative path>"` en
+   `run-report.json` — el **valor** del secreto nunca se imprime ni se
+   guarda.
+3. En otro caso, crea un repositorio público `<org>/run-<workspace dir name>`
+   con `gh repo create <repo> --public --source <workspace> --push
+   --description "<model> <config> run generated by the PI-I harness"`,
+   registra `repository: { name, url }` en `run-report.json`, y luego
+   commitea y empuja ese reporte actualizado como un segundo commit
+   (`run: record repository metadata`) en lugar de adivinar la URL antes de
+   que el repositorio exista.
+
+Cualquier fallo en este flujo (autenticación de `gh` faltante, secreto
+encontrado, filtración del banco, fallo de `gh`/`git`) se registra en
+`run-report.json` y hace que el proceso termine con código distinto de cero;
+la corrida en sí nunca se pierde.
+
+Las baterías de aceptación ocultas (`experiment/acceptance/`) siempre se
+quedan en este repositorio banco — el runner nunca las copia a un espacio de
+trabajo generado, así que tampoco pueden llegar jamás a un repositorio
+publicado.
+
+## Fase de baterías (`--with-batteries`)
+
+1. `docker compose up -d --build` en el espacio de trabajo.
+2. Sondea `GET http://localhost:3000/health` hasta 120 s.
+3. Corre `node run-all.mjs` **con `experiment/acceptance/` como directorio de
+   trabajo** (el banco oculto, nunca copiado al espacio de trabajo) contra la
+   app generada, con `WORKSPACE` fijado a la ruta del espacio de trabajo más
+   `BACKEND_URL`/`FRONTEND_URL`/`DB_URL` para el stack en ejecución.
+4. Guarda el reporte agregado como `batteries-report.json` en el espacio de
+   trabajo.
+5. `docker compose down -v` (salvo `--keep`) — el mismo ayudante de cierre
+   que usa el cierre de fin de corrida de c2 (ver "Salvaguardas" abajo).
+
+> **Advertencia:** los puertos 5432, 3000 y 8080 están fijos. Correr un
+> experimento a la vez; corridas concurrentes entrarán en conflicto.
+
+## Referencia de `run-report.json`
+
+Cada corrida escribe `run-report.json` en el espacio de trabajo:
 
 ```json
 {
@@ -269,6 +275,7 @@ Every run writes `run-report.json` into the workspace:
   "steps?": 0,
   "totalLoopTurns?": 0,
   "decision?": {},
+  "finalResponse?": "...",
   "failure?": "...",
   "trace": [...],
   "harnessConfig?": {
@@ -283,6 +290,7 @@ Every run writes `run-report.json` into the workspace:
     "byRoute": { "default": { "calls": 0, "promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "cost": 0 } },
     "decisions": { "default:default": 0 }
   },
+  "batteryPhase?": { "ran": true, "passed": true, "error?": "..." },
   "closeError?": "...",
   "teardownError?": "...",
   "repoError?": "...",
@@ -291,38 +299,127 @@ Every run writes `run-report.json` into the workspace:
 }
 ```
 
-- `turns` — interaction turns (C1/C2) or per-node loop turns aggregated (C3).
-- `steps` — graph steps (C3 only).
-- `totalLoopTurns` — total loop turns across all nodes (C3 only).
-- `trace` — compact per-turn/per-step summaries; no full model content. For
-  c3, a step whose `loopStatus` is `"FAILED"` also carries `loopFailure`:
-  why that node's loop failed (its own failure summary, or the terminal
-  decision reason; with the model error code/message appended, truncated,
-  when the final response was an `error`) — so a `FAILED` step is
-  actionable instead of a bare status. A successful step has no
-  `loopFailure` field.
-- `harnessConfig` — only present with `--harness-config`: the config path,
-  a sha256 of its content, the configured MCP server names, every
-  registered tool name (MCP + `load_skill`), every loaded skill name, and
-  (only when `router` is configured) `routeNames` — `["default", ...]`.
-  A failure loading/connecting it is recorded as `status: "FAILED"` and
-  `failure: "harness-config: ..."` instead (see above).
-- `routing` — only present when a `router` section is configured; see
-  "Model router" above.
-- `failure` — also covers an exception thrown anywhere during the run
-  (e.g. `createModel()` rejecting because a router route's `apiKeyEnv` is
-  unset, or any harness/loop/graph error): it is caught, `status` is set to
-  `"FAILED"` and `failure` records the error message, and `run-report.json`,
-  the per-run git repo and `--publish` all still run — a thrown exception
-  never loses the run.
-- `closeError` — only present if closing the MCP connection at the end of
-  the run itself failed; never replaces `failure`.
-- `teardownError` — only present if tearing down a c2 run's docker compose
-  stack at the end of the run failed (see "C2 docker compose teardown"
-  below); never replaces `failure`.
-- `repoError` — only present if turning the workspace into a git repo failed
-  (see "Per-run repo" above); the run and its report are kept regardless.
-- `repository` — only present after a successful `--publish`: the created
-  repo's `name` (`<org>/run-<workspace dir name>`) and `url`.
-- `publishError` — only present if `--publish` was given and publishing was
-  refused or failed (see "Publishing" above); never includes a secret value.
+- `turns` — turnos de interacción (C1/C2) o turnos de *loop* por nodo
+  agregados (C3).
+- `steps` — pasos del grafo (solo C3).
+- `totalLoopTurns` — total de turnos de *loop* a través de todos los nodos
+  (solo C3).
+- `finalResponse` — el contenido de la respuesta `finish` del modelo,
+  truncado a 2000 caracteres, cuando la corrida (C1/C2) terminó con una
+  respuesta `finish`. Ausente en C3 y en cualquier corrida que no haya
+  terminado con `finish`.
+- `trace` — resúmenes compactos por turno/por paso; sin el contenido
+  completo del modelo. Para c3, un paso cuyo `loopStatus` es `"FAILED"`
+  también lleva `loopFailure`: por qué falló el *loop* de ese nodo (su
+  propio resumen de fallo, o el motivo de la decisión terminal; con el
+  código/mensaje de error del modelo agregado, truncado, cuando la
+  respuesta final fue un `error`) — de modo que un paso `FAILED` es
+  accionable en lugar de un simple estado. Un paso exitoso no tiene ningún
+  campo `loopFailure`.
+- `harnessConfig` — presente solo con `--harness-config`: la ruta de la
+  configuración, un sha256 de su contenido, los nombres de servidor MCP
+  configurados, cada nombre de herramienta registrado (MCP + `load_skill`),
+  cada nombre de *skill* cargada, y (solo cuando `router` está configurado)
+  `routeNames` — `["default", ...]`. Un fallo al cargarla/conectarla se
+  registra en cambio como `status: "FAILED"` y
+  `failure: "harness-config: ..."` (ver arriba).
+- `routing` — presente solo cuando hay una sección `router` configurada; ver
+  "Métricas registradas — routing" arriba.
+- `batteryPhase` — presente solo con `--with-batteries`: `ran` siempre
+  `true` cuando la fase corrió, `passed` indica si las baterías de
+  aceptación pasaron, `error` solo está presente si la propia fase de
+  baterías falló (p. ej. el health check nunca pasó).
+- `failure` — también cubre una excepción lanzada en cualquier punto de la
+  corrida (p. ej. `createModel()` rechazando porque `apiKeyEnv` de una ruta
+  de *router* no está configurada, o cualquier error de harness/loop/graph):
+  se captura, `status` se fija a `"FAILED"` y `failure` registra el mensaje
+  del error, y `run-report.json`, el repositorio git por corrida y
+  `--publish` igual corren — una excepción lanzada nunca pierde la corrida.
+- `closeError` — presente solo si cerrar la conexión MCP al final de la
+  corrida falló; nunca reemplaza a `failure`.
+- `teardownError` — presente solo si desmontar el stack de docker compose de
+  una corrida c2 al final de la corrida falló (ver "Salvaguardas" abajo);
+  nunca reemplaza a `failure`.
+- `repoError` — presente solo si convertir el espacio de trabajo en un
+  repositorio git falló (ver "Repositorio por corrida" arriba); la corrida y
+  su reporte se conservan de todos modos.
+- `repository` — presente solo después de un `--publish` exitoso: el `name`
+  (`<org>/run-<workspace dir name>`) y la `url` del repositorio creado.
+- `publishError` — presente solo si se pasó `--publish` y la publicación fue
+  rehusada o falló (ver "Publicación" arriba); nunca incluye un valor de
+  secreto.
+
+## Salvaguardas
+
+- **Validación de flags.** Un `--max-turns`/`--max-steps`/`--tool-rounds`
+  faltante, no numérico, fraccionario, cero o negativo es un error de uso
+  (`Usage: --<flag> <n> must be a positive integer ...`) con código de
+  salida distinto de cero, antes de cualquier espacio de trabajo o llamada
+  al modelo. `--task-file` se valida de la misma manera (ver la tabla de
+  flags arriba) antes de crear el espacio de trabajo.
+- **Cierre del stack de Docker (C2).** El `--verify-cmd` por defecto de C2
+  levanta un stack de docker compose (`docker compose up -d --build`) para
+  correr el health check, que de otro modo seguiría corriendo después de que
+  el proceso termina y haría fallar la siguiente corrida en los mismos
+  puertos (fijos). Al final de una corrida c2 — éxito, fallo, o una excepción
+  lanzada, vía un `finally` — el runner desmonta ese stack
+  (`docker compose down -v`) en el espacio de trabajo cuando el comando de
+  verificación menciona `docker compose`, o cuando el espacio de trabajo
+  tiene su propio `docker-compose.yml`/`compose.yaml` (la SPEC requiere uno)
+  sin importar lo que diga `--verify-cmd`. Un fallo en el desmontaje se
+  registra en el campo `teardownError` de `run-report.json`, sin enmascarar
+  nunca el resultado propio de la corrida. El desmontaje se omite cuando se
+  pidieron juntos `--with-batteries --keep`, ya que la fase de baterías ya
+  dejó intencionalmente el stack levantado para inspección. La fase de
+  baterías (arriba) reutiliza este mismo ayudante de desmontaje.
+- **Guardas de publicación.** El escaneo de secretos y la verificación de
+  filtración del banco de aceptación descritos en "Publicación" arriba
+  corren antes de cualquier llamada a `gh`/`git`, y solo sobre archivos
+  rastreados por git.
+
+## Tests
+
+`node --test runner/run-experiment.test.mjs` (el test runner incorporado de
+Node; sin dependencia extra). Cubre la conexión de `--harness-config` contra
+el servidor MCP de fixture y los fixtures de *skills* del *harness*: los
+metadatos `harnessConfig` de `run-report.json`, la lista blanca de
+*guardrails* extendida con las herramientas MCP + `load_skill`, que el
+proveedor MCP se cierre cuando falla la carga de una *skill*, y que una
+corrida sin `--harness-config` registre el mismo conjunto de herramientas que
+antes. También cubre `createModel()` (devuelve un `OpenAICompatibleModelAdapter`
+simple sin *router*, lo envuelve en un `RoutingModelAdapter` con las rutas
+configuradas usando un stub `makeAdapter` inyectado — sin red — cuando hay
+uno configurado, y propaga un error claro de variable de entorno faltante) y
+`summarizeRouting()` (log de decisiones → conteos por ruta/motivo).
+`run-experiment.mjs` solo ejecuta `main()` cuando se corre directamente
+(`node runner/run-experiment.mjs ...`), de modo que importarlo para tests no
+tiene efectos secundarios.
+
+La conexión de `--task-file` se cubre lanzando la CLI real con `--dry-run`
+(con `MODEL_API_KEY`/`MODEL_ID` ficticios en el entorno del hijo, ya que
+`loadCredentials()` corre antes de la rama de dry-run): las tareas de los
+nodos c3 en el plan impreso llevan el texto sobrescrito y nunca mencionan
+`SPEC`, y un archivo de tarea vacío o solo de espacios en blanco termina con
+código distinto de cero con un mensaje `Usage: --task-file ...` en stderr y
+sin salida en stdout. `compactTraceC3()` se exporta y se prueba directamente
+por copiar `loopFailure` en una entrada de trace fallida mientras lo omite en
+una exitosa.
+
+T3 (directorio de corridas, repositorio por corrida, publicación) se cubre
+sin red y sin GitHub real: el `--runs-dir` por defecto de `parseArgs()`
+resolviendo fuera del monorepo y los flags nuevos `--publish`/`--publish-org`;
+`slugifyModelId()` y `timestampForWorkspace()`; el nombrado
+`<slug>-<config>-<timestamp>` de `createWorkspace()` y que `--dry-run` no
+crea nada (también ejercitado de punta a punta vía un lanzamiento real de la
+CLI con `--dry-run`); `initWorkspaceRepo()` contra un repositorio git local
+real en un directorio temporal (rama `main`, un commit con la identidad fija
+`pi-runner`, `.gitignore` cubriendo
+`node_modules/`/`dist/`/`build/`/`coverage/`/`.env*`);
+`scanWorkspaceForSecrets()`/`collectSecretValues()` detectando una clave
+plantada (y el `apiKeyEnv` de una ruta configurada) sin nunca hacer
+aserciones sobre el valor en sí; `findAcceptancePathInWorkspace()`; y
+`publishWorkspace()`/`checkGhAuthenticated()` con un stub de ejecutor de
+comandos inyectado en lugar de `gh`, cubriendo el comando `gh repo create`
+construido, el campo `repository` escrito en `run-report.json`, y que las
+guardas de secreto/banco se rehúsan antes de que `gh`/`git` sean siquiera
+invocados.

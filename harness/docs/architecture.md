@@ -1,8 +1,8 @@
-# Architecture — C1: the harness
+# Arquitectura — C1: el harness
 
-C1 is the harness as a running system: one interaction cycle from a task to
-a final model response, mediated by six components and one set of shared
-contracts.
+C1 es el *harness* como sistema en ejecución: un ciclo de interacción desde una
+tarea hasta una respuesta final del modelo, mediado por seis componentes y un
+único conjunto de contratos compartidos.
 
 ```
 task ──► ContextManager ──► ModelRequest ──► ModelAdapter
@@ -13,14 +13,14 @@ task ──► ContextManager ──► ModelRequest ──► ModelAdapter
                      │
            Guardrails (allowed / denied)
                      ▼
-           ToolManager (validate + execute)
+           ToolManager (validar + ejecutar)
                      ▼
-           ToolResult ──► back to the model ──► final response
+           ToolResult ──► de vuelta al modelo ──► respuesta final
 ```
 
-## The six components
+## Los seis componentes
 
-| # | Role | Interface | Real implementation | File |
+| # | Rol | Interfaz | Implementación real | Archivo |
 |---|------|-----------|----------------------|------|
 | 1 | Context Manager | `ContextManager` | `FsContextManager` | `src/components/context-manager.ts` |
 | 2 | Model Adapter | `ModelAdapter` | `OpenAICompatibleModelAdapter` | `src/components/model-adapter.ts`, `src/components/openai-compatible-adapter.ts` |
@@ -29,153 +29,159 @@ task ──► ContextManager ──► ModelRequest ──► ModelAdapter
 | 5 | Verification Manager | `VerificationManager` | `RecordingVerificationManager` | `src/components/verification-manager.ts` |
 | 6 | Guardrails | `Guardrails` | `PolicyGuardrails` | `src/components/guardrails.ts` |
 
-Every component also ships a `Stub*` implementation (`StubContextManager`,
+Cada componente también tiene una implementación `Stub*` (`StubContextManager`,
 `StubModelAdapter`, `StubToolManager`, `StubExecutionManager`,
-`StubVerificationManager`, `StubGuardrails`) used by unit tests that don't
-need the real behavior.
+`StubVerificationManager`, `StubGuardrails`) usada por los tests unitarios que
+no necesitan el comportamiento real.
 
 ### 1. Context Manager — `FsContextManager`
 
-`prepare(task, projectRoot)` walks the workspace from `projectRoot`,
-skipping `node_modules`, `.git`, `dist`, `.cache`, capped at 500 files and a
-recursion depth of 6 (`MAX_FILES`, `MAX_DEPTH`). Unreadable directories are
-skipped rather than failing the cycle. It returns a `Context` with the
-resolved root, the relative file list, a coarse `language` guess derived
-from file extensions (`typescript`, `javascript`, `python`, `go`, or
-`undefined`), and the task string. This is a deterministic scan — no model
-call is involved.
+`prepare(task, projectRoot)` recorre el espacio de trabajo desde `projectRoot`,
+omitiendo `node_modules`, `.git`, `dist`, `.cache`, con un tope de 500 archivos
+y una profundidad de recursión de 6 (`MAX_FILES`, `MAX_DEPTH`). Los
+directorios no legibles se omiten en lugar de hacer fallar el ciclo. Devuelve un
+`Context` con la raíz resuelta, la lista de archivos relativos, una estimación
+gruesa de `language` derivada de las extensiones de archivo (`typescript`,
+`javascript`, `python`, `go`, o `undefined`), y el string de la tarea. Es un
+escaneo determinista — no interviene ninguna llamada al modelo.
 
-### 2. Model Adapter — interface + `OpenAICompatibleModelAdapter`
+### 2. Model Adapter — interfaz + `OpenAICompatibleModelAdapter`
 
-`ModelAdapter` is the abstraction (`complete(request): Promise<ModelResponse>`).
-The concrete implementation used by the experiment, `OpenAICompatibleModelAdapter`,
-talks to any OpenAI-compatible chat-completions endpoint; see
-[`model-provider.md`](./model-provider.md) for the full detail.
+`ModelAdapter` (`src/components/model-adapter.ts`) es la abstracción
+(`complete(request): Promise<ModelResponse>`). La implementación concreta
+usada por el experimento, `OpenAICompatibleModelAdapter`, habla con cualquier
+endpoint de chat-completions compatible con OpenAI; ver
+[`model-provider.md`](./model-provider.md) para el detalle completo.
 
 ### 3. Tool Manager — `RegistryToolManager`
 
-Holds a registry of `ToolSpec` + `ToolHandler` pairs (`register`). On
+Mantiene un registro de pares `ToolSpec` + `ToolHandler` (`register`). En
 `execute(call)`:
-1. Looks up the spec; an unknown tool name returns a failed `ToolResult`
-   without calling guardrails.
-2. Calls `guardrails.evaluate({ kind: 'tool', tool, args })`. A `denied`
-   decision short-circuits into a failed `ToolResult` carrying the denial
-   reason.
-3. Runs the registered handler; handler exceptions are caught and turned
-   into a failed `ToolResult` rather than propagating.
+1. Busca la especificación; un nombre de herramienta desconocido devuelve un
+   `ToolResult` fallido sin llamar a *guardrails*.
+2. Llama a `guardrails.evaluate({ kind: 'tool', tool, args })`. Una decisión
+   `denied` corta el flujo con un `ToolResult` fallido que lleva el motivo de
+   la denegación.
+3. Ejecuta el handler registrado; las excepciones del handler se capturan y se
+   convierten en un `ToolResult` fallido en lugar de propagarse.
 
-`registerBuiltinTools(manager, { execution, workspaceRoot })` registers the
-three built-in tools and returns their `ToolSpec[]`:
+`registerBuiltinTools(manager, { execution, workspaceRoot })` registra las
+tres herramientas incorporadas y devuelve su `ToolSpec[]`:
 
-- `write_file` — writes UTF-8 content to a path relative to the workspace
-  root, creating parent directories.
-- `read_file` — reads a UTF-8 file, truncated to 256 KiB (`MAX_READ_BYTES`).
-- `run_command` — delegates to the `ExecutionManager` with `cwd` fixed to
-  the workspace root.
+- `write_file` — escribe contenido UTF-8 en una ruta relativa a la raíz del
+  espacio de trabajo, creando los directorios padre.
+- `read_file` — lee un archivo UTF-8, truncado a 256 KiB (`MAX_READ_BYTES`).
+- `run_command` — delega al `ExecutionManager` con `cwd` fijado a la raíz del
+  espacio de trabajo.
 
 ### 4. Execution Manager — `LocalExecutionManager`
 
-`run(req)` resolves `req.cwd` against `workspaceRoot` and rejects any
-resolved path outside it (`exitCode: 126`) before spawning anything. It
-spawns the command with `child_process.spawn(..., { shell: true })`,
-captures stdout/stderr capped at 512 KiB (`MAX_OUTPUT_BYTES`), and enforces
-a hard timeout (`timeoutMs`, default 30 000 ms) that `SIGKILL`s the child
-and reports `exitCode: 124` with a `[timeout]` marker in stderr. A spawn
-error itself maps to `exitCode: 127`.
+`run(req)` resuelve `req.cwd` contra `workspaceRoot` y rechaza cualquier ruta
+resuelta fuera de ella (`exitCode: 126`) antes de lanzar nada. Lanza el comando
+con `child_process.spawn(..., { shell: true })`, captura stdout/stderr
+topeados en 512 KiB (`MAX_OUTPUT_BYTES`), y aplica un timeout estricto
+(`timeoutMs`, 30 000 ms por defecto) que hace `SIGKILL` al hijo y reporta
+`exitCode: 124` con un marcador `[timeout]` en stderr. Un error de spawn en sí
+mismo se traduce en `exitCode: 127`.
 
 ### 5. Verification Manager — `RecordingVerificationManager`
 
-`verify(result: ExecutionResult)` turns an execution outcome into a
-`VerificationResult`: `passed` is `result.exitCode === 0`, `details` carries
-the last 2000 characters (`MAX_DETAIL_CHARS`) of stdout (on success) or
-stderr-or-stdout (on failure), and `metrics.exitCode` records the raw exit
-code. Every verification is appended to an in-memory `history` array and,
-when a `historyFile` path is supplied to the constructor, to a JSONL file.
-`getHistory()` returns a copy of the accumulated history.
+`verify(result: ExecutionResult)` convierte un resultado de ejecución en un
+`VerificationResult`: `passed` es `result.exitCode === 0`, `details` lleva los
+últimos 2000 caracteres (`MAX_DETAIL_CHARS`) de stdout (en éxito) o
+stderr-o-stdout (en fallo), y `metrics.exitCode` registra el código de salida
+crudo. Cada verificación se agrega a un arreglo `history` en memoria y, cuando
+se le pasa una ruta `historyFile` al constructor, también a un archivo JSONL.
+`getHistory()` devuelve una copia del historial acumulado.
 
 ### 6. Guardrails — `PolicyGuardrails`
 
-`evaluate(action: GuardrailAction)` decides and records a `GuardrailDecision`
-(`{ decision: 'allowed' | 'denied', reason }`) for one of two action kinds:
-`{ kind: 'tool', tool, args }` or `{ kind: 'command', command, cwd }`. The
-policy (`GuardrailPolicy`) is: `workspaceRoot`, `allowedTools`,
-`allowedCommandPrefixes`, `maxFileBytes`. See
-[`decisions.md`](./decisions.md) for the design rationale (tool whitelist,
-command prefix whitelist, path confinement, size limits, audit trail).
-`getAuditLog()` returns every decision made so far, in order; when
-constructed with an `auditFile` path, decisions are also appended to it as
-JSONL with an `at` timestamp.
+`evaluate(action: GuardrailAction)` decide y registra una `GuardrailDecision`
+(`{ decision: 'allowed' | 'denied', reason }`) para uno de dos tipos de acción:
+`{ kind: 'tool', tool, args }` o `{ kind: 'command', command, cwd }`. La
+política (`GuardrailPolicy`) es: `workspaceRoot`, `allowedTools`,
+`allowedCommandPrefixes`, `maxFileBytes`. Ver
+[`decisions.md`](./decisions.md) para la justificación de diseño (lista blanca
+de herramientas, lista blanca de prefijos de comando, confinamiento de rutas,
+límites de tamaño, rastro de auditoría).
+`getAuditLog()` devuelve cada decisión tomada hasta el momento, en orden;
+cuando se construye con una ruta `auditFile`, las decisiones también se
+agregan a ese archivo como JSONL con una marca de tiempo `at`.
 
-## The harness — `src/harness.ts`
+## El harness — `src/harness.ts`
 
-`Harness` composes the six components (`HarnessComponents`) plus static
-options (`HarnessOptions`: `workspaceRoot`, `availTools`, `instructions`,
-`maxToolRounds` — defaulting to `1`, which is the C1 contract of a single
-interaction with no corrective retry; C2 loops override this per run via
-`HarnessRunOptions.maxToolRounds`).
+`Harness` compone los seis componentes (`HarnessComponents`) más opciones
+estáticas (`HarnessOptions`: `workspaceRoot`, `availTools`, `instructions`,
+`maxToolRounds` — por defecto `1`, que es el contrato de C1 de una única
+interacción sin reintento correctivo; los *loops* de C2 sobrescriben esto por
+corrida mediante `HarnessRunOptions.maxToolRounds`).
 
 `run(task, runOptions)`:
 
-1. Calls `context.prepare(task, workspaceRoot)` once to build the `Context`.
-2. Loops `round` from `0` to `maxToolRounds` inclusive, building a
-   `ModelRequest` each iteration with the accumulated `history` (`ModelResponse | ToolResult` entries fed back to the model) and, only on
-   `round === 0`, any `feedback` string passed in from a previous failed
-   attempt (loop retry — the loop, not the harness, owns cross-turn
-   feedback).
-3. Calls `model.complete(request)`. If the response is not a `tool_call`,
-   the loop breaks immediately (the model finished or errored).
-4. Otherwise it executes the tool through `tools.execute(response)`,
-   pushes both the tool call and its `ToolResult` onto `history`, and — if
-   the tool result's payload looks like an `ExecutionResult`
-   (`exitCode`/`stdout`/`stderr`, checked by `isExecutionResult`) — runs
-   `verification.verify(...)` and attaches it to the turn.
-5. If the round limit is reached without a non-tool-call response, the
-   harness synthesizes an `error` response with code `max_tool_rounds`.
+1. Llama a `context.prepare(task, workspaceRoot)` una vez para construir el
+   `Context`.
+2. Recorre `round` de `0` a `maxToolRounds` inclusive, construyendo un
+   `ModelRequest` en cada iteración con el `history` acumulado (entradas
+   `ModelResponse | ToolResult` realimentadas al modelo) y, solo en
+   `round === 0`, cualquier string `feedback` pasado desde un intento fallido
+   anterior (reintento del *loop* — el *loop*, no el *harness*, es dueño del
+   feedback entre turnos).
+3. Llama a `model.complete(request)`. Si la respuesta no es un `tool_call`, el
+   bucle se corta inmediatamente (el modelo terminó o falló).
+4. Si no, ejecuta la herramienta mediante `tools.execute(response)`, agrega
+   tanto la llamada a la herramienta como su `ToolResult` a `history`, y — si
+   el payload del resultado de la herramienta parece un `ExecutionResult`
+   (`exitCode`/`stdout`/`stderr`, verificado por `isExecutionResult`) —
+   ejecuta `verification.verify(...)` y lo adjunta al turno.
+5. Si se alcanza el límite de rondas sin una respuesta que no sea `tool_call`,
+   el *harness* sintetiza una respuesta `error` con código `max_tool_rounds`.
 
-The return value (`HarnessRunResult`) is `{ finalResponse, turns, audit,
-verifications }`: `turns` is the full per-round trace (`InteractionTurn[]`),
-`audit` is `guardrails.getAuditLog()`, and `verifications` is
-`verification.getHistory()` — i.e. every verification produced during the
-run, not just the ones attached to individual turns.
+El valor de retorno (`HarnessRunResult`) es `{ finalResponse, turns, audit,
+verifications }`: `turns` es la traza completa por ronda (`InteractionTurn[]`),
+`audit` es `guardrails.getAuditLog()`, y `verifications` es
+`verification.getHistory()` — es decir, cada verificación producida durante la
+corrida, no solo las adjuntadas a turnos individuales.
 
-## Contracts — `src/contracts/core.ts`
+## Contratos — `src/contracts/core.ts`
 
-These are the types every component and the harness share:
+Estos son los tipos que comparten cada componente y el *harness*:
 
-- **`Context`** — `projectRoot`, `files: string[]`, optional `language`,
+- **`Context`** — `projectRoot`, `files: string[]`, `language` opcional,
   `framework`, `task`.
-- **`ModelRequest`** — `task`, `context`, `availTools: ToolSpec[]`, optional
-  `instructions`, `feedback` (verification feedback from a previous failed
-  attempt — loop retry only), `history` (prior `ModelResponse | ToolResult`
-  entries of this interaction).
-- **`ModelResponse`** — a union of `ToolCallResponse`
+- **`ModelRequest`** — `task`, `context`, `availTools: ToolSpec[]`,
+  opcionales `instructions`, `feedback` (feedback de verificación de un
+  intento fallido anterior — solo reintento del *loop*), `history` (entradas
+  `ModelResponse | ToolResult` previas de esta interacción).
+- **`ModelResponse`** — una unión de `ToolCallResponse`
   (`{ type: 'tool_call', tool, args }`), `ErrorResponse`
   (`{ type: 'error', code, message }`), `FinishResponse`
   (`{ type: 'finish', content }`).
 - **`ToolResult`** — `{ type: 'tool_result', tool, success, result }`.
 - **`ExecutionRequest`** / **`ExecutionResult`** — `{ command, cwd, env? }`
-  and `{ exitCode, stdout, stderr }`, the contract between the tool layer
-  and `ExecutionManager`.
+  y `{ exitCode, stdout, stderr }`, el contrato entre la capa de herramientas
+  y `ExecutionManager`.
 - **`VerificationResult`** — `{ passed, details, metrics? }`.
 - **`GuardrailDecision`** — `{ decision: 'allowed' | 'denied', reason }`.
-- **`ToolSpec`** — `{ name, description, inputSchema }`, the JSON-Schema-like
-  shape sent to the model as a function/tool definition.
+- **`ToolSpec`** — `{ name, description, inputSchema }`, la forma tipo
+  JSON-Schema enviada al modelo como definición de función/herramienta.
 
-All of these are exported from `src/index.ts` alongside every concrete
-component class, the `Harness`, and the C2/C3 contracts and engines.
+Todo esto se exporta desde `src/index.ts` junto con cada clase concreta de
+componente, el `Harness`, y los contratos y motores de C2/C3.
 
-## Optional: MCP tools and skills
+## Opcional: herramientas MCP y skills
 
-Two optional additions sit alongside the six components without changing
-any of them: an MCP tool provider (tools sourced from external MCP
-servers) and a skill catalog (`SKILL.md` progressive disclosure). Both
-register into the same `RegistryToolManager`/`Guardrails` path as the
-built-in tools. See [`mcp-skills.md`](./mcp-skills.md).
+Dos añadidos opcionales conviven junto a los seis componentes sin cambiar
+ninguno de ellos: un proveedor de herramientas MCP (herramientas provenientes
+de servidores MCP externos) y un catálogo de *skills* (divulgación progresiva
+de `SKILL.md`). Ambos se registran en el mismo camino
+`RegistryToolManager`/`Guardrails` que las herramientas incorporadas. Ver
+[`mcp-skills.md`](./mcp-skills.md).
 
-## Optional: model router
+## Opcional: router de modelos
 
-`RoutingModelAdapter` is a third optional addition: a `ModelAdapter` that
-routes each request to a named delegate adapter by rule (custom → long
-context → retry → default), off unless a harness config's `router`
-section opts in. It sits behind the `ModelAdapter` interface, so nothing
-else in this document changes. See [`model-router.md`](./model-router.md).
+`RoutingModelAdapter` es un tercer añadido opcional: un `ModelAdapter` que
+enruta cada solicitud a un adaptador delegado nombrado por regla (custom →
+long context → retry → default), desactivado salvo que la sección `router` de
+una configuración del *harness* lo habilite. Se sitúa detrás de la interfaz
+`ModelAdapter`, de modo que nada más en este documento cambia. Ver
+[`model-router.md`](./model-router.md).
