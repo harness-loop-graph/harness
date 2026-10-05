@@ -1,118 +1,127 @@
-# Graph — C3: the multi-agent graph
+# Grafo — C3: el grafo multiagente
 
-C3 wraps C2 in a state machine over nodes: each node is one role
-(architect, data, backend, frontend, reviewer, ...) that runs its own C2
-`AgentLoop`, and edges route to the next node based on that loop's outcome.
-Implementation: `src/graph/graph-engine.ts` (`GraphEngine`), contracts in
-`src/graph/contracts.ts`.
+C3 envuelve a C2 en una máquina de estados sobre nodos: cada nodo es un rol
+(architect, data, backend, frontend, reviewer, ...) que ejecuta su propio
+`AgentLoop` de C2, y las aristas enrutan al siguiente nodo según el resultado
+de ese *loop*. Implementación: `src/graph/graph-engine.ts` (`GraphEngine`),
+contratos en `src/graph/contracts.ts`.
 
 ```
 architect --on_success--> data --on_success--> backend ...
-reviewer --on_failure--> backend   (returns to the responsible layer)
-successful node with no outgoing edge = terminal FINISH
-maxSteps = graph-level infinite-loop prevention
+reviewer --on_failure--> backend   (vuelve a la capa responsable)
+un nodo exitoso sin arista saliente = FINISH terminal
+maxSteps = prevención de bucle infinito a nivel de grafo
 ```
 
-Routing is deterministic: the reviewer pattern is expressed as a plain
-`on_failure` edge from `reviewer` back to the node responsible for the
-failure — never a model choice.
+El enrutamiento es determinista: el patrón de revisor se expresa como una
+simple arista `on_failure` desde `reviewer` de vuelta al nodo responsable del
+fallo — nunca una decisión del modelo.
 
 ## `GraphEngine`
 
-Constructed with `(createLoop: LoopFactory, request: GraphRequest, router?: GraphRouter)`.
-`LoopFactory = (node: GraphNode) => AgentLoop` — the caller decides how to
-wire each node's `AgentLoop` (its own `Harness`, tool set, guardrails
-instance, etc.); the engine itself never constructs harness components.
+Se construye con `(createLoop: LoopFactory, request: GraphRequest, router?: GraphRouter)`.
+`LoopFactory = (node: GraphNode) => AgentLoop` — el llamador decide cómo
+conectar el `AgentLoop` de cada nodo (su propio `Harness`, conjunto de
+herramientas, instancia de *guardrails*, etc.); el motor en sí nunca
+construye componentes del *harness*.
 
-`run(): Promise<GraphResult>` loops:
+`run(): Promise<GraphResult>` itera:
 
-1. If `state.step >= maxSteps` (default 10), decide `FAIL` with reason
-   `` `maxSteps (${maxSteps}) reached without finishing` `` and stop.
-2. Look up `state.currentNode` in the node map; an unknown id decides `FAIL`
-   with `` `Unknown node '${id}'` ``.
-3. Increment `state.step` and `state.visits[node.id]`.
-4. Build the node's `AgentLoop` via `createLoop(node)` and run it with a
-   `LoopRequest` derived from the node: `task`, `maxTurns: node.maxTurns ?? 3`,
-   `verification: node.verification`, `toolRoundsPerTurn: node.toolRoundsPerTurn ?? 8`,
+1. Si `state.step >= maxSteps` (10 por defecto), decide `FAIL` con el motivo
+   `` `maxSteps (${maxSteps}) reached without finishing` `` y se detiene.
+2. Busca `state.currentNode` en el mapa de nodos; un id desconocido decide
+   `FAIL` con `` `Unknown node '${id}'` ``.
+3. Incrementa `state.step` y `state.visits[node.id]`.
+4. Construye el `AgentLoop` del nodo mediante `createLoop(node)` y lo ejecuta
+   con un `LoopRequest` derivado del nodo: `task`,
+   `maxTurns: node.maxTurns ?? 3`, `verification: node.verification`,
+   `toolRoundsPerTurn: node.toolRoundsPerTurn ?? 8`,
    `instructions: node.instructions`.
-5. Record a `NodeExecution` (`nodeId`, `role`, `status`, `turns`,
-   `finalResponse`, `verifications`) and, if the loop's final response was a
-   `finish`, store its content in `state.shared[node.id]` — the mechanism by
-   which one node's output becomes visible to a later node or to a custom
-   router.
-6. Decide the next step: `router ? router(node.id, loopResult, state) : this.route(node.id, loopResult.status)`.
-7. Push a `GraphStepTrace` for the step. When the node's loop status was
-   `'FAILED'`, it also carries `loopFailure`: the loop's own `failure`
-   summary, or `decision.reason` when `failure` is absent; when the loop's
-   final response was a model `error`, its code and message (truncated to
-   300 characters) are appended as `` `<reason> (error <code>: <message>)` ``.
-   A successful step carries no `loopFailure` field.
-8. On `NEXT`, set `state.currentNode = decision.node` and continue the loop.
-   On `FINISH` or `FAIL`, stop.
+5. Registra una `NodeExecution` (`nodeId`, `role`, `status`, `turns`,
+   `finalResponse`, `verifications`) y, si la respuesta final del *loop* fue
+   un `finish`, guarda su contenido en `state.shared[node.id]` — el mecanismo
+   por el cual la salida de un nodo se vuelve visible para un nodo posterior o
+   para un router personalizado.
+6. Decide el siguiente paso: `router ? router(node.id, loopResult, state) : this.route(node.id, loopResult.status)`.
+7. Agrega un `GraphStepTrace` para el paso. Cuando el estado del *loop* del
+   nodo fue `'FAILED'`, también lleva `loopFailure`: el propio resumen
+   `failure` del *loop*, o `decision.reason` cuando `failure` está ausente;
+   cuando la respuesta final del *loop* fue un `error` del modelo, su código y
+   mensaje (truncado a 300 caracteres) se agregan como
+   `` `<reason> (error <code>: <message>)` ``. Un paso exitoso no lleva ningún
+   campo `loopFailure`.
+8. En `NEXT`, fija `state.currentNode = decision.node` y continúa el bucle.
+   En `FINISH` o `FAIL`, se detiene.
 
-`totalLoopTurns` accumulates every node loop's `turns` across the whole
-run. The final `GraphResult.status` is `'SUCCESS'` iff the terminal decision
-was `FINISH`.
+`totalLoopTurns` acumula los `turns` de cada *loop* de nodo a lo largo de toda
+la corrida. El `GraphResult.status` final es `'SUCCESS'` si y solo si la
+decisión terminal fue `FINISH`.
 
-### Default routing — `GraphEngine.route`
+### Enrutamiento por defecto — `GraphEngine.route`
 
-When no custom `router` is supplied, edges are matched against the node
-that just ran: filter `request.edges` by `from === nodeId`, pick the edge
-whose `condition` matches the loop's outcome (`on_success` if the node's
-loop status was `SUCCESS`, `on_failure` otherwise), falling back to an
-`always` edge if no conditional match exists. If still no edge matches: a
-successful node with no outgoing edge is **terminal** (`FINISH`); a failed
-node with no `on_failure` edge **fails the whole graph** (`FAIL`).
+Cuando no se provee un `router` personalizado, las aristas se comparan contra
+el nodo que acaba de ejecutarse: se filtra `request.edges` por `from === nodeId`,
+se elige la arista cuya `condition` coincide con el resultado del *loop*
+(`on_success` si el estado del *loop* del nodo fue `SUCCESS`, `on_failure` en
+caso contrario), recurriendo a una arista `always` si no hay coincidencia
+condicional. Si aun así ninguna arista coincide: un nodo exitoso sin arista
+saliente es **terminal** (`FINISH`); un nodo fallido sin arista `on_failure`
+**hace fallar todo el grafo** (`FAIL`).
 
-### Custom routing — `GraphRouter`
+### Enrutamiento personalizado — `GraphRouter`
 
-`(nodeId, loopResult, state) => GraphDecision`. Passed as the engine's third
-constructor argument, it fully replaces `route` — useful when routing needs
-to inspect `state.shared` content rather than just success/failure (verified
-by `tests/graph.spec.ts`'s "routes through a custom router" case).
+`(nodeId, loopResult, state) => GraphDecision`. Pasado como tercer argumento
+del constructor del motor, reemplaza por completo a `route` — útil cuando el
+enrutamiento necesita inspeccionar el contenido de `state.shared` en lugar de
+solo éxito/fallo (verificado por el caso "routes through a custom router" de
+`tests/graph.spec.ts`).
 
-## `maxSteps` — loop prevention
+## `maxSteps` — prevención de bucles
 
-`GraphRequest.maxSteps` (default 10) is a hard cap on the total number of
-node executions across the run, independent of any per-node `maxTurns`. It
-exists specifically to bound reviewer/builder ping-pong (an `on_failure`
-edge sending control back and forth indefinitely): once `state.step` reaches
-the cap, the graph fails with a `maxSteps (...) reached without finishing`
-reason regardless of individual node outcomes.
+`GraphRequest.maxSteps` (10 por defecto) es un tope estricto sobre el número
+total de ejecuciones de nodo a lo largo de la corrida, independiente de
+cualquier `maxTurns` por nodo. Existe específicamente para acotar el
+"ping-pong" revisor/constructor (una arista `on_failure` que envía el control
+de un lado a otro indefinidamente): una vez que `state.step` llega al tope, el
+grafo falla con un motivo `maxSteps (...) reached without finishing`
+independientemente de los resultados de los nodos individuales.
 
-## Contracts — `src/graph/contracts.ts`
+## Contratos — `src/graph/contracts.ts`
 
-- **`GraphNode`** — `id`, `role`, `task`, optional `instructions`, optional
-  `verification: { command }` (operator-owned, never shown to the model),
-  optional `maxTurns` (default 3), optional `toolRoundsPerTurn` (default 8).
+- **`GraphNode`** — `id`, `role`, `task`, `instructions` opcional,
+  `verification: { command }` opcional (a cargo del operador, nunca mostrado
+  al modelo), `maxTurns` opcional (3 por defecto), `toolRoundsPerTurn`
+  opcional (8 por defecto).
 - **`GraphEdge`** — `{ from, to, condition: 'on_success' | 'on_failure' | 'always' }`.
 - **`GraphRequest`** — `task`, `nodes: GraphNode[]`, `edges: GraphEdge[]`,
-  `initialNode`, optional `maxSteps` (default 10).
+  `initialNode`, `maxSteps` opcional (10 por defecto).
 - **`GraphState`** — `currentNode`, `step`, `visits: Record<string, number>`,
-  `nodeResults: NodeExecution[]` (oldest first), `shared: Record<string, string>`.
+  `nodeResults: NodeExecution[]` (del más antiguo al más nuevo),
+  `shared: Record<string, string>`.
 - **`NodeExecution`** — `{ nodeId, role, status, turns, finalResponse?, verifications }`.
-- **`GraphDecision`** — union of `{ action: 'NEXT', node, reason }`,
+- **`GraphDecision`** — unión de `{ action: 'NEXT', node, reason }`,
   `{ action: 'FINISH', reason }`, `{ action: 'FAIL', reason }`.
 - **`GraphResult`** — `{ status, steps, decision, state, trace, totalLoopTurns, failure? }`.
 - **`GraphStepTrace`** — `{ step, nodeId, loopStatus, decision, loopFailure? }`;
-  `loopFailure` is present only when `loopStatus` is `'FAILED'` (see step 7
-  above) — it is what makes a `FAILED` entry in `run-report.json`'s trace
-  actionable instead of a bare status.
+  `loopFailure` está presente solo cuando `loopStatus` es `'FAILED'` (ver el
+  paso 7 arriba) — es lo que hace que una entrada `FAILED` en el trace de
+  `run-report.json` sea accionable en lugar de un simple estado.
 - **`GraphRouter`** — `(nodeId, loopResult, state) => GraphDecision`.
 - **`LoopFactory`** — `(node: GraphNode) => AgentLoop`.
 
-## Behavior verified by `tests/graph.spec.ts`
+## Comportamiento verificado por `tests/graph.spec.ts`
 
-The suite covers: a linear architect → builder graph finishing on the
-second `on_success` edge with the builder's own output written to
-`app.txt`; the reviewer pattern (`builder → reviewer` on success,
-`reviewer → builder` on failure) actually bouncing control back to the
-builder and converging once the reviewer's cross-layer verification
-passes; a `maxSteps` failure when builder/reviewer keep bouncing without
-convergence; a `FAIL` when a node fails with no `on_failure` edge defined;
-a custom `GraphRouter` overriding static edges based on `state.shared`
-content; static edge fallback when no router is given; an immediate
-`FAIL` when `initialNode` doesn't match any declared node; a failed step's
-trace entry carrying `loopFailure` (including the model error code/message
-and its truncation when the final response was an `error`); and a
-successful step's trace entry carrying no `loopFailure` field at all.
+La suite cubre: un grafo lineal architect → builder que finaliza en la segunda
+arista `on_success` con la propia salida del builder escrita en `app.txt`; el
+patrón de revisor (`builder → reviewer` en éxito, `reviewer → builder` en
+fallo) efectivamente rebotando el control de vuelta al builder y convergiendo
+una vez que la verificación entre capas del revisor pasa; un fallo por
+`maxSteps` cuando builder/reviewer siguen rebotando sin converger; un `FAIL`
+cuando un nodo falla sin ninguna arista `on_failure` definida; un
+`GraphRouter` personalizado que sobrescribe las aristas estáticas según el
+contenido de `state.shared`; el comportamiento por defecto con aristas
+estáticas cuando no se provee router; un `FAIL` inmediato cuando
+`initialNode` no coincide con ningún nodo declarado; la entrada de trace de un
+paso fallido llevando `loopFailure` (incluyendo el código/mensaje de error del
+modelo y su truncamiento cuando la respuesta final fue un `error`); y la
+entrada de trace de un paso exitoso sin ningún campo `loopFailure`.

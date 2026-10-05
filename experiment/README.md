@@ -1,33 +1,34 @@
-# Experiment — Medical Appointments & Clinical History
+# Experimento — Medical Appointments & Clinical History
 
-This directory is the **experiment bench**, a sibling of `harness/` inside
-the `harness-loop-graph/harness` monorepo — not a repository of its own and
-not an application. It holds the fixed specification the generator system
-receives (`SPEC.md`), the hidden acceptance batteries (defined before the
-first run, never shown to the generator), and the experiment runner. The
-only thing that generates code is the harness (`../harness/`).
+Este directorio es el **banco de experimentos**, hermano de `harness/` dentro
+del monorepo `harness-loop-graph/harness` — no es un repositorio propio ni una
+aplicación. Contiene la especificación fija que recibe el sistema generador
+(`SPEC.md`), las baterías de aceptación ocultas (definidas antes de la primera
+corrida, nunca mostradas al generador), y el runner del experimento. Lo único
+que genera código es el *harness* (`../harness/`).
 
-Generated systems do not live here: each run builds in its own isolated
-workspace outside this monorepo entirely — by default a sibling `../pi-runs`
-directory (see `runner/README.md` for the full layout and `--runs-dir`) —
-and the batteries run against that workspace.
+Los sistemas generados no viven aquí: cada corrida se construye en su propio
+espacio de trabajo aislado, totalmente fuera de este monorepo — por defecto un
+directorio hermano `../pi-runs` (ver `runner/README.md` para la estructura
+completa y `--runs-dir`) — y las baterías corren contra ese espacio de
+trabajo.
 
-## Contents
+## Contenido
 
-- `SPEC.md` — fixed specification: 27 functional requirements, endpoint
-  catalog (EP-01..EP-20), screens (SCR-01..SCR-08), deterministic seed,
-  fixed stack (PostgreSQL 16 / NestJS / React / Vitest / Playwright /
-  Docker Compose).
-- `acceptance/` — hidden batteries (gitignored; never part of what the
-  generator sees).
-- `skills/` + `harness-config.json` — skills given to the harness in every
-  configuration (see `skills/README.md`).
-- `runner/` — experiment runner: runs C1/C2/C3 in isolated workspaces
-  and records metrics (see `runner/README.md`).
+- `SPEC.md` — especificación fija: 27 requisitos funcionales, catálogo de
+  endpoints (EP-01..EP-20), pantallas (SCR-01..SCR-08), semilla determinista,
+  stack fijo (PostgreSQL 16 / NestJS / React / Vitest / Playwright / Docker
+  Compose).
+- `acceptance/` — baterías ocultas (ignoradas por git; nunca forman parte de
+  lo que ve el generador).
+- `skills/` + `harness-config.json` — *skills* entregadas al *harness* en
+  cada configuración (ver `skills/README.md`).
+- `runner/` — runner del experimento: ejecuta C1/C2/C3 en espacios de trabajo
+  aislados y registra métricas (ver `runner/README.md`).
 
-## Why the stack is fixed
+## Por qué el stack está fijo
 
-If each run chose its own stack, observed differences between
-configurations C1/C2/C3 would be attributable to the chosen technology,
-not to the engineering layers under study. A single language across
-layers also keeps SonarQube/Semgrep measurements comparable.
+Si cada corrida eligiera su propio stack, las diferencias observadas entre
+las configuraciones C1/C2/C3 serían atribuibles a la tecnología elegida, no a
+las capas de ingeniería bajo estudio. Un único lenguaje a través de las capas
+también mantiene comparables las mediciones de SonarQube/Semgrep.

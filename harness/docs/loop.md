@@ -1,54 +1,56 @@
-# Loop — C2: the corrective loop
+# Loop — C2: el loop correctivo
 
-C2 wraps the C1 harness with a corrective loop: each turn runs one full
-`Harness.run(...)` interaction, then an operator-owned verification command
-runs against the workspace, and the loop deterministically decides whether
-to stop, retry with feedback, or give up. Implementation:
-`src/loop/agent-loop.ts` (`AgentLoop`), contracts in `src/loop/contracts.ts`.
+C2 envuelve el *harness* de C1 con un *loop* correctivo: cada turno ejecuta
+una interacción completa `Harness.run(...)`, luego corre un comando de
+verificación a cargo del operador contra el espacio de trabajo, y el *loop*
+decide de forma determinista si detenerse, reintentar con feedback, o
+rendirse. Implementación: `src/loop/agent-loop.ts` (`AgentLoop`), contratos en
+`src/loop/contracts.ts`.
 
 ```
 starting → generating → observing → verifying → deciding → final
-                                                ├─ FINISH (verification passed)
-                                                ├─ RETRY  (feedback fed to next turn)
-                                                └─ FAIL   (max_turns reached)
+                                                ├─ FINISH (verificación aprobada)
+                                                ├─ RETRY  (feedback alimentado al siguiente turno)
+                                                └─ FAIL   (se alcanzó max_turns)
 ```
 
-The decision policy lives entirely in `AgentLoop.decide(...)` — a plain
-TypeScript method, not a model call. Verification evidence, not the model's
-own claim of success, closes the loop.
+La política de decisión vive enteramente en `AgentLoop.decide(...)` — un
+método de TypeScript simple, no una llamada al modelo. La evidencia de
+verificación, no la propia afirmación de éxito del modelo, cierra el *loop*.
 
 ## `AgentLoop`
 
-Constructed with `LoopDeps`: `harness: Harness`, `execution: ExecutionManager`,
-`verification: VerificationManager`, `workspaceRoot: string`. These are the
-same component instances (or fresh ones) used to build the wrapped
-`Harness` — the loop needs its own handle on execution/verification because
-the verification command is run *after* the harness interaction, outside
-the model's tool-call flow.
+Se construye con `LoopDeps`: `harness: Harness`, `execution: ExecutionManager`,
+`verification: VerificationManager`, `workspaceRoot: string`. Son las mismas
+instancias de componente (o instancias nuevas) usadas para construir el
+`Harness` envuelto — el *loop* necesita su propio acceso a
+execution/verification porque el comando de verificación se ejecuta *después*
+de la interacción del *harness*, fuera del flujo de llamadas a herramientas del
+modelo.
 
-`run(request: LoopRequest): Promise<LoopResult>` iterates `turn` from `1` to
+`run(request: LoopRequest): Promise<LoopResult>` itera `turn` de `1` a
 `request.maxTurns`:
 
-1. **generating** — calls `harness.run(request.task, { feedback, maxToolRounds: request.toolRoundsPerTurn ?? 8 })`. `feedback` is whatever the *previous* turn's `buildFeedback` produced (`undefined` on turn 1).
-2. **observing** — no-op phase marker; exists so the state machine names the point between generation and verification.
-3. **verifying** (only if `request.verification` is set) — runs
+1. **generating** — llama a `harness.run(request.task, { feedback, maxToolRounds: request.toolRoundsPerTurn ?? 8 })`. `feedback` es lo que produjo `buildFeedback` en el turno *anterior* (`undefined` en el turno 1).
+2. **observing** — marcador de fase sin operación; existe para que la máquina de estados nombre el punto entre generación y verificación.
+3. **verifying** (solo si `request.verification` está configurado) — ejecuta
    `execution.run({ command: request.verification.command, cwd: workspaceRoot })`
-   and feeds the result to `verification.verify(...)`. The verification
-   command is **never shown to the model** — only its pass/fail feedback is,
-   via the next turn's `feedback` string.
-4. **deciding** — calls `this.decide(finalResponse, verification, maxTurns - turn)` and records `state.lastAction`.
-5. Appends a `LoopTurnTrace` entry (`turn`, `phases`, `response`,
-   `verification`, `decision`, and `feedback` when the decision was RETRY).
-6. On `FINISH` the loop breaks immediately. On `RETRY` it computes feedback
-   via `buildFeedback` and continues to the next turn. On `FAIL` it breaks.
+   y pasa el resultado a `verification.verify(...)`. El comando de
+   verificación **nunca se muestra al modelo** — solo su feedback de
+   éxito/fallo, a través del string `feedback` del siguiente turno.
+4. **deciding** — llama a `this.decide(finalResponse, verification, maxTurns - turn)` y registra `state.lastAction`.
+5. Agrega una entrada `LoopTurnTrace` (`turn`, `phases`, `response`,
+   `verification`, `decision`, y `feedback` cuando la decisión fue RETRY).
+6. En `FINISH` el *loop* se corta de inmediato. En `RETRY` calcula el feedback
+   mediante `buildFeedback` y continúa al siguiente turno. En `FAIL` se corta.
 
-After the loop, `state.phase = 'final'` and the result is built:
-`status: 'SUCCESS'` iff the last decision was `FINISH`; otherwise `'FAILED'`
-with a `failure` string — `` `max_turns (${maxTurns}) reached without
-success` `` if the turn counter hit the limit, or the last decision's own
-`reason` otherwise.
+Después del *loop*, `state.phase = 'final'` y se construye el resultado:
+`status: 'SUCCESS'` si y solo si la última decisión fue `FINISH`; de lo
+contrario `'FAILED'` con un string `failure` — `` `max_turns (${maxTurns})
+reached without success` `` si el contador de turnos llegó al límite, o el
+propio `reason` de la última decisión en otro caso.
 
-## Decision policy — `AgentLoop.decide`
+## Política de decisión — `AgentLoop.decide`
 
 ```
 response.type !== 'finish'
@@ -61,49 +63,53 @@ response.type === 'finish', verification failed
   → turnsLeft > 0 ? RETRY : FAIL
 ```
 
-So a `finish` response is *not* sufficient on its own when a verification
-command is configured — the workspace has to actually satisfy it. A
-`tool_call` response reaching the loop (i.e. the harness returned it as the
-final response, which only happens if `maxToolRounds` was exhausted mid
-tool-call) is treated the same as any other non-`finish` type: RETRY or FAIL
-depending on turns left.
+Es decir, una respuesta `finish` *no* es suficiente por sí sola cuando hay un
+comando de verificación configurado — el espacio de trabajo tiene que
+satisfacerlo realmente. Una respuesta `tool_call` que llega al *loop* (es
+decir, el *harness* la devolvió como respuesta final, lo que solo ocurre si
+`maxToolRounds` se agotó en medio de una llamada a herramienta) se trata igual
+que cualquier otro tipo que no sea `finish`: RETRY o FAIL según los turnos
+restantes.
 
 ## Feedback — `AgentLoop.buildFeedback`
 
-Built only when the decision is RETRY. Two independent parts, joined with a
-space:
-- If the harness's final response was an `error`, a sentence naming the
-  error `code` and `message`.
-- If verification ran and failed, a sentence with `verification.details`
-  plus an instruction to fix the workspace so the command passes.
+Se construye solo cuando la decisión es RETRY. Dos partes independientes,
+unidas con un espacio:
+- Si la respuesta final del *harness* fue un `error`, una oración que nombra
+  el `code` y el `message` del error.
+- Si la verificación se ejecutó y falló, una oración con `verification.details`
+  más una instrucción para corregir el espacio de trabajo de modo que el
+  comando pase.
 
-This string becomes `runOptions.feedback` on the harness call for the next
-turn, and the harness only injects it into the model-facing request on the
-first tool round of that turn (see `Harness.run`, `round === 0`).
+Este string se convierte en `runOptions.feedback` en la llamada al *harness*
+del siguiente turno, y el *harness* solo lo inyecta en la solicitud visible
+para el modelo en la primera ronda de herramienta de ese turno (ver
+`Harness.run`, `round === 0`).
 
-## Contracts — `src/loop/contracts.ts`
+## Contratos — `src/loop/contracts.ts`
 
 - **`LoopPhase`** — `'starting' | 'generating' | 'observing' | 'verifying' | 'deciding' | 'final'`.
-- **`LoopRequest`** — `task`, `maxTurns` (reaching it without success is a
-  FAIL), optional `verification: { command }` (operator-owned; a
-  finish response is accepted unverified when absent), optional
-  `toolRoundsPerTurn` (default 8, applied by `AgentLoop` when calling
-  `harness.run`), optional `instructions`.
-- **`LoopState`** — `task`, 1-based `turn`, `phase`, `lastAction` (mirrors
-  the latest decision's `action`), `verifications` (oldest first).
+- **`LoopRequest`** — `task`, `maxTurns` (alcanzarlo sin éxito es un FAIL),
+  `verification: { command }` opcional (a cargo del operador; una respuesta
+  finish se acepta sin verificar cuando está ausente), `toolRoundsPerTurn`
+  opcional (por defecto 8, aplicado por `AgentLoop` al llamar a
+  `harness.run`), `instructions` opcional.
+- **`LoopState`** — `task`, `turn` (1-based), `phase`, `lastAction` (refleja
+  el `action` de la última decisión), `verifications` (del más antiguo al más
+  nuevo).
 - **`LoopDecision`** — `{ action: 'FINISH' | 'RETRY' | 'FAIL', reason }`.
 - **`LoopResult`** — `{ status: 'SUCCESS' | 'FAILED', turns, finalResponse?,
   decision, verifications, trace, failure? }`.
 - **`LoopTurnTrace`** — `{ turn, phases, response, verification?, decision,
-  feedback? }` (feedback present only on RETRY turns).
+  feedback? }` (feedback presente solo en turnos RETRY).
 
-## Behavior verified by `tests/loop.spec.ts`
+## Comportamiento verificado por `tests/loop.spec.ts`
 
-The test suite exercises: FINISH on the first turn when verification
-passes; RETRY across turns when the model's first claim of completion
-doesn't survive verification, with the corrective feedback actually
-reaching and fixing the workspace on the second turn; FAIL once `maxTurns`
-is exhausted with every verification still failing; RETRY-then-SUCCESS
-after the harness itself returns an `error` response; and acceptance of a
-plain `finish` response as SUCCESS when no `verification` is configured at
-all.
+La suite de tests cubre: FINISH en el primer turno cuando la verificación
+pasa; RETRY a través de turnos cuando la primera afirmación de finalización
+del modelo no sobrevive a la verificación, con el feedback correctivo
+realmente llegando y corrigiendo el espacio de trabajo en el segundo turno;
+FAIL una vez agotado `maxTurns` con toda verificación aún fallando;
+RETRY-luego-SUCCESS después de que el propio *harness* devuelve una respuesta
+`error`; y aceptación de una respuesta `finish` simple como SUCCESS cuando no
+hay ninguna `verification` configurada.
