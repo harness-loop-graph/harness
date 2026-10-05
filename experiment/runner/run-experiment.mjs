@@ -26,7 +26,7 @@ import {
   SkillCatalog,
   registerSkillTool,
   createRoutedModel,
-} from '../../glm/dist/index.js';
+} from '../../harness/dist/index.js';
 
 const DEFAULT_TASK =
   'Read SPEC.md in the workspace root and implement the complete system it describes, ' +
@@ -88,7 +88,7 @@ async function loadCredentials() {
   let modelId = process.env.MODEL_ID;
   if (!apiKey || !modelId) {
     try {
-      const envPath = path.resolve(__dirname, '..', '..', 'glm', '.env');
+      const envPath = path.resolve(__dirname, '..', '..', '.env');
       const text = await fs.readFile(envPath, 'utf-8');
       for (const line of text.split('\n')) {
         const idx = line.indexOf('=');
@@ -101,7 +101,7 @@ async function loadCredentials() {
     } catch { /* ignore */ }
   }
   if (!apiKey || !modelId) {
-    console.error('Missing MODEL_API_KEY and/or MODEL_ID. Set in environment or glm/.env.');
+    console.error('Missing MODEL_API_KEY and/or MODEL_ID. Set in environment or in .env at the repository root.');
     process.exit(1);
   }
   return { apiKey, modelId };

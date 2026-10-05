@@ -27,11 +27,11 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 
 ### Credentials
 
-`MODEL_API_KEY` and `MODEL_ID` are read from `process.env`, falling back to `glm/.env` (simple `key=value` parse). A clear error is raised if both are missing.
+`MODEL_API_KEY` and `MODEL_ID` are read from `process.env`, falling back to `.env` at the repository root (simple `key=value` parse). A clear error is raised if both are missing.
 
 ### Tests
 
-`node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against glm's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. Also covers `createModel()` (returns a plain `GlmModelAdapter` without a router, wraps it in a `RoutingModelAdapter` with the configured routes using an injected `makeAdapter` stub — no network — when one is configured, and propagates a clear missing-env-var error) and `summarizeRouting()` (decision log → counts per route/reason). `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
+`node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against the harness's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. Also covers `createModel()` (returns a plain `GlmModelAdapter` without a router, wraps it in a `RoutingModelAdapter` with the configured routes using an injected `makeAdapter` stub — no network — when one is configured, and propagates a clear missing-env-var error) and `summarizeRouting()` (decision log → counts per route/reason). `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
 
 `--task-file` wiring is covered by spawning the real CLI with `--dry-run` (dummy `MODEL_API_KEY`/`MODEL_ID` in the child env, since `loadCredentials()` runs before the dry-run branch): the printed plan's c3 node tasks carry the override text and never mention `SPEC`, and an empty/whitespace-only task file exits non-zero with a `Usage: --task-file ...` message on stderr and no stdout. `compactTraceC3()` is exported and tested directly for copying `loopFailure` into a failed trace entry while leaving it off a successful one.
 
@@ -58,7 +58,7 @@ Router:
 
 ## MCP tools and skills (`--harness-config`)
 
-A JSON config (see `glm/examples/harness-config.json`) can add MCP tools
+A JSON config (see `harness/examples/harness-config.json`) can add MCP tools
 and agent skills identically to C1, C2 and C3:
 
 ```json
@@ -90,7 +90,7 @@ failure: `run-report.json` is still written, with `status: "FAILED"` and
 ## Model router (`--harness-config` with a `router` section)
 
 The same `--harness-config` file can also carry an optional `router`
-section (see `glm/docs/model-router.md`). It is **not** set in this
+section (see `harness/docs/model-router.md`). It is **not** set in this
 repo's own `experiment/harness-config.json` — routing stays off by
 default — but a config that opts in looks like:
 

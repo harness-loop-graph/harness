@@ -1,4 +1,4 @@
-// Unit tests for the runner's --harness-config wiring (T6). Uses glm's own
+// Unit tests for the runner's --harness-config wiring (T6). Uses the harness's own
 // fixture MCP server + skill fixtures rather than talking to a real model.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,7 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { McpToolProvider, GlmModelAdapter, RoutingModelAdapter } from '../../glm/dist/index.js';
+import { McpToolProvider, GlmModelAdapter, RoutingModelAdapter } from '../../harness/dist/index.js';
 import {
   buildNodes,
   loadHarnessExtras,
@@ -19,7 +19,7 @@ import {
 } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const GLM_TESTS_DIR = path.resolve(__dirname, '..', '..', 'glm', 'tests');
+const GLM_TESTS_DIR = path.resolve(__dirname, '..', '..', 'harness', 'tests');
 const FIXTURE_MCP_SERVER = path.join(GLM_TESTS_DIR, 'fixtures', 'mcp-fixture-server.mjs');
 const FIXTURE_SKILLS_DIR = path.join(GLM_TESTS_DIR, 'fixtures', 'skills');
 

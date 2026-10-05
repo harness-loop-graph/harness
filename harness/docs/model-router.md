@@ -64,7 +64,7 @@ totalTokens, cost } }, decisions: { route, reason }[] }`.
 
 ## Harness config wiring
 
-A harness config file (see `glm/docs/mcp-skills.md`) can carry an
+A harness config file (see `docs/mcp-skills.md`) can carry an
 optional `router` section:
 
 ```json
@@ -115,9 +115,9 @@ unless a harness config opts in.
 
 ## Tests
 
-- `glm/tests/routing-model-adapter.spec.ts` — every rule, precedence,
+- `tests/routing-model-adapter.spec.ts` — every rule, precedence,
   custom-router null fallback, unknown-route error, usage aggregation
   (including two route names sharing one adapter instance).
-- `glm/tests/harness-config.spec.ts` — `router` section validation and
+- `tests/harness-config.spec.ts` — `router` section validation and
   `createRoutedModel` (route construction, missing-env-var errors,
   `customRouterPath` loading).

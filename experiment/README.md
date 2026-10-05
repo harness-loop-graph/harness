@@ -4,7 +4,7 @@ This repository is the **experiment bench**, not an application. It holds
 the fixed specification the generator system receives (`SPEC.md`), the
 hidden acceptance batteries (defined before the first run, never shown
 to the generator), and the experiment runner. The only thing that
-generates code is the harness (`../glm/`).
+generates code is the harness (`../harness/`).
 
 Generated systems do not live here: each run builds in an isolated
 workspace under `runs/` (gitignored), and the batteries run against
