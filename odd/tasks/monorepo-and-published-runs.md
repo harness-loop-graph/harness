@@ -29,6 +29,7 @@ Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `
 - [x] T1 — Merge: move glm into `harness/`, experiment into `experiment/`, merge with unrelated histories; root README + .gitignore.
 - [x] T2 — Fix paths (runner import, tests, docs) so all checks pass in the new layout.
 - [x] T3 — Runner: default runs dir outside the repo; per-run git repo + commit; `--publish` to GitHub with secret guard; report records repo URL; tests + README.
+- [ ] T3b — Review fixes (user-authorized 2026-10-05): catch run-phase exceptions so report + repo are always written; publish guards scan only `git ls-files`; tear down c2 docker compose stack at run end; delete `review-verdict.json` before each reviewer visit; stale docs (experiment README, battery path, root quick start); env-independent dry-run test; validate task file before creating workspace; validate numeric flags; secret scan includes MCP server env values.
 - [ ] T4 — Delivery (user approval): push, archive `experiment` with pointer, update repo description, notify teammate.
 
 ## Acceptance criteria
