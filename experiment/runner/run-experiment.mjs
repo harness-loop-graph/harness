@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID, createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -35,6 +35,23 @@ const DEFAULT_TASK =
 
 const CHAIN = ['architect', 'data', 'backend', 'frontend', 'reviewer'];
 
+// Parses a numeric flag's value as a positive integer, or exits with a usage
+// error (consistent with the other flag-shaped usage errors below) — a
+// missing, non-numeric, fractional, zero or negative value is never silently
+// accepted as a turn/step/tool-round budget.
+function parsePositiveIntFlag(flag, raw) {
+  if (raw === undefined) {
+    console.error(`Usage: ${flag} <n> requires a value`);
+    process.exit(1);
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`Usage: ${flag} <n> must be a positive integer (got: ${raw})`);
+    process.exit(1);
+  }
+  return n;
+}
+
 function parseArgs(argv) {
   const args = argv.slice(2);
   const parsed = {
@@ -61,9 +78,9 @@ function parseArgs(argv) {
     else if (a === '--runs-dir') parsed.runsDir = path.resolve(args[++i]);
     else if (a === '--spec') parsed.spec = path.resolve(args[++i]);
     else if (a === '--task-file') parsed.taskFile = path.resolve(args[++i]);
-    else if (a === '--max-turns') parsed.maxTurns = parseInt(args[++i], 10);
-    else if (a === '--max-steps') parsed.maxSteps = parseInt(args[++i], 10);
-    else if (a === '--tool-rounds') parsed.toolRounds = parseInt(args[++i], 10);
+    else if (a === '--max-turns') parsed.maxTurns = parsePositiveIntFlag('--max-turns', args[++i]);
+    else if (a === '--max-steps') parsed.maxSteps = parsePositiveIntFlag('--max-steps', args[++i]);
+    else if (a === '--tool-rounds') parsed.toolRounds = parsePositiveIntFlag('--tool-rounds', args[++i]);
     else if (a === '--verify-cmd') parsed.verifyCmd = args[++i];
     else if (a === '--with-batteries') parsed.withBatteries = true;
     else if (a === '--keep') parsed.keep = true;
@@ -176,37 +193,93 @@ async function initWorkspaceRepo(ws, message) {
   );
 }
 
-// Lists every path under `ws` (files and directories, '/'-joined, relative to
-// `ws`), skipping `.git`. Used by both the secret guard and the acceptance-
-// bench assertion below.
-async function walkWorkspaceEntries(ws) {
-  const entries = [];
-  const stack = [ws];
+// Lists every regular file under `dir` (relative path, '/'-joined), skipping
+// any directory whose name is in `ignoreDirNames`. A missing `dir` yields an
+// empty list rather than throwing. Shared by the bench-hash walk below
+// (which also skips `node_modules`, since the bench's own dependencies are
+// never meaningfully "the bench" being protected).
+async function walkFiles(dir, ignoreDirNames) {
+  const files = [];
+  const stack = [dir];
   while (stack.length > 0) {
-    const dir = stack.pop();
-    const dirEntries = await fs.readdir(dir, { withFileTypes: true });
+    const current = stack.pop();
+    let dirEntries;
+    try {
+      dirEntries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      continue; // `dir` (or a dir under it) does not exist / is not readable
+    }
     for (const entry of dirEntries) {
-      if (entry.name === '.git') continue;
-      const full = path.join(dir, entry.name);
-      const rel = path.relative(ws, full).split(path.sep).join('/');
-      entries.push({ rel, full, isDirectory: entry.isDirectory() });
+      if (entry.isDirectory() && ignoreDirNames.has(entry.name)) continue;
+      const full = path.join(current, entry.name);
       if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile()) files.push({ rel: path.relative(dir, full).split(path.sep).join('/'), full });
     }
   }
-  return entries;
+  return files;
 }
 
-// The runner never copies experiment/acceptance/ into a generated workspace;
-// this is a defensive assertion that refuses to publish if it ever did.
-async function findAcceptancePathInWorkspace(ws) {
-  const entries = await walkWorkspaceEntries(ws);
-  const hit = entries.find((e) => /(^|\/)acceptance(\/|$)/.test(e.rel));
-  return hit ? hit.rel : null;
+// Files actually committed into the per-run workspace repo (never the
+// gitignored node_modules/dist/build/coverage/.env* that `initWorkspaceRepo()`
+// writes into `.gitignore`). Both publish guards below must see exactly what
+// gets pushed, not the whole working tree — `ws` is already a git repo with
+// at least one commit by the time either guard runs (publishWorkspace() only
+// runs after initWorkspaceRepo()).
+async function listTrackedFiles(ws) {
+  const { stdout } = await spawnCommand('git', ['-C', ws, 'ls-files', '-z'], {});
+  return stdout.split('\0').filter(Boolean);
+}
+
+// Hashes (sha256 over raw bytes) every file under `benchDir` (the hidden
+// acceptance bench), skipping `.git`/`node_modules`. Returns a
+// Map<sha256Hex, relPath[]>; a missing `benchDir` (e.g. a checkout without
+// the gitignored bench) hashes to an empty map rather than throwing.
+async function hashBenchFiles(benchDir) {
+  const hashes = new Map();
+  const files = await walkFiles(benchDir, new Set(['.git', 'node_modules']));
+  for (const { rel, full } of files) {
+    const content = await fs.readFile(full);
+    const digest = createHash('sha256').update(content).digest('hex');
+    const existing = hashes.get(digest);
+    if (existing) existing.push(rel);
+    else hashes.set(digest, [rel]);
+  }
+  return hashes;
+}
+
+// The runner never copies experiment/acceptance/ (the hidden bench) into a
+// generated workspace; this is a defensive assertion before publish. It
+// compares every *tracked* workspace file's content (byte-for-byte, via
+// sha256) against the bench's own file hashes, so a generated app's own
+// folder that happens to be named `acceptance/` (legitimate product code,
+// with different content) is never flagged — only an actual byte-identical
+// copy of a bench file is. `benchDir` is overridable for tests.
+async function findAcceptancePathInWorkspace(ws, benchDir = path.resolve(__dirname, '..', 'acceptance')) {
+  const benchHashes = await hashBenchFiles(benchDir);
+  if (benchHashes.size === 0) return null;
+  const tracked = await listTrackedFiles(ws);
+  for (const rel of tracked) {
+    let content;
+    try {
+      content = await fs.readFile(path.join(ws, rel));
+    } catch {
+      continue;
+    }
+    const digest = createHash('sha256').update(content).digest('hex');
+    if (benchHashes.has(digest)) return rel;
+  }
+  return null;
 }
 
 // Secret values to refuse publishing on: the model API key actually used for
-// this run, plus (when a router is configured) the value of every route's
-// own apiKeyEnv. Values that are unset are dropped, never compared as ''.
+// this run, the value of every router route's own apiKeyEnv (when a router is
+// configured), and every non-empty env value configured for a
+// --harness-config MCP server — except values under 8 chars, which are
+// dropped to avoid false positives on short, non-secret-looking strings (the
+// threshold is also documented in runner/README.md). Values that end up
+// unset/empty are dropped, never compared as ''.
+const MIN_MCP_ENV_SECRET_LENGTH = 8;
+
 function collectSecretValues({ apiKey, harnessExtras }) {
   const secrets = [{ label: 'MODEL_API_KEY', value: apiKey }];
   const router = harnessExtras?.router;
@@ -215,24 +288,38 @@ function collectSecretValues({ apiKey, harnessExtras }) {
       if (route.apiKeyEnv) secrets.push({ label: route.apiKeyEnv, value: process.env[route.apiKeyEnv] });
     }
   }
+  const mcpServers = harnessExtras?.mcpServers;
+  if (mcpServers) {
+    for (const [serverName, server] of Object.entries(mcpServers)) {
+      if (!server.env) continue;
+      for (const [envKey, value] of Object.entries(server.env)) {
+        if (typeof value === 'string' && value.length >= MIN_MCP_ENV_SECRET_LENGTH) {
+          secrets.push({ label: `mcpServers.${serverName}.env.${envKey}`, value });
+        }
+      }
+    }
+  }
   return secrets.filter((s) => s.value);
 }
 
-// Scans every committed file for any of `secrets`' values. Returns the first
-// hit as { file, label } (never the matched value itself) or null.
+// Scans every *tracked* workspace file (see listTrackedFiles() above) for any
+// of `secrets`' values, matched as raw bytes (never decoded as text) so a
+// binary file is handled honestly instead of silently skipped as
+// "unreadable". Returns the first hit as { file, label } (never the matched
+// value itself) or null.
 async function scanWorkspaceForSecrets(ws, secrets) {
   if (secrets.length === 0) return null;
-  const entries = await walkWorkspaceEntries(ws);
-  for (const entry of entries) {
-    if (entry.isDirectory) continue;
+  const needles = secrets.map(({ label, value }) => ({ label, buf: Buffer.from(value, 'utf-8') }));
+  const tracked = await listTrackedFiles(ws);
+  for (const rel of tracked) {
     let content;
     try {
-      content = await fs.readFile(entry.full, 'utf-8');
+      content = await fs.readFile(path.join(ws, rel));
     } catch {
-      continue; // unreadable/binary: nothing a plain string check can find anyway
+      continue; // listed by git but unreadable on disk: nothing to scan
     }
-    for (const { label, value } of secrets) {
-      if (content.includes(value)) return { file: entry.rel, label };
+    for (const { label, buf } of needles) {
+      if (content.includes(buf)) return { file: rel, label };
     }
   }
   return null;
@@ -250,12 +337,14 @@ async function checkGhAuthenticated(run = spawnCommand) {
 // Publishes a finished, already-committed workspace as a public repo under
 // `org`, guarded by the acceptance-bench assertion and the secret scan.
 // `run` is injectable so tests can stub `gh`/`git` without network or a real
-// GitHub call. Mutates `report` in place (`repository` or `publishError`);
-// never throws — callers decide exit status from `report.publishError`.
-async function publishWorkspace({ ws, report, modelId, config, org, secrets, run = spawnCommand }) {
-  const acceptancePath = await findAcceptancePathInWorkspace(ws);
+// GitHub call; `benchDir` is injectable so tests don't depend on this
+// checkout's real (gitignored) experiment/acceptance/ contents. Mutates
+// `report` in place (`repository` or `publishError`); never throws —
+// callers decide exit status from `report.publishError`.
+async function publishWorkspace({ ws, report, modelId, config, org, secrets, run = spawnCommand, benchDir }) {
+  const acceptancePath = await findAcceptancePathInWorkspace(ws, benchDir);
   if (acceptancePath) {
-    report.publishError = `workspace contains acceptance path: ${acceptancePath}`;
+    report.publishError = `workspace contains a copy of the hidden acceptance bench: ${acceptancePath}`;
     return;
   }
 
@@ -323,6 +412,36 @@ function spawnCommand(cmd, args, opts = {}) {
   });
 }
 
+// Tears down a workspace's docker compose stack (`docker compose down -v`).
+// Used both at the end of the battery phase below and at the end of a c2 run
+// (see main()), since c2's default --verify-cmd starts the same kind of stack
+// via `docker compose up -d --build`. `run` is injectable for tests. Never
+// throws: returns an error message string on failure, or null, so callers can
+// record it (e.g. report.teardownError) without masking the run's own result.
+async function teardownDockerCompose(ws, run = spawnCommand) {
+  try {
+    await run('docker', ['compose', 'down', '-v'], { cwd: ws, timeoutMs: 120_000 });
+    return null;
+  } catch (err) {
+    return `docker compose down failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+// Whether a run may have left a docker compose stack running that needs
+// tearing down at the end: either the verify command itself invokes
+// `docker compose` (c2's default --verify-cmd), or the workspace has its own
+// compose file (SPEC.md requires one) regardless of what --verify-cmd says.
+async function workspaceMayHaveDockerStack(ws, verifyCmd) {
+  if (typeof verifyCmd === 'string' && /docker compose\b/.test(verifyCmd)) return true;
+  for (const name of ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']) {
+    try {
+      await fs.access(path.join(ws, name));
+      return true;
+    } catch { /* not present */ }
+  }
+  return false;
+}
+
 async function runBatteries(ws, keep) {
   let batteryReport = null;
   let batteryError = null;
@@ -338,6 +457,9 @@ async function runBatteries(ws, keep) {
     }
     if (!healthy) throw new Error('Health check did not pass within 120s');
 
+    // Run against the workspace from the bench's own directory: the battery
+    // scripts live in experiment/acceptance/ (never copied into the
+    // workspace), and WORKSPACE tells them which generated app to exercise.
     const acceptanceDir = path.resolve(__dirname, '..', 'acceptance');
     const result = await spawnCommand('node', ['run-all.mjs'], {
       cwd: acceptanceDir,
@@ -360,11 +482,8 @@ async function runBatteries(ws, keep) {
     batteryError = err.message;
   } finally {
     if (!keep) {
-      try {
-        await spawnCommand('docker', ['compose', 'down', '-v'], { cwd: ws, timeoutMs: 120_000 });
-      } catch (downErr) {
-        if (!batteryError) batteryError = `docker compose down failed: ${downErr.message}`;
-      }
+      const downErr = await teardownDockerCompose(ws);
+      if (downErr && !batteryError) batteryError = downErr;
     }
   }
   return { batteryReport, batteryError };
@@ -404,6 +523,7 @@ async function loadHarnessExtras(configPath) {
 
   return {
     mcpProvider,
+    mcpServers: config.mcpServers,
     skillCatalog,
     allowedToolNames,
     router: config.router,
@@ -497,6 +617,15 @@ function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
   // tests can inspect the wiring (registered tool names, allowlist) without
   // driving a full model run.
   return { harness, execution, verification, tools, guardrails, availTools };
+}
+
+// Deletes any review-verdict.json left from an earlier reviewer visit, so
+// neither this visit's `test -f review-verdict.json` verification nor
+// buildRouter() below can be satisfied by stale data when the reviewer loop
+// fails to write a fresh one this time. `force: true` makes a first visit
+// (no stale file yet) a no-op instead of throwing.
+function clearStaleReviewVerdict(ws) {
+  rmSync(path.join(ws, 'review-verdict.json'), { force: true });
 }
 
 function buildRouter(ws) {
@@ -661,19 +790,27 @@ async function main() {
     process.exit(1);
   }
 
-  const { apiKey, modelId } = await loadCredentials();
-  const sessionId = randomUUID();
-  const ws = await createWorkspace(parsed.runsDir, parsed.config, modelId, parsed.spec, { dryRun: parsed.dryRun });
-
+  // Validated before createWorkspace() below so a bad --task-file never
+  // leaves an orphan workspace directory on disk.
   let task = DEFAULT_TASK;
   if (parsed.taskFile) {
-    const raw = await fs.readFile(parsed.taskFile, 'utf-8');
+    let raw;
+    try {
+      raw = await fs.readFile(parsed.taskFile, 'utf-8');
+    } catch (err) {
+      console.error(`Usage: --task-file <path> must point to a readable file (${parsed.taskFile}): ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
     if (raw.trim().length === 0) {
       console.error(`Usage: --task-file <path> must point to a file that is not empty or whitespace-only (got: ${parsed.taskFile})`);
       process.exit(1);
     }
     task = raw;
   }
+
+  const { apiKey, modelId } = await loadCredentials();
+  const sessionId = randomUUID();
+  const ws = await createWorkspace(parsed.runsDir, parsed.config, modelId, parsed.spec, { dryRun: parsed.dryRun });
 
   if (parsed.dryRun) {
     const plan = {
@@ -734,6 +871,7 @@ async function main() {
     report.failure = `harness-config: ${configFailure}`;
   }
 
+  let runException = null;
   if (!configFailure) try {
     if (parsed.config === 'c1') {
       const model = await createModel({ apiKey, modelId, sessionId, harnessExtras });
@@ -770,6 +908,7 @@ async function main() {
     } else if (parsed.config === 'c3') {
       const model = await createModel({ apiKey, modelId, sessionId, harnessExtras });
       const factory = (node) => {
+        if (node.id === 'reviewer') clearStaleReviewVerdict(ws);
         const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`), harnessExtras);
         return new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
       };
@@ -801,7 +940,26 @@ async function main() {
         error: batteryInfo.batteryError || undefined,
       };
     }
+  } catch (err) {
+    // A throw anywhere above (createModel() rejecting on a router route with
+    // an unset apiKeyEnv, or any harness/loop/graph exception) must never
+    // skip run-report.json / initWorkspaceRepo() / --publish below: record it
+    // like any other failure instead of letting it escape main().
+    runException = err instanceof Error ? err.message : String(err);
+    report.status = 'FAILED';
+    report.failure = runException;
   } finally {
+    // Tear down a c2 run's own docker compose stack (its default
+    // --verify-cmd starts one) regardless of success/failure/exception, so
+    // the next run doesn't hit port conflicts on the fixed ports. Skipped
+    // when --with-batteries --keep was requested: the battery phase already
+    // left the stack up on purpose and this must not undo that.
+    if (parsed.config === 'c2' && !(parsed.withBatteries && parsed.keep)) {
+      if (await workspaceMayHaveDockerStack(ws, parsed.verifyCmd)) {
+        const teardownErr = await teardownDockerCompose(ws);
+        if (teardownErr) report.teardownError = teardownErr;
+      }
+    }
     if (harnessExtras) {
       try {
         await harnessExtras.close();
@@ -863,7 +1021,7 @@ async function main() {
   }
   console.log(reportPath);
 
-  if (configFailure || report.publishError) process.exitCode = 1;
+  if (configFailure || runException || report.publishError) process.exitCode = 1;
 }
 
 // Node realpath-resolves the main module; argv[1] is not, and import.meta.url is percent-encoded.
@@ -891,10 +1049,14 @@ export {
   timestampForWorkspace,
   initWorkspaceRepo,
   ensureRunGitignore,
+  listTrackedFiles,
   findAcceptancePathInWorkspace,
   collectSecretValues,
   scanWorkspaceForSecrets,
   checkGhAuthenticated,
   publishWorkspace,
+  teardownDockerCompose,
+  workspaceMayHaveDockerStack,
+  clearStaleReviewVerdict,
   main,
 };

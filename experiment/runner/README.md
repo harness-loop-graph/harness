@@ -15,10 +15,10 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 | `--config c1\|c2\|c3` | **required** | Experiment configuration |
 | `--runs-dir <path>` | `<monorepo>/../pi-runs` (sibling of this repo, never inside it) | Run workspace root |
 | `--spec <path>` | `experiment/SPEC.md` | Fixed specification file |
-| `--task-file <path>` | — | Override generation task (cheap validation runs). In c3 every node keeps its role and verification but works on this task instead of the SPEC, and the `GraphEngine`'s graph-level task is set to the override too (nodes are what the engine actually runs, but the graph-level task no longer contradicts it). An empty or whitespace-only file is rejected with a usage error and a non-zero exit, before any model call, for every `--config` |
-| `--max-turns <n>` | 8 | Loop budget (C2/C3 nodes) |
-| `--max-steps <n>` | 12 | Graph step budget (C3 only) |
-| `--tool-rounds <n>` | 80 (c1), 30 (c2/c3) | Tool-call budget per interaction |
+| `--task-file <path>` | — | Override generation task (cheap validation runs). In c3 every node keeps its role and verification but works on this task instead of the SPEC, and the `GraphEngine`'s graph-level task is set to the override too (nodes are what the engine actually runs, but the graph-level task no longer contradicts it). The file is validated (exists, readable, not empty/whitespace-only) **before** the run's workspace is created, with a usage error and a non-zero exit on failure, for every `--config` — so a bad `--task-file` never leaves an orphan workspace directory behind |
+| `--max-turns <n>` | 8 | Loop budget (C2/C3 nodes). Must be a positive integer |
+| `--max-steps <n>` | 12 | Graph step budget (C3 only). Must be a positive integer |
+| `--tool-rounds <n>` | 80 (c1), 30 (c2/c3) | Tool-call budget per interaction. Must be a positive integer |
 | `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf http://localhost:3000/health` | C2 verification command |
 | `--with-batteries` | off | After generation, start the stack and run acceptance batteries |
 | `--keep` | off | With `--with-batteries`, do **not** tear the stack down |
@@ -30,6 +30,10 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 ### Credentials
 
 `MODEL_API_KEY` and `MODEL_ID` are read from `process.env`, falling back to `.env` at the repository root (simple `key=value` parse). A clear error is raised if both are missing.
+
+### Validation
+
+A missing value, non-numeric, fractional, zero or negative `--max-turns`/`--max-steps`/`--tool-rounds` is a usage error (`Usage: --<flag> <n> must be a positive integer ...`) with a non-zero exit, before any workspace or model call. `--task-file` is validated the same way (see the flags table above) before the workspace is created.
 
 ## Generated apps live outside the repo
 
@@ -65,14 +69,29 @@ A failure during this step never loses the run: it's recorded as
 **before** any model call, failing with a usage-style error if it's not
 authenticated. After the local commit above, publishing:
 
-1. Refuses (and never calls `gh`/`git`) if the workspace contains any path
-   with an `acceptance/` segment — a defensive assertion, since the runner
-   never copies `experiment/acceptance/` into a generated workspace.
-2. Scans every committed file (except `.git/`) for the exact model API key
-   value used by the run, and for the value of any `--harness-config`
-   router route's `apiKeyEnv`. On a hit, it refuses to publish and records
-   `run-report.json`'s `publishError: "secret detected in <relative
-   path>"` — the secret's **value** is never printed or stored.
+Both guards below only ever look at **tracked** files — the exact list
+`git -C <workspace> ls-files` returns, i.e. exactly what the per-run commit
+(and `--publish`) ships — never the whole working tree, so a gitignored
+`.env`, `node_modules/`, `dist/`, etc. can never trip (or hide from) either
+guard.
+
+1. Refuses (and never calls `gh`/`git`) if any tracked file is a
+   byte-identical copy (sha256 over raw bytes) of a file under
+   `experiment/acceptance/` (the hidden bench) — a defensive assertion,
+   since the runner never copies that directory into a generated workspace.
+   This is a **content** check, not a path check: a generated app's own
+   folder that happens to be named `acceptance/` is never flagged, only an
+   actual copy of a bench file is, regardless of where it ends up in the
+   workspace.
+2. Scans every tracked file's raw bytes (so a binary file is matched
+   honestly instead of silently skipped) for the exact model API key value
+   used by the run, for the value of any `--harness-config` router route's
+   `apiKeyEnv`, and for every non-empty `env` value of 8 characters or more
+   configured on a `--harness-config` MCP server (shorter values are
+   dropped to avoid false positives on non-secret-looking short strings).
+   On a hit, it refuses to publish and records `run-report.json`'s
+   `publishError: "secret detected in <relative path>"` — the secret's
+   **value** is never printed or stored.
 3. Otherwise creates a public repo `<org>/run-<workspace dir name>` with
    `gh repo create <repo> --public --source <workspace> --push
    --description "<model> <config> run generated by the PI-I harness"`,
@@ -103,6 +122,23 @@ T3 (runs dir, per-run repo, publish) is covered with no network and no real GitH
 - **c2** — `AgentLoop` with corrective turns. Each turn runs the harness, then the verification command decides FINISH / RETRY / FAIL.
 - **c3** — `GraphEngine` with a 5-node fixed topology and a custom router.
 
+### C2 docker compose teardown
+
+C2's default `--verify-cmd` starts a docker compose stack
+(`docker compose up -d --build`) to run the health check against, which
+would otherwise keep running after the process exits and make the next run
+on the same (fixed) ports fail. At the end of a c2 run — success, failure,
+or a thrown exception, via a `finally` — the runner tears that stack down
+(`docker compose down -v`) in the workspace whenever the verify command
+mentions `docker compose`, or whenever the workspace has its own
+`docker-compose.yml`/`compose.yaml` (the SPEC requires one) regardless of
+what `--verify-cmd` says. A teardown failure is recorded as
+`run-report.json`'s `teardownError`, never masking the run's own result.
+Teardown is skipped when `--with-batteries --keep` was requested together,
+since the battery phase already intentionally left the stack up for
+inspection. The battery phase below (which starts its own stack) reuses the
+same teardown helper.
+
 ### C3 topology
 
 | Node | Role | Task essence | Verification |
@@ -117,6 +153,10 @@ Router:
 - Non-reviewer nodes flow linearly: architect → data → backend → frontend → reviewer.
 - A failed node is retried once (same node), then the graph fails.
 - After reviewer: `acceptable: true` → FINISH; `responsible: X` → NEXT X; otherwise retry reviewer once, then FAIL.
+- Before every reviewer visit (including a retry), any `review-verdict.json`
+  already in the workspace is deleted first, so a stale verdict from an
+  earlier visit can never satisfy this visit's `test -f review-verdict.json`
+  verification or be misread by the router above as this visit's result.
 
 ## MCP tools and skills (`--harness-config`)
 
@@ -202,9 +242,13 @@ router is configured.
 
 1. `docker compose up -d --build` in the workspace.
 2. Poll `GET http://localhost:3000/health` up to 120 s.
-3. Run `node ../acceptance/run-all.mjs` with the required environment.
+3. Run `node run-all.mjs` **from `experiment/acceptance/` as its working
+   directory** (the hidden bench, never copied into the workspace) against
+   the generated app, with `WORKSPACE` set to the workspace path plus
+   `BACKEND_URL`/`FRONTEND_URL`/`DB_URL` for the running stack.
 4. Save the aggregated report as `batteries-report.json` in the workspace.
-5. `docker compose down -v` (unless `--keep`).
+5. `docker compose down -v` (unless `--keep`) — the same teardown helper the
+   c2 run-end teardown above uses.
 
 > **Warning:** Ports 5432, 3000 and 8080 are fixed. Run one experiment at a time; concurrent runs will conflict.
 
@@ -240,6 +284,7 @@ Every run writes `run-report.json` into the workspace:
     "decisions": { "default:default": 0 }
   },
   "closeError?": "...",
+  "teardownError?": "...",
   "repoError?": "...",
   "repository?": { "name": "harness-loop-graph/run-...", "url": "https://github.com/..." },
   "publishError?": "..."
@@ -264,8 +309,17 @@ Every run writes `run-report.json` into the workspace:
   `failure: "harness-config: ..."` instead (see above).
 - `routing` — only present when a `router` section is configured; see
   "Model router" above.
+- `failure` — also covers an exception thrown anywhere during the run
+  (e.g. `createModel()` rejecting because a router route's `apiKeyEnv` is
+  unset, or any harness/loop/graph error): it is caught, `status` is set to
+  `"FAILED"` and `failure` records the error message, and `run-report.json`,
+  the per-run git repo and `--publish` all still run — a thrown exception
+  never loses the run.
 - `closeError` — only present if closing the MCP connection at the end of
   the run itself failed; never replaces `failure`.
+- `teardownError` — only present if tearing down a c2 run's docker compose
+  stack at the end of the run failed (see "C2 docker compose teardown"
+  below); never replaces `failure`.
 - `repoError` — only present if turning the workspace into a git repo failed
   (see "Per-run repo" above); the run and its report are kept regardless.
 - `repository` — only present after a successful `--publish`: the created

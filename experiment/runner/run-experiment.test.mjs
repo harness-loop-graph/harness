@@ -21,11 +21,16 @@ import {
   slugifyModelId,
   timestampForWorkspace,
   initWorkspaceRepo,
+  listTrackedFiles,
   findAcceptancePathInWorkspace,
   collectSecretValues,
   scanWorkspaceForSecrets,
   checkGhAuthenticated,
   publishWorkspace,
+  teardownDockerCompose,
+  workspaceMayHaveDockerStack,
+  clearStaleReviewVerdict,
+  buildRouter,
 } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -422,18 +427,26 @@ test('createWorkspace() names the dir <slug>-<config>-<timestamp>, and --dry-run
   }
 });
 
-test('c1 --dry-run plan workspace is outside the monorepo and nothing is created on disk', async () => {
+test('c1 --dry-run creates nothing on disk (env-independent: uses its own --runs-dir, never the real default)', async () => {
   const { spawnSync } = await import('node:child_process');
-  const monorepoRoot = path.resolve(__dirname, '..', '..');
-  const res = spawnSync(
-    process.execPath,
-    [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run'],
-    { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
-  );
-  assert.equal(res.status, 0, res.stderr);
-  const plan = JSON.parse(res.stdout);
-  assert.ok(!plan.workspace.startsWith(monorepoRoot + path.sep), `workspace ${plan.workspace} must be outside ${monorepoRoot}`);
-  await assert.rejects(fs.access(path.dirname(plan.workspace)), 'the planned runs dir must not have been created');
+  const runsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runsdir-dryrun-'));
+  try {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', '--runs-dir', runsDir],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.equal(res.status, 0, res.stderr);
+    const plan = JSON.parse(res.stdout);
+    assert.equal(path.dirname(plan.workspace), runsDir);
+    // Asserting the planned workspace path itself was not created (rather
+    // than asserting some ambient dir like the global default --runs-dir
+    // doesn't exist) keeps this test honest regardless of what else this
+    // machine has on disk from prior real runs.
+    await assert.rejects(fs.access(plan.workspace), 'the planned workspace dir must not have been created by --dry-run');
+  } finally {
+    await fs.rm(runsDir, { recursive: true, force: true });
+  }
 });
 
 test('initWorkspaceRepo() creates a git repo with one commit, a .gitignore, and a fixed local identity', async () => {
@@ -468,11 +481,13 @@ test('initWorkspaceRepo() creates a git repo with one commit, a .gitignore, and 
   }
 });
 
-test('scanWorkspaceForSecrets() detects a planted API key value and reports its relative path, never the value', async () => {
+test('scanWorkspaceForSecrets() detects a planted API key value in a tracked file and reports its relative path, never the value', async () => {
   const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-secret-'));
   try {
     await fs.mkdir(path.join(ws, 'src'));
     await fs.writeFile(path.join(ws, 'src', 'config.js'), "export const KEY = 'sk-super-secret-123';\n");
+    await initWorkspaceRepo(ws, 'test: seed');
+
     const secrets = collectSecretValues({ apiKey: 'sk-super-secret-123', harnessExtras: null });
     const hit = await scanWorkspaceForSecrets(ws, secrets);
     assert.deepEqual(hit, { file: 'src/config.js', label: 'MODEL_API_KEY' });
@@ -485,8 +500,42 @@ test('scanWorkspaceForSecrets() finds nothing when the key is absent from the wo
   const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-secret-clean-'));
   try {
     await fs.writeFile(path.join(ws, 'README.md'), 'nothing secret here');
+    await initWorkspaceRepo(ws, 'test: seed');
+
     const secrets = collectSecretValues({ apiKey: 'sk-super-secret-123', harnessExtras: null });
     assert.equal(await scanWorkspaceForSecrets(ws, secrets), null);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceForSecrets() ignores a gitignored .env file even when it contains the secret value', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-secret-env-'));
+  try {
+    await fs.writeFile(path.join(ws, '.env'), 'MODEL_API_KEY=sk-super-secret-123\n');
+    // initWorkspaceRepo()'s own .gitignore excludes .env*, so this file is
+    // never tracked; the guard must only ever see `git ls-files`.
+    await initWorkspaceRepo(ws, 'test: seed');
+    assert.ok(!(await listTrackedFiles(ws)).includes('.env'), '.env must not be tracked');
+
+    const secrets = collectSecretValues({ apiKey: 'sk-super-secret-123', harnessExtras: null });
+    assert.equal(await scanWorkspaceForSecrets(ws, secrets), null);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceForSecrets() matches secret bytes even in a binary (non-UTF8-decodable) tracked file', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-secret-binary-'));
+  try {
+    const secretValue = 'sk-super-secret-123';
+    const binary = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, 0x01]), Buffer.from(secretValue, 'utf-8'), Buffer.from([0x00, 0xff])]);
+    await fs.writeFile(path.join(ws, 'blob.bin'), binary);
+    await initWorkspaceRepo(ws, 'test: seed');
+
+    const secrets = collectSecretValues({ apiKey: secretValue, harnessExtras: null });
+    const hit = await scanWorkspaceForSecrets(ws, secrets);
+    assert.deepEqual(hit, { file: 'blob.bin', label: 'MODEL_API_KEY' });
   } finally {
     await fs.rm(ws, { recursive: true, force: true });
   }
@@ -513,15 +562,73 @@ test("collectSecretValues() also includes each router route's apiKeyEnv value wh
   }
 });
 
-test('findAcceptancePathInWorkspace() flags any path containing an acceptance/ segment', async () => {
-  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-acceptance-'));
+test('collectSecretValues() includes non-empty --harness-config mcpServers env values of at least 8 chars, dropping shorter/empty ones', () => {
+  const secrets = collectSecretValues({
+    apiKey: 'default-secret',
+    harnessExtras: {
+      mcpServers: {
+        fixture: {
+          command: 'node',
+          args: [],
+          env: { LONG_TOKEN: 'a-long-enough-secret', SHORT: 'short1', EMPTY: '' },
+        },
+      },
+    },
+  });
+  assert.deepEqual(
+    secrets.sort((a, b) => a.label.localeCompare(b.label)),
+    [
+      { label: 'mcpServers.fixture.env.LONG_TOKEN', value: 'a-long-enough-secret' },
+      { label: 'MODEL_API_KEY', value: 'default-secret' },
+    ],
+  );
+});
+
+test('findAcceptancePathInWorkspace() returns null when there is no bench directory to compare against', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-acceptance-nobench-'));
   try {
-    assert.equal(await findAcceptancePathInWorkspace(ws), null);
-    await fs.mkdir(path.join(ws, 'experiment', 'acceptance'), { recursive: true });
-    await fs.writeFile(path.join(ws, 'experiment', 'acceptance', 'run-all.mjs'), '// hidden battery');
-    const hit = await findAcceptancePathInWorkspace(ws);
-    assert.ok(hit === 'experiment/acceptance' || hit.startsWith('experiment/acceptance/'), hit);
+    await fs.writeFile(path.join(ws, 'README.md'), 'nothing here');
+    await initWorkspaceRepo(ws, 'test: seed');
+    assert.equal(await findAcceptancePathInWorkspace(ws, path.join(ws, 'no-such-bench-dir')), null);
   } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test("findAcceptancePathInWorkspace() does not flag a generated app's own acceptance/ folder (different content than the bench)", async () => {
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-'));
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-acceptance-own-'));
+  try {
+    await fs.writeFile(path.join(benchDir, 'battery.mjs'), '// hidden battery assertion logic\n');
+
+    await fs.mkdir(path.join(ws, 'acceptance'), { recursive: true });
+    await fs.writeFile(path.join(ws, 'acceptance', 'run-all.mjs'), "// the generated app's own acceptance tests\n");
+    await initWorkspaceRepo(ws, 'test: seed');
+
+    assert.equal(await findAcceptancePathInWorkspace(ws, benchDir), null);
+  } finally {
+    await fs.rm(benchDir, { recursive: true, force: true });
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('findAcceptancePathInWorkspace() flags a byte-identical copy of a bench file, regardless of its path in the workspace', async () => {
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-'));
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-acceptance-copy-'));
+  try {
+    const benchContent = '// hidden battery assertion logic\nexport const THRESHOLD = 42;\n';
+    await fs.mkdir(path.join(benchDir, 'battery1-e2e'), { recursive: true });
+    await fs.writeFile(path.join(benchDir, 'battery1-e2e', 'check.mjs'), benchContent);
+
+    // Copied somewhere that doesn't even mention "acceptance" in its path,
+    // to prove this is a content check, not the old path-segment regex.
+    await fs.mkdir(path.join(ws, 'src', 'lib'), { recursive: true });
+    await fs.writeFile(path.join(ws, 'src', 'lib', 'check.mjs'), benchContent);
+    await initWorkspaceRepo(ws, 'test: seed');
+
+    assert.equal(await findAcceptancePathInWorkspace(ws, benchDir), 'src/lib/check.mjs');
+  } finally {
+    await fs.rm(benchDir, { recursive: true, force: true });
     await fs.rm(ws, { recursive: true, force: true });
   }
 });
@@ -536,8 +643,13 @@ test('checkGhAuthenticated() reflects whether the injected run resolves or rejec
 
 test('publishWorkspace() builds the gh repo create command and records repository in run-report.json', async () => {
   const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-'));
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
   try {
     await fs.writeFile(path.join(ws, 'run-report.json'), '{}');
+    // publishWorkspace() only ever runs after initWorkspaceRepo() in main();
+    // the guards read `git ls-files` for real, so the fixture needs a real
+    // commit even though gh/git publish calls below are stubbed.
+    await initWorkspaceRepo(ws, 'test: seed');
     const wsName = path.basename(ws);
     const expectedUrl = `https://github.com/harness-loop-graph/run-${wsName}`;
     const calls = [];
@@ -548,7 +660,7 @@ test('publishWorkspace() builds the gh repo create command and records repositor
     };
     const report = { status: 'SUCCESS' };
 
-    await publishWorkspace({ ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph', secrets: [], run });
+    await publishWorkspace({ ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir });
 
     assert.equal(report.publishError, undefined);
     assert.deepEqual(report.repository, { name: `harness-loop-graph/run-${wsName}`, url: expectedUrl });
@@ -565,14 +677,17 @@ test('publishWorkspace() builds the gh repo create command and records repositor
     assert.deepEqual(persisted.repository, report.repository);
   } finally {
     await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
   }
 });
 
-test('publishWorkspace() refuses to publish and never calls gh/git when a secret is found', async () => {
+test('publishWorkspace() refuses to publish and never calls gh/git when a secret is found in a tracked file', async () => {
   const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-secret-'));
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
   try {
     await fs.mkdir(path.join(ws, 'src'));
     await fs.writeFile(path.join(ws, 'src', 'leak.js'), "const key = 'leaked-key-abc';\n");
+    await initWorkspaceRepo(ws, 'test: seed');
     const calls = [];
     const run = async (cmd) => { calls.push(cmd); return { stdout: '', stderr: '' }; };
     const report = {};
@@ -580,7 +695,7 @@ test('publishWorkspace() refuses to publish and never calls gh/git when a secret
     await publishWorkspace({
       ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph',
       secrets: [{ label: 'MODEL_API_KEY', value: 'leaked-key-abc' }],
-      run,
+      run, benchDir,
     });
 
     assert.equal(report.publishError, 'secret detected in src/leak.js');
@@ -588,24 +703,82 @@ test('publishWorkspace() refuses to publish and never calls gh/git when a secret
     assert.equal(calls.length, 0, 'gh/git must never be invoked once a secret is found');
   } finally {
     await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
   }
 });
 
-test('publishWorkspace() refuses to publish when the workspace contains an acceptance/ path', async () => {
-  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-acceptance-'));
+test('publishWorkspace() never flags a secret planted only in a gitignored .env file', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-env-'));
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
   try {
+    await fs.writeFile(path.join(ws, '.env'), 'MODEL_API_KEY=leaked-key-abc\n');
+    await initWorkspaceRepo(ws, 'test: seed');
+    const calls = [];
+    const run = async (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      return { stdout: cmd === 'gh' ? 'https://github.com/harness-loop-graph/run-x\n' : '', stderr: '' };
+    };
+    const report = {};
+
+    await publishWorkspace({
+      ws, report, modelId: 'glm-5.2', config: 'c1', org: 'harness-loop-graph',
+      secrets: [{ label: 'MODEL_API_KEY', value: 'leaked-key-abc' }],
+      run, benchDir,
+    });
+
+    assert.equal(report.publishError, undefined);
+    assert.ok(calls.some((c) => c.cmd === 'gh'), 'gh must be called once the (gitignored) secret is correctly ignored');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('publishWorkspace() refuses to publish when the workspace contains a byte-identical copy of a bench file', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-acceptance-'));
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-'));
+  try {
+    const benchContent = '// hidden battery\n';
+    await fs.writeFile(path.join(benchDir, 'run-all.mjs'), benchContent);
     await fs.mkdir(path.join(ws, 'acceptance'), { recursive: true });
-    await fs.writeFile(path.join(ws, 'acceptance', 'run-all.mjs'), '// hidden battery');
+    await fs.writeFile(path.join(ws, 'acceptance', 'run-all.mjs'), benchContent);
+    await initWorkspaceRepo(ws, 'test: seed');
     const calls = [];
     const run = async (cmd) => { calls.push(cmd); return { stdout: '', stderr: '' }; };
     const report = {};
 
-    await publishWorkspace({ ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run });
+    await publishWorkspace({ ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir });
 
     assert.match(report.publishError, /acceptance/);
     assert.equal(calls.length, 0, 'gh/git must never be invoked once the acceptance guard trips');
   } finally {
     await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test("publishWorkspace() does not refuse for a generated app's own acceptance/ folder with different content", async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-ownacceptance-'));
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-'));
+  try {
+    await fs.writeFile(path.join(benchDir, 'run-all.mjs'), '// hidden battery\n');
+    await fs.mkdir(path.join(ws, 'acceptance'), { recursive: true });
+    await fs.writeFile(path.join(ws, 'acceptance', 'run-all.mjs'), "// the generated app's own tests\n");
+    await initWorkspaceRepo(ws, 'test: seed');
+    const calls = [];
+    const run = async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: cmd === 'gh' ? 'https://github.com/harness-loop-graph/run-x\n' : '', stderr: '' };
+    };
+    const report = {};
+
+    await publishWorkspace({ ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir });
+
+    assert.equal(report.publishError, undefined);
+    assert.ok(calls.some((c) => c.cmd === 'gh'), 'gh must be called: a same-named but different-content acceptance/ folder is not the bench');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
   }
 });
 
@@ -621,4 +794,170 @@ test('c3 nodes keep topology and verifications but use the --task-file task', ()
   }
   assert.match(overridden.find((n) => n.id === 'reviewer').task, /review-verdict\.json/);
   assert.deepEqual(buildNodes(parsed, null), spec);
+});
+
+// --- T3b: review fixes ---
+
+test('a thrown exception during the run phase (e.g. createModel() with a missing router apiKeyEnv) still writes run-report.json, creates the workspace git repo, and exits non-zero', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const runsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runsdir-exc-'));
+  const configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-exc-config-'));
+  try {
+    const configPath = path.join(configDir, 'harness-config.json');
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({ router: { routes: { longContext: { model: 'm', apiKeyEnv: 'RUNNER_TEST_UNSET_ENV_VAR' } } } }),
+    );
+    const childEnv = { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' };
+    delete childEnv.RUNNER_TEST_UNSET_ENV_VAR;
+
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--runs-dir', runsDir, '--harness-config', configPath],
+      { encoding: 'utf8', env: childEnv },
+    );
+
+    assert.notEqual(res.status, 0, res.stderr);
+    const lines = res.stdout.trim().split('\n');
+    const reportPath = lines.pop();
+    const report = JSON.parse(await fs.readFile(reportPath, 'utf-8'));
+    assert.equal(report.status, 'FAILED');
+    assert.match(report.failure, /route 'longContext' needs env var 'RUNNER_TEST_UNSET_ENV_VAR'/);
+    assert.equal(report.repoError, undefined, 'the workspace must still become a git repo despite the thrown exception');
+    await fs.access(path.join(path.dirname(reportPath), '.git'));
+  } finally {
+    await fs.rm(runsDir, { recursive: true, force: true });
+    await fs.rm(configDir, { recursive: true, force: true });
+  }
+});
+
+test('teardownDockerCompose() runs docker compose down -v in the workspace and returns null on success', async () => {
+  const calls = [];
+  const run = async (cmd, args, opts) => { calls.push({ cmd, args, opts }); return { stdout: '', stderr: '' }; };
+  const err = await teardownDockerCompose('/some/workspace', run);
+  assert.equal(err, null);
+  assert.deepEqual(calls, [{ cmd: 'docker', args: ['compose', 'down', '-v'], opts: { cwd: '/some/workspace', timeoutMs: 120_000 } }]);
+});
+
+test('teardownDockerCompose() never throws: returns a message naming the failure instead', async () => {
+  const run = async () => { throw new Error('boom'); };
+  const err = await teardownDockerCompose('/ws', run);
+  assert.match(err, /docker compose down failed: boom/);
+});
+
+test('workspaceMayHaveDockerStack() is true when --verify-cmd invokes docker compose, false for an unrelated command', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-compose-cmd-'));
+  try {
+    assert.equal(
+      await workspaceMayHaveDockerStack(ws, 'docker compose up -d --build && curl -sf http://localhost:3000/health'),
+      true,
+    );
+    assert.equal(await workspaceMayHaveDockerStack(ws, 'npm test'), false);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test("workspaceMayHaveDockerStack() is true when the workspace has its own compose file, regardless of --verify-cmd", async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-compose-file-'));
+  try {
+    await fs.writeFile(path.join(ws, 'docker-compose.yml'), 'services: {}\n');
+    assert.equal(await workspaceMayHaveDockerStack(ws, 'npm test'), true);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('clearStaleReviewVerdict() deletes an existing review-verdict.json and is a no-op when none exists', async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-verdict-'));
+  try {
+    await fs.writeFile(path.join(ws, 'review-verdict.json'), JSON.stringify({ acceptable: true }));
+    clearStaleReviewVerdict(ws);
+    await assert.rejects(fs.access(path.join(ws, 'review-verdict.json')));
+    assert.doesNotThrow(() => clearStaleReviewVerdict(ws));
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test("buildRouter() cannot be satisfied by a stale verdict once clearStaleReviewVerdict() has run for this visit", async () => {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-verdict-router-'));
+  try {
+    // A stale verdict from an earlier reviewer visit claiming acceptance...
+    await fs.writeFile(path.join(ws, 'review-verdict.json'), JSON.stringify({ acceptable: true }));
+    clearStaleReviewVerdict(ws); // ...is cleared before this visit, exactly as the c3 factory does for every reviewer node
+
+    const router = buildRouter(ws);
+    const decision = router('reviewer', { status: 'SUCCESS' }, { visits: { reviewer: 0 } });
+
+    assert.equal(decision.action, 'NEXT');
+    assert.equal(decision.node, 'reviewer');
+    assert.match(decision.reason, /verdict unreadable/);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('--max-turns/--max-steps/--tool-rounds reject non-positive-integer values with a usage error and non-zero exit', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const cases = [
+    ['--max-turns', '0'],
+    ['--max-turns', '-1'],
+    ['--max-turns', 'abc'],
+    ['--max-steps', '1.5'],
+    ['--tool-rounds', '0'],
+  ];
+  for (const [flag, value] of cases) {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', flag, value],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.notEqual(res.status, 0, `${flag} ${value} should be rejected`);
+    assert.match(res.stderr, new RegExp(`Usage: \\${flag}`), `${flag} ${value}: ${res.stderr}`);
+    assert.equal(res.stdout, '');
+  }
+});
+
+test('--max-turns/--tool-rounds accept positive integers and feed the dry-run plan', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const res = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', '--max-turns', '3', '--tool-rounds', '7'],
+    { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  const plan = JSON.parse(res.stdout);
+  assert.equal(plan.wiring.maxTurns, 3);
+  assert.equal(plan.wiring.toolRoundsPerTurn, 7);
+});
+
+test('an invalid --task-file (missing or empty) never creates a workspace under --runs-dir (validated before createWorkspace)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const runsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runsdir-taskfile-'));
+  try {
+    const missingTaskFile = path.join(runsDir, 'does-not-exist.txt');
+    const resMissing = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--runs-dir', runsDir, '--task-file', missingTaskFile],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.notEqual(resMissing.status, 0);
+    assert.match(resMissing.stderr, /Usage: --task-file/);
+
+    const emptyTaskFile = path.join(runsDir, 'empty.txt');
+    await fs.writeFile(emptyTaskFile, '   \n');
+    const resEmpty = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--runs-dir', runsDir, '--task-file', emptyTaskFile],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.notEqual(resEmpty.status, 0);
+    assert.match(resEmpty.stderr, /Usage: --task-file/);
+
+    const entries = await fs.readdir(runsDir);
+    assert.deepEqual(entries.sort(), ['empty.txt'], 'no workspace directory must have been created under --runs-dir');
+  } finally {
+    await fs.rm(runsDir, { recursive: true, force: true });
+  }
 });

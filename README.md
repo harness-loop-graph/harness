@@ -15,8 +15,11 @@ for static analysis (see `experiment/runner/README.md`).
 
 ## Quick start
 
+Run from the repository root (the `harness` build/test step uses a subshell
+so the second command still runs from the root, not from `harness/`):
+
 ```bash
-cd harness && npm install && npm run build && npm test
+(cd harness && npm install && npm run build && npm test)
 node experiment/runner/run-experiment.mjs --config c1 --dry-run
 ```
 

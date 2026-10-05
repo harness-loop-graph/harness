@@ -1,14 +1,16 @@
 # Experiment — Medical Appointments & Clinical History
 
-This repository is the **experiment bench**, not an application. It holds
-the fixed specification the generator system receives (`SPEC.md`), the
-hidden acceptance batteries (defined before the first run, never shown
-to the generator), and the experiment runner. The only thing that
-generates code is the harness (`../harness/`).
+This directory is the **experiment bench**, a sibling of `harness/` inside
+the `harness-loop-graph/harness` monorepo — not a repository of its own and
+not an application. It holds the fixed specification the generator system
+receives (`SPEC.md`), the hidden acceptance batteries (defined before the
+first run, never shown to the generator), and the experiment runner. The
+only thing that generates code is the harness (`../harness/`).
 
-Generated systems do not live here: each run builds in an isolated
-workspace under `runs/` (gitignored), and the batteries run against
-that workspace.
+Generated systems do not live here: each run builds in its own isolated
+workspace outside this monorepo entirely — by default a sibling `../pi-runs`
+directory (see `runner/README.md` for the full layout and `--runs-dir`) —
+and the batteries run against that workspace.
 
 ## Contents
 
