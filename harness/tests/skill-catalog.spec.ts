@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SkillCatalog, registerSkillTool } from '../src/components/skill-catalog.js';
-import { RegistryToolManager } from '../src/components/tool-manager.js';
+import { RegistryToolManager, MAX_READ_BYTES } from '../src/components/tool-manager.js';
 import { StubGuardrails } from '../src/components/guardrails.js';
 import { FsContextManager } from '../src/components/context-manager.js';
 import { OpenAICompatibleModelAdapter } from '../src/components/openai-compatible-adapter.js';
@@ -37,6 +37,12 @@ describe('SkillCatalog', () => {
     expect(skill?.dir).toBe(path.join(FIXTURE_SKILLS_DIR, 'writing-tests'));
     expect(skill?.body).toContain('Use `describe`/`it` blocks');
     expect(skill?.body).not.toContain('---');
+  });
+
+  it('lists companion files recursively, excluding SKILL.md, as sorted relative paths', async () => {
+    const catalog = await SkillCatalog.load([FIXTURE_SKILLS_DIR]);
+    const skill = catalog.get('writing-tests');
+    expect(skill?.files).toEqual(['helper.md', 'reference/page-object-model.md']);
   });
 
   it('errors naming the file when frontmatter is missing', async () => {
@@ -190,10 +196,11 @@ describe('load_skill tool', () => {
     const result = await manager.execute({ type: 'tool_call', tool: 'load_skill', args: { name: 'writing-tests' } });
 
     expect(result.success).toBe(true);
-    const payload = result.result as { name: string; dir: string; body: string };
+    const payload = result.result as { name: string; dir: string; body: string; files: string[] };
     expect(payload.name).toBe('writing-tests');
     expect(payload.dir).toBe(path.join(FIXTURE_SKILLS_DIR, 'writing-tests'));
     expect(payload.body).toContain('Use `describe`/`it` blocks');
+    expect(payload.files).toEqual(['helper.md', 'reference/page-object-model.md']);
   });
 
   it('fails with the list of available skills for an unknown name', async () => {
@@ -206,5 +213,116 @@ describe('load_skill tool', () => {
 
     expect(result.success).toBe(false);
     expect(String(result.result)).toContain('writing-tests');
+  });
+});
+
+describe('load_skill tool: file argument', () => {
+  let workspace: string;
+  let skillsDir: string;
+  let catalog: SkillCatalog;
+  let manager: RegistryToolManager;
+
+  beforeEach(async () => {
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-file-'));
+    skillsDir = path.join(workspace, 'skills');
+    const demoDir = path.join(skillsDir, 'demo');
+    await fs.mkdir(path.join(demoDir, 'reference'), { recursive: true });
+    await fs.writeFile(
+      path.join(demoDir, 'SKILL.md'),
+      '---\nname: demo\ndescription: demo skill\n---\nBody\n',
+    );
+    await fs.writeFile(path.join(demoDir, 'reference', 'notes.md'), 'Reference notes.\n');
+
+    // A file outside any skill directory, used to prove escape attempts are rejected.
+    await fs.mkdir(path.join(workspace, 'outside'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'outside', 'secret.md'), 'should never be readable\n');
+    await fs.symlink(
+      path.join(workspace, 'outside', 'secret.md'),
+      path.join(demoDir, 'reference', 'escape-link.md'),
+    );
+
+    catalog = await SkillCatalog.load([skillsDir]);
+    manager = new RegistryToolManager(new StubGuardrails(['load_skill']));
+    registerSkillTool(manager, catalog);
+  });
+
+  afterEach(async () => {
+    await fs.rm(workspace, { recursive: true, force: true });
+  });
+
+  it('reads a companion file by its relative path', async () => {
+    const result = await manager.execute({
+      type: 'tool_call',
+      tool: 'load_skill',
+      args: { name: 'demo', file: 'reference/notes.md' },
+    });
+
+    expect(result.success).toBe(true);
+    const payload = result.result as { name: string; file: string; content: string };
+    expect(payload.name).toBe('demo');
+    expect(payload.file).toBe('reference/notes.md');
+    expect(payload.content).toBe('Reference notes.\n');
+  });
+
+  it('rejects a ".." escape attempt', async () => {
+    const result = await manager.execute({
+      type: 'tool_call',
+      tool: 'load_skill',
+      args: { name: 'demo', file: '../../outside/secret.md' },
+    });
+
+    expect(result.success).toBe(false);
+    expect(String(result.result)).toContain('escapes');
+  });
+
+  it('rejects an absolute path', async () => {
+    const result = await manager.execute({
+      type: 'tool_call',
+      tool: 'load_skill',
+      args: { name: 'demo', file: path.join(workspace, 'outside', 'secret.md') },
+    });
+
+    expect(result.success).toBe(false);
+    expect(String(result.result)).toContain('absolute');
+  });
+
+  it('rejects a symlink that resolves outside the skill directory', async () => {
+    const result = await manager.execute({
+      type: 'tool_call',
+      tool: 'load_skill',
+      args: { name: 'demo', file: 'reference/escape-link.md' },
+    });
+
+    expect(result.success).toBe(false);
+    expect(String(result.result)).toContain('escapes');
+  });
+
+  it('rejects a file over the size cap with a clear error', async () => {
+    const demoDir = path.join(skillsDir, 'demo');
+    await fs.writeFile(path.join(demoDir, 'reference', 'big.md'), 'x'.repeat(MAX_READ_BYTES + 1));
+    const biggerCatalog = await SkillCatalog.load([skillsDir]);
+    const biggerManager = new RegistryToolManager(new StubGuardrails(['load_skill']));
+    registerSkillTool(biggerManager, biggerCatalog);
+
+    const result = await biggerManager.execute({
+      type: 'tool_call',
+      tool: 'load_skill',
+      args: { name: 'demo', file: 'reference/big.md' },
+    });
+
+    expect(result.success).toBe(false);
+    expect(String(result.result)).toContain('exceeding');
+    expect(String(result.result)).toContain(String(MAX_READ_BYTES));
+  });
+
+  it('fails with the list of available files for an unknown file', async () => {
+    const result = await manager.execute({
+      type: 'tool_call',
+      tool: 'load_skill',
+      args: { name: 'demo', file: 'nope.md' },
+    });
+
+    expect(result.success).toBe(false);
+    expect(String(result.result)).toContain('reference/notes.md');
   });
 });

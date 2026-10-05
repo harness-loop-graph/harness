@@ -63,16 +63,49 @@ description }` pairs, which `FsContextManager` (constructor now takes an
 optional `SkillCatalog`) puts on `Context.skills`, and
 `OpenAICompatibleModelAdapter` renders as an "Available skills" system-message section — only when at
 least one skill is loaded — instructing the model to call `load_skill`
-before doing work a skill covers. The full body (frontmatter stripped)
-and the skill's directory (so the model can `read_file` files the skill
-references) are only returned by the `load_skill` tool
-(`registerSkillTool`), on demand. An unknown skill name is a failed
-`ToolResult` listing the available skill names.
+before doing work a skill covers. The full body (frontmatter stripped),
+the skill's directory, and the list of companion files available inside
+it (every file under the skill directory except `SKILL.md` itself,
+recursive, POSIX-style relative paths, e.g. `reference/page-object-model.md`)
+are only returned by the `load_skill` tool (`registerSkillTool`), on
+demand. An unknown skill name is a failed `ToolResult` listing the
+available skill names.
+
+### Reading a skill's companion files
+
+Skills often reference files alongside `SKILL.md` (e.g.
+`reference/page-object-model.md`) that the model cannot otherwise open,
+because `read_file` is confined to the run workspace, not the skills
+directory. `load_skill` takes an optional `file` argument — a path
+relative to that skill's own directory, taken from the `files` list
+returned when `load_skill` is called without `file` — and returns that
+file's text content instead of the skill body:
+
+- **Confinement**: the resolved path must stay inside the skill
+  directory. Absolute paths and `..` escapes are rejected before the
+  filesystem is touched; a symlink (the companion file itself, or a
+  directory on its way to it) that resolves outside the skill directory
+  is rejected too, checked via `fs.realpath` on both the candidate path
+  and the skill directory so a symlink hop can't land outside the
+  confined tree.
+- **Size cap**: capped at the same `MAX_READ_BYTES` (256 KB) as
+  `read_file`, but unlike `read_file` (which silently truncates), an
+  over-cap file is a failed `ToolResult` naming the limit — truncating a
+  reference doc silently would be worse than telling the model to ask
+  for a narrower file.
+- **Unknown file**: a failed `ToolResult` listing the skill's available
+  companion files, same pattern as an unknown skill name.
+- Read-only, and routed through the same guardrail allowlist check as
+  every other tool call (`load_skill` must be in `allowedTools`) — there
+  is no separate execution path for the `file` argument.
 
 Tests: `tests/skill-catalog.spec.ts` covers frontmatter parsing (valid,
 missing, incomplete, duplicate), `Context.skills` population (present vs.
-absent), the adapter's conditional rendering, and `load_skill` (found vs.
-unknown).
+absent), the adapter's conditional rendering, `load_skill` without `file`
+(found vs. unknown, including the companion-file list), and `load_skill`
+with `file` (reading a nested companion file, a `..` escape, an absolute
+path, a symlink resolving outside the skill directory, the size cap, and
+an unknown file).
 
 ## Harness config loader — `src/harness-config.ts`
 

@@ -13,7 +13,9 @@ export interface ToolManager {
   execute(call: ToolCallResponse): Promise<ToolResult>;
 }
 
-const MAX_READ_BYTES = 256 * 1024;
+// Exported so other tools reading files inside the workspace/skill tree (e.g. `load_skill`'s
+// `file` argument) share the same cap instead of defining their own.
+export const MAX_READ_BYTES = 256 * 1024;
 
 /** Every call is guardrail-checked; handler failures become failed ToolResults. */
 export class RegistryToolManager implements ToolManager {

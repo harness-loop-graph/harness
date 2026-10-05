@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ToolSpec } from '../contracts/core.js';
-import type { RegistryToolManager } from './tool-manager.js';
+import { MAX_READ_BYTES, type RegistryToolManager } from './tool-manager.js';
 
 export interface SkillMeta {
   name: string;
@@ -11,6 +11,8 @@ export interface SkillMeta {
 interface SkillEntry extends SkillMeta {
   dir: string;
   body: string;
+  /** Relative (POSIX-style) paths of every companion file under `dir`, excluding `SKILL.md` itself. */
+  files: string[];
 }
 
 const FRONTMATTER_DELIMITER = '---';
@@ -62,7 +64,9 @@ export class SkillCatalog {
       if (this.entries.has(name)) {
         throw new Error(`Duplicate skill name '${name}' (already loaded, now also in '${skillFile}')`);
       }
-      this.entries.set(name, { name, description, dir: path.dirname(skillFile), body });
+      const skillDir = path.dirname(skillFile);
+      const files = await listCompanionFiles(skillDir);
+      this.entries.set(name, { name, description, dir: skillDir, body, files });
     }
   }
 
@@ -126,15 +130,111 @@ function parseSkillMd(raw: string, sourceFile: string): { name: string; descript
   return { name, description, body };
 }
 
-/** Registers `load_skill`, returning a SKILL.md body + directory so the model can read referenced files. */
+/**
+ * Recursively lists every file under `dir` (POSIX-style relative paths, sorted),
+ * excluding the top-level `SKILL.md`. Uses `fs.stat` (follows symlinks) so a
+ * symlinked file or directory is listed like a regular one; a broken symlink
+ * is silently skipped rather than failing catalog loading.
+ */
+async function listCompanionFiles(dir: string): Promise<string[]> {
+  const files: string[] = [];
+
+  async function walk(current: string, relPrefix: string): Promise<void> {
+    const names = (await fs.readdir(current)).sort(byCodePoint);
+    for (const name of names) {
+      if (relPrefix === '' && name === 'SKILL.md') continue;
+      const abs = path.join(current, name);
+      const rel = relPrefix ? `${relPrefix}/${name}` : name;
+      let stat;
+      try {
+        stat = await fs.stat(abs);
+      } catch {
+        continue; // broken symlink or disappeared between readdir and stat
+      }
+      if (stat.isDirectory()) {
+        await walk(abs, rel);
+      } else if (stat.isFile()) {
+        files.push(rel);
+      }
+    }
+  }
+
+  await walk(dir, '');
+  return files;
+}
+
+/**
+ * Resolves `file` (a path relative to `skill.dir`) and returns its text content.
+ * Rejects absolute paths, `..` escapes, and symlinks that resolve outside the
+ * skill directory (checked via `fs.realpath` on both the target and the skill
+ * directory, so a symlink hop can't land outside the confined tree). Caps size
+ * at `MAX_READ_BYTES`, same as `read_file`.
+ */
+async function readSkillFile(skill: SkillEntry, file: string): Promise<{ file: string; content: string }> {
+  if (path.isAbsolute(file)) {
+    throw new Error(`File path '${file}' must be relative to the skill directory, not absolute`);
+  }
+  const target = path.resolve(skill.dir, file);
+  const relFromDir = path.relative(skill.dir, target);
+  if (relFromDir === '' || relFromDir.startsWith('..') || path.isAbsolute(relFromDir)) {
+    throw new Error(`File path '${file}' escapes the '${skill.name}' skill directory`);
+  }
+
+  let realTarget: string;
+  try {
+    realTarget = await fs.realpath(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      throw new Error(
+        `Unknown file '${file}' in skill '${skill.name}'. Available files: ${skill.files.join(', ') || '(none)'}`,
+      );
+    }
+    throw err;
+  }
+  // Resolve the skill dir too: a symlinked companion file (or, in principle, a
+  // symlinked skill dir) must still land inside the *real* skill directory.
+  const realDir = await fs.realpath(skill.dir);
+  const relFromRealDir = path.relative(realDir, realTarget);
+  if (relFromRealDir === '' || relFromRealDir.startsWith('..') || path.isAbsolute(relFromRealDir)) {
+    throw new Error(`File path '${file}' escapes the '${skill.name}' skill directory`);
+  }
+
+  const stat = await fs.stat(realTarget);
+  if (!stat.isFile()) {
+    throw new Error(`'${file}' is not a regular file in skill '${skill.name}'`);
+  }
+  if (stat.size > MAX_READ_BYTES) {
+    throw new Error(`File '${file}' is ${stat.size} bytes, exceeding the ${MAX_READ_BYTES}-byte limit`);
+  }
+
+  const content = await fs.readFile(realTarget, 'utf8');
+  return { file, content };
+}
+
+/**
+ * Registers `load_skill`. Without `file`: the SKILL.md body, the skill's
+ * directory, and the list of companion files available inside it. With
+ * `file`: the text content of that companion file (read-only, confined to
+ * the skill directory — see `readSkillFile`).
+ */
 export function registerSkillTool(manager: RegistryToolManager, catalog: SkillCatalog): ToolSpec {
   const spec: ToolSpec = {
     name: 'load_skill',
-    description: 'Load the full instructions of an available skill by name.',
+    description:
+      "Load the full instructions of an available skill by name. Without 'file', returns the skill's " +
+      "body plus the list of companion files available inside its directory. With 'file' set to one of " +
+      "those relative paths (e.g. 'reference/page-object-model.md'), returns that file's text content " +
+      "instead. Absolute paths, '..' escapes, and symlinks resolving outside the skill directory are rejected.",
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Skill name, as listed in "Available skills"' },
+        file: {
+          type: 'string',
+          description:
+            "Optional: a companion file's path, relative to this skill's directory, as listed in the " +
+            "'files' array returned when loading the skill without this argument.",
+        },
       },
       required: ['name'],
     },
@@ -146,7 +246,14 @@ export function registerSkillTool(manager: RegistryToolManager, catalog: SkillCa
       const available = catalog.list().map((s) => s.name);
       throw new Error(`Unknown skill '${name}'. Available skills: ${available.join(', ') || '(none)'}`);
     }
-    return { name: skill.name, dir: skill.dir, body: skill.body };
+    if (args.file !== undefined) {
+      if (typeof args.file !== 'string' || args.file === '') {
+        throw new Error("Missing or invalid 'file' argument");
+      }
+      const { file, content } = await readSkillFile(skill, args.file);
+      return { name: skill.name, file, content };
+    }
+    return { name: skill.name, dir: skill.dir, body: skill.body, files: skill.files };
   });
   return spec;
 }
