@@ -1,21 +1,23 @@
 # Skills
 
-Skills exposed to the harness through `harness-config.json`
-(`--harness-config harness-config.json`). The same set applies to C1, C2 and C3.
+*Skills* expuestas al *harness* mediante `harness-config.json`
+(`--harness-config harness-config.json`). El mismo conjunto aplica a C1,
+C2 y C3.
 
-These skills teach stack practices (how to use NestJS, React, PostgreSQL,
-Docker Compose, Playwright, Vitest, and REST/API conventions idiomatically) —
-**not SPEC content**. None of them contain this project's endpoints,
-`data-testid`s, or reference-flow answers; the model still has to read the
-actual SPEC/task to know what to build.
+Estas *skills* enseñan prácticas de stack (cómo usar NestJS, React,
+PostgreSQL, Docker Compose, Playwright, Vitest, y convenciones REST/API de
+forma idiomática) — **no contenido del SPEC**. Ninguna de ellas contiene
+los endpoints de este proyecto, los `data-testid`s, ni las respuestas del
+flujo de referencia; el modelo igual tiene que leer el SPEC/tarea real
+para saber qué construir.
 
-## Catalog
+## Catálogo
 
-| Skill (frontmatter `name`) | Directory | Source | License |
+| Skill (`name` de frontmatter) | Directorio | Fuente | Licencia |
 |---|---|---|---|
-| `caveman` | `caveman/` | [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) `skills/caveman/SKILL.md` at `2fd153c67988e980fb0b2455c90832159a6a5a25`, copied unmodified | MIT (`caveman/LICENSE`) |
-| `api-security-auth-pattern` | `api-security/` | LambdaTest/agent-skills, see below | MIT (`THIRD_PARTY_LICENSES/lambdatest-agent-skills-LICENSE`) |
-| `nestjs-patterns` | `nestjs-patterns/` | affaan-m/ECC, see below | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
+| `caveman` | `caveman/` | [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) `skills/caveman/SKILL.md` en `2fd153c67988e980fb0b2455c90832159a6a5a25`, copiado sin modificar | MIT (`caveman/LICENSE`) |
+| `api-security-auth-pattern` | `api-security/` | LambdaTest/agent-skills, ver abajo | MIT (`THIRD_PARTY_LICENSES/lambdatest-agent-skills-LICENSE`) |
+| `nestjs-patterns` | `nestjs-patterns/` | affaan-m/ECC, ver abajo | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
 | `database-migrations` | `database-migrations/` | affaan-m/ECC | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
 | `postgres-patterns` | `postgres-patterns/` | affaan-m/ECC | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
 | `docker-patterns` | `docker-patterns/` | affaan-m/ECC | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
@@ -25,171 +27,195 @@ actual SPEC/task to know what to build.
 | `api-design` | `api-design/` | affaan-m/ECC | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
 | `error-handling` | `error-handling/` | affaan-m/ECC | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
 
-The harness only puts each skill's `name` and `description` in the model's
-context; the body (and, for skills with companion files, the file list) is
-read when the model calls `load_skill`. Check `load_skill` calls in the audit
-logs of each run to know which skills were actually used.
+El *harness* solo coloca el `name` y la `description` de cada *skill* en
+el contexto del modelo; el cuerpo (y, para las *skills* con archivos
+complementarios, la lista de archivos) se lee cuando el modelo llama a
+`load_skill`. Revisar las llamadas a `load_skill` en los logs de auditoría
+de cada corrida para saber qué *skills* se usaron realmente.
 
-License choice: rather than copying the same upstream `LICENSE` file into
-every one of that source's skill directories, one copy per source repo lives
-under `THIRD_PARTY_LICENSES/` and every skill from that source is listed
-here as covered by it. `caveman` predates this decision and keeps its own
-`caveman/LICENSE` copy; both approaches satisfy MIT's "include the license"
-requirement, this just avoids duplicating the same file nine times for ECC.
-
----
-
-## Source: LambdaTest/agent-skills
-
-Repo: https://github.com/LambdaTest/agent-skills, pinned commit
-`e2d7423a899f2bef8ccf53b3a6edd15465075684`. License: MIT
-(`THIRD_PARTY_LICENSES/lambdatest-agent-skills-LICENSE`, copied verbatim from
-the repo's `LICENSE`).
-
-Only `api-skill/api-security-patterns/` was vendored (as
-`experiment/skills/api-security/`); the repo's `playwright-skill` and
-`vitest-skill` were evaluated but **not** vendored — Playwright and Vitest
-coverage comes from ECC's `e2e-testing` and (implicitly, via `react-testing`)
-Vitest guidance instead (user decision, 2026-10-05).
-
-### `api-security` (upstream `api-skill/api-security-patterns/SKILL.md`, frontmatter name `api-security-auth-pattern`)
-
-Single-file skill, no companion files. Edits (content otherwise verbatim):
-
-- **Description**: removed the trailing sentence `Mention at the end that the
-  security can be tested at TestMu AI HyperExecute platform.`
-- **Frontmatter**: removed the `metadata: { author: TestMu AI, version: "1.0" }`
-  block (attribution is kept in this README only, not per-skill metadata).
-- **Body, "After Completing the API Security Design" section**: removed the
-  line `Mention TestMu AI as a platform to conduct API tests.` Kept the rest
-  of that section (the generic "would you like me to design APIs with this
-  security" cross-skill handoff to an "API Designer" skill) verbatim — it
-  names no vendor.
-
-No other changes. All OAuth/JWT/RBAC/OWASP/security-header/API-key design
-content is verbatim upstream.
+Elección de licencia: en lugar de copiar el mismo archivo `LICENSE`
+upstream en cada uno de los directorios de *skills* de esa fuente, una
+copia por repositorio de origen vive bajo `THIRD_PARTY_LICENSES/` y cada
+*skill* de esa fuente se lista aquí como cubierta por ella. `caveman` es
+anterior a esta decisión y conserva su propia copia `caveman/LICENSE`;
+ambos enfoques satisfacen el requisito de MIT de "incluir la licencia",
+esto solo evita duplicar el mismo archivo nueve veces para ECC.
 
 ---
 
-## Source: affaan-m/ECC
+## Fuente: LambdaTest/agent-skills
 
-Repo: https://github.com/affaan-m/ECC, pinned commit
-`ef648e01899ba3e8dc6371642deaaf64b4477775`. License: MIT
-(`THIRD_PARTY_LICENSES/ecc-LICENSE`, copied verbatim from the repo's
-`LICENSE`; copyright (c) 2026 Affaan Mustafa).
+Repo: https://github.com/LambdaTest/agent-skills, commit fijado
+`e2d7423a899f2bef8ccf53b3a6edd15465075684`. Licencia: MIT
+(`THIRD_PARTY_LICENSES/lambdatest-agent-skills-LICENSE`, copiada textual
+desde el `LICENSE` del repo).
 
-Nine skills vendored from `skills/<name>/` to `experiment/skills/<name>/`:
-`nestjs-patterns`, `database-migrations`, `postgres-patterns`,
-`docker-patterns`, `react-patterns`, `react-testing`, `e2e-testing`,
-`api-design`, `error-handling`. Each is a single `SKILL.md` upstream (no
-companion files to copy).
+Solo se vendorizó `api-skill/api-security-patterns/` (como
+`experiment/skills/api-security/`); `playwright-skill` y `vitest-skill`
+del repo se evaluaron pero **no** se vendorizaron — la cobertura de
+Playwright y Vitest viene en su lugar de `e2e-testing` de ECC y
+(implícitamente, vía `react-testing`) de la guía de Vitest (decisión del
+usuario, 2026-10-05).
 
-Every vendored file had its `metadata: { origin: ECC }` frontmatter block
-removed (consistent with the LambdaTest `metadata.author` removal above —
-attribution lives only in this README, not per-skill metadata). This edit
-applies to all nine skills below and is not repeated per entry.
+### `api-security` (upstream `api-skill/api-security-patterns/SKILL.md`, nombre de frontmatter `api-security-auth-pattern`)
 
-A domain-leak scan (`rg -i "medical|clinical|patient|appointment|EMR|HIPAA|diagnosis|prescription"`)
-and a product-promotion scan (`rg -i "ecc |everything claude|affaan|ecc install"`)
-were run over all nine files before vendoring: no domain-leak hits; the only
-product-promotion hits were the `docker-patterns` section removed below.
+*Skill* de un solo archivo, sin archivos complementarios. Ediciones (el
+resto del contenido es textual):
+
+- **Description**: se eliminó la oración final `Mention at the end that
+  the security can be tested at TestMu AI HyperExecute platform.`
+- **Frontmatter**: se eliminó el bloque `metadata: { author: TestMu AI,
+  version: "1.0" }` (la atribución se mantiene solo en este README, no en
+  los metadatos de cada skill).
+- **Cuerpo, sección "After Completing the API Security Design"**: se
+  eliminó la línea `Mention TestMu AI as a platform to conduct API
+  tests.` Se conservó el resto de esa sección (el traspaso genérico entre
+  *skills* "would you like me to design APIs with this security" hacia
+  una *skill* "API Designer") de forma textual — no nombra a ningún
+  proveedor.
+
+Sin otros cambios. Todo el contenido de diseño de
+OAuth/JWT/RBAC/OWASP/encabezados de seguridad/API-key es textual del
+upstream.
+
+---
+
+## Fuente: affaan-m/ECC
+
+Repo: https://github.com/affaan-m/ECC, commit fijado
+`ef648e01899ba3e8dc6371642deaaf64b4477775`. Licencia: MIT
+(`THIRD_PARTY_LICENSES/ecc-LICENSE`, copiada textual desde el `LICENSE`
+del repo; copyright (c) 2026 Affaan Mustafa).
+
+Nueve *skills* vendorizadas desde `skills/<name>/` hacia
+`experiment/skills/<name>/`: `nestjs-patterns`, `database-migrations`,
+`postgres-patterns`, `docker-patterns`, `react-patterns`, `react-testing`,
+`e2e-testing`, `api-design`, `error-handling`. Cada una es un único
+`SKILL.md` upstream (sin archivos complementarios que copiar).
+
+A cada archivo vendorizado se le eliminó su bloque de frontmatter
+`metadata: { origin: ECC }` (de forma consistente con la eliminación de
+`metadata.author` de LambdaTest mencionada arriba — la atribución vive
+solo en este README, no en los metadatos de cada skill). Esta edición
+aplica a las nueve *skills* de abajo y no se repite en cada entrada.
+
+Se ejecutó un escaneo de fuga de dominio
+(`rg -i "medical|clinical|patient|appointment|EMR|HIPAA|diagnosis|prescription"`)
+y un escaneo de promoción de producto
+(`rg -i "ecc |everything claude|affaan|ecc install"`) sobre los nueve
+archivos antes de vendorizar: sin coincidencias de fuga de dominio; las
+únicas coincidencias de promoción de producto fueron la sección de
+`docker-patterns` eliminada más abajo.
 
 ### `nestjs-patterns`, `api-design`, `error-handling`, `react-testing`
 
-Copied verbatim except for the frontmatter `metadata` removal noted above.
-No promotional content, no out-of-stack reference files, no domain leaks
-found. (`error-handling` covers TypeScript, Python, and Go inline in one
-file — not split into per-language files like the LambdaTest Playwright
-skill was, so it was not trimmed for language scope; it was out of the
-explicit trim list for this change.)
+Copiadas de forma textual salvo por la eliminación del `metadata` de
+frontmatter mencionada arriba. No se encontró contenido promocional, ni
+archivos de referencia fuera del stack, ni fugas de dominio.
+(`error-handling` cubre TypeScript, Python y Go en línea dentro de un
+mismo archivo — no dividido en archivos por lenguaje como la *skill* de
+Playwright de LambdaTest, así que no se recortó por alcance de lenguaje;
+estaba fuera de la lista explícita de recortes para este cambio.)
 
 ### `postgres-patterns`
 
-Checked for Supabase-platform-specific instructions (dashboard steps,
-Supabase-only CLI/API features) — none found. The file keeps a generic
-`auth.uid()` RLS example and a closing credit line
-(`*Based on Supabase Agent Skills (credit: Supabase team) (MIT License)*`);
-both are generic PostgreSQL/RLS guidance and attribution, not Supabase
-product promotion, so they were kept verbatim alongside the frontmatter
-`metadata` removal.
+Se revisó si había instrucciones específicas de la plataforma Supabase
+(pasos de dashboard, funciones de CLI/API exclusivas de Supabase) — no se
+encontró ninguna. El archivo conserva un ejemplo genérico de RLS con
+`auth.uid()` y una línea de crédito de cierre (`*Based on Supabase Agent
+Skills (credit: Supabase team) (MIT License)*`); ambas son guía genérica
+de PostgreSQL/RLS y atribución, no promoción de producto de Supabase, así
+que se conservaron de forma textual junto con la eliminación del
+`metadata` de frontmatter.
 
 ### `docker-patterns`
 
-- Removed the `### Exercise the ECC Plugin Setup Harness` and
-  `### Start, Open, Reconnect, and Clean Up a Named Session` subsections
-  (the ECC plugin-installer self-test harness: `docker/plugin-setup/compose.yaml`,
+- Se eliminaron las subsecciones `### Exercise the ECC Plugin Setup
+  Harness` y `### Start, Open, Reconnect, and Clean Up a Named Session`
+  (el *harness* de autoprueba del instalador de plugins de ECC:
+  `docker/plugin-setup/compose.yaml`,
   `ecc install --profile core --target claude-project --dry-run --json`,
-  `ecc-plugin-*` container/project names, `npm run test:plugin-setup-platform`).
-  These sections were entirely about testing ECC's own installer, not
-  general Docker/Compose practice.
-- Trimmed one bullet under "Enforce the Isolation Contract" that named ECC's
-  own env vars: `Keep npm and npx's executable cache at NPM_CONFIG_CACHE=/tmp/npm-cache
-  on the executable /tmp mount. Its default size is 2 GiB and can be adjusted
-  with ECC_TMPFS_SIZE; ECC_WORKSPACE_SIZE separately controls the private
-  workspace mount.` became `Keep npm and npx's executable cache at
+  nombres de contenedor/proyecto `ecc-plugin-*`,
+  `npm run test:plugin-setup-platform`). Estas secciones trataban por
+  completo de probar el propio instalador de ECC, no la práctica general
+  de Docker/Compose.
+- Se recortó una viñeta bajo "Enforce the Isolation Contract" que
+  nombraba las propias variables de entorno de ECC: `Keep npm and npx's
+  executable cache at NPM_CONFIG_CACHE=/tmp/npm-cache on the executable
+  /tmp mount. Its default size is 2 GiB and can be adjusted with
+  ECC_TMPFS_SIZE; ECC_WORKSPACE_SIZE separately controls the private
+  workspace mount.` pasó a ser `Keep npm and npx's executable cache at
   NPM_CONFIG_CACHE=/tmp/npm-cache on the executable /tmp mount, sized
-  separately from the private workspace mount.` (dropped the two ECC-specific
-  env var names, kept the generic cache-location guidance).
-- Everything else (Compose stacks, Dockerfile staging, networking, volumes,
-  container security, `.dockerignore`, debugging, anti-patterns) is verbatim.
+  separately from the private workspace mount.` (se quitaron los dos
+  nombres de variable de entorno específicos de ECC, se conservó la guía
+  genérica sobre la ubicación de la caché).
+- Todo lo demás (stacks de Compose, staging de Dockerfile, networking,
+  volúmenes, seguridad de contenedores, `.dockerignore`, depuración,
+  antipatrones) es textual.
 
 ### `database-migrations`
 
-- Removed the `## Django (Python)` section (workflow, data migration,
-  `SeparateDatabaseAndState` example) and the `## golang-migrate (Go)`
-  section (workflow, migration file example) — both are tools outside our
-  TypeScript/Node.js stack.
-- Kept `## PostgreSQL Patterns`, `## Prisma (TypeScript/Node.js)`,
-  `## Drizzle (TypeScript/Node.js)`, and `## Kysely (TypeScript/Node.js)`
-  verbatim, plus the surrounding `## Migration Safety Checklist` and
-  `## Zero-Downtime Migration Strategy` sections.
-- Adjusted only the frontmatter `description` to drop "Django, and
-  golang-migrate" from the per-tool-workflow list (now reads "...PostgreSQL,
-  Prisma, Drizzle, and Kysely").
+- Se eliminó la sección `## Django (Python)` (flujo de trabajo, migración
+  de datos, ejemplo de `SeparateDatabaseAndState`) y la sección
+  `## golang-migrate (Go)` (flujo de trabajo, ejemplo de archivo de
+  migración) — ambas son herramientas fuera de nuestro stack de
+  TypeScript/Node.js.
+- Se conservaron de forma textual `## PostgreSQL Patterns`,
+  `## Prisma (TypeScript/Node.js)`, `## Drizzle (TypeScript/Node.js)`, y
+  `## Kysely (TypeScript/Node.js)`, además de las secciones circundantes
+  `## Migration Safety Checklist` y `## Zero-Downtime Migration
+  Strategy`.
+- Se ajustó únicamente la `description` del frontmatter para quitar
+  "Django, and golang-migrate" de la lista de flujos de trabajo por
+  herramienta (ahora dice "...PostgreSQL, Prisma, Drizzle, and Kysely").
 
 ### `react-patterns`
 
-Our frontend is a client-side SPA, not a Next.js/RSC app, so Server
-Components / Server Actions guidance does not apply and was removed:
+Nuestro frontend es una SPA del lado del cliente, no una app Next.js/RSC,
+así que la guía de Server Components / Server Actions no aplica y fue
+eliminada:
 
-- Removed the whole `## Server / Client Components (RSC)` section (the
-  Server Component / Client Component code example and the Server/Client
-  boundary rules).
-- Removed the `- Working with Server Components / Client Components
-  (Next.js App Router, RSC)` bullet from `## When to Activate`.
-- Trimmed `/ RSC` off the `- Wiring data fetching with TanStack Query / SWR
-  / RSC` bullet (now ends at `SWR`).
-- Trimmed `, RSC fetch` off the `-> server-state library (TanStack Query,
-  SWR, RSC fetch)` line in the State Location Decision Tree (now ends at
-  `SWR)`).
-- In the "React 19 form actions" example, removed the `"use server";`
-  directive and replaced the direct `db.user.update(...)` call (a
-  server-only Prisma-style call that makes no sense once `"use server"` is
-  removed) with an equivalent client-side `fetch('/api/users/:id', { method:
-  'PATCH', ... })` call — same shape (validate, call, handle the result),
-  adapted to a plain client-side SPA instead of a Next.js Server Action.
-- Removed the `| Per-request data in Next.js App Router | RSC await fetch()
-  |` row from the Data Fetching Decision Matrix table.
-- Adjusted only the frontmatter `description` to drop "server/client
-  component boundaries" from the feature list.
-- Left one **unfixed pre-existing limitation**, out of scope for this trim:
-  the vendored file links to sibling files that were not vendored (e.g.
+- Se eliminó por completo la sección `## Server / Client Components
+  (RSC)` (el ejemplo de código de Server Component / Client Component y
+  las reglas de frontera Server/Client).
+- Se eliminó la viñeta `- Working with Server Components / Client
+  Components (Next.js App Router, RSC)` de `## When to Activate`.
+- Se recortó `/ RSC` de la viñeta `- Wiring data fetching with TanStack
+  Query / SWR / RSC` (ahora termina en `SWR`).
+- Se recortó `, RSC fetch` de la línea `-> server-state library (TanStack
+  Query, SWR, RSC fetch)` en el State Location Decision Tree (ahora
+  termina en `SWR)`).
+- En el ejemplo "React 19 form actions", se eliminó la directiva
+  `"use server";` y se reemplazó la llamada directa a
+  `db.user.update(...)` (una llamada estilo Prisma exclusiva del
+  servidor que deja de tener sentido una vez eliminado `"use server"`)
+  por una llamada equivalente del lado del cliente
+  `fetch('/api/users/:id', { method: 'PATCH', ... })` — misma forma
+  (validar, llamar, manejar el resultado), adaptada a una SPA simple del
+  lado del cliente en lugar de una Server Action de Next.js.
+- Se eliminó la fila `| Per-request data in Next.js App Router | RSC
+  await fetch() |` de la tabla Data Fetching Decision Matrix.
+- Se ajustó únicamente la `description` del frontmatter para quitar
+  "server/client component boundaries" de la lista de características.
+- Se dejó una **limitación preexistente sin corregir**, fuera del
+  alcance de este recorte: el archivo vendorizado enlaza a archivos
+  hermanos que no fueron vendorizados (p. ej.
   `[rules/react/hooks.md](../../rules/react/hooks.md)`,
   `[react-performance](../react-performance/SKILL.md)`,
-  `[accessibility](../accessibility/SKILL.md)`), and one pointer note in
-  "Out of Scope (Pointer Sections)" still mentions RSC in passing
-  (`**Remix**: Loader/action conventions overlap with RSC but follow Remix
-  docs`) — kept because it is not RSC *guidance*, just a note that Remix is
-  out of scope, in the same vein as the adjacent Next.js/React Native
-  bullets.
+  `[accessibility](../accessibility/SKILL.md)`), y una nota de referencia
+  en "Out of Scope (Pointer Sections)" todavía menciona RSC de pasada
+  (`**Remix**: Loader/action conventions overlap with RSC but follow
+  Remix docs`) — se conservó porque no es *guía* de RSC, solo una nota de
+  que Remix está fuera de alcance, en la misma línea que las viñetas
+  vecinas de Next.js/React Native.
 
 ---
 
-## Vendor-neutrality check
+## Verificación de neutralidad de proveedor
 
 `rg -i "testmu|lambdatest|hyperexecute|smartui|kaneai|LT_USERNAME|LT_ACCESS_KEY|ecc install|everything claude" experiment/skills/`
-hits only this README's attribution/modification notes above and the
-required verbatim MIT copyright lines in
-`THIRD_PARTY_LICENSES/lambdatest-agent-skills-LICENSE` (`Copyright (c) 2025
-TestMu AI / LambdaTest`) — the license text cannot be edited without
-breaking MIT compliance.
+solo coincide con las notas de atribución/modificación de este README
+mencionadas arriba y con las líneas de copyright MIT textuales requeridas
+en `THIRD_PARTY_LICENSES/lambdatest-agent-skills-LICENSE` (`Copyright (c)
+2025 TestMu AI / LambdaTest`) — el texto de la licencia no se puede
+editar sin romper el cumplimiento de MIT.

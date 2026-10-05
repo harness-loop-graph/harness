@@ -1,147 +1,168 @@
-# MCP tools and skills
+# Herramientas MCP y skills
 
-Two additions on top of the C1/C2/C3 harness: tools sourced from external
-MCP servers, and agent skills (`SKILL.md`) loaded on demand. Both go through
-the same guardrail + audit path as the built-in tools — there is no
-parallel execution path for them.
+Dos añadidos sobre el *harness* C1/C2/C3: herramientas provenientes de
+servidores MCP externos, y *skills* de agente (`SKILL.md`) cargadas a
+demanda. Ambas pasan por el mismo camino de *guardrails* y auditoría que
+las herramientas incorporadas — no existe una ruta de ejecución paralela
+para ellas.
 
-## MCP tool provider — `McpToolProvider`
+## Proveedor de herramientas MCP — `McpToolProvider`
 
-`src/components/mcp-tool-provider.ts`. Config shape matches the common
-`{ mcpServers: { name: { command, args, env, cwd } } }` convention.
+`src/components/mcp-tool-provider.ts`. La forma de la configuración sigue
+la convención común `{ mcpServers: { name: { command, args, env, cwd } } }`.
 
-- `connect()` spawns each server over stdio (`StdioClientTransport`), calls
-  `listTools()`, and builds one `ToolSpec` per remote tool, named
-  `mcp__<server>__<tool>` (sanitized to `[a-zA-Z0-9_-]`, capped at 64
-  chars). A connection failure throws immediately — a silently missing
-  server would corrupt an experiment run, so there is no soft-fail path.
-  If any server fails to connect, or two tools sanitize to the same name,
-  every client already opened is closed before the error is rethrown — a
-  partial `connect()` never leaks server processes.
-- A tool-name collision — two MCP tools sanitizing to the same name, or an
-  MCP tool colliding with a tool already registered in the target manager
-  (a built-in, `load_skill`, or another MCP tool) — throws a clear error
-  naming both origins instead of silently overriding the earlier
-  registration.
-- `registerInto(manager)` registers the discovered tools (spec + handler)
-  into a `RegistryToolManager`, so every call is guardrail-checked and
-  audited exactly like `write_file`/`read_file`/`run_command`. `connect()`
-  and `registerInto()` are split on purpose: one MCP connection can be
-  shared across several `RegistryToolManager` instances, which is what the
-  experiment runner does for C3 (one harness, and one tool manager, per
-  graph node — see `experiment/runner/run-experiment.mjs`).
-- The registered handler calls `client.callTool(...)`; a result with
-  `isError: true` is turned into a thrown error (`RegistryToolManager`
-  turns that into a failed `ToolResult`), and a normal result's `text`
-  content parts are joined and returned.
-- `close()` closes every open client connection and drops the discovered
-  registrations (their handlers would otherwise call closed clients).
+- `connect()` lanza cada servidor sobre stdio (`StdioClientTransport`),
+  llama a `listTools()`, y construye un `ToolSpec` por cada herramienta
+  remota, nombrado `mcp__<server>__<tool>` (saneado a `[a-zA-Z0-9_-]`, con
+  un tope de 64 caracteres). Un fallo de conexión lanza una excepción de
+  inmediato — un servidor ausente de forma silenciosa corrompería una
+  corrida del experimento, así que no existe una ruta de fallo silencioso.
+  Si algún servidor falla al conectar, o dos herramientas sanean al mismo
+  nombre, todo cliente ya abierto se cierra antes de relanzar el error —
+  un `connect()` parcial nunca deja procesos de servidor huérfanos.
+- Una colisión de nombre de herramienta — dos herramientas MCP que sanean
+  al mismo nombre, o una herramienta MCP que choca con una herramienta ya
+  registrada en el gestor de destino (una incorporada, `load_skill`, u
+  otra herramienta MCP) — lanza un error claro que nombra ambos orígenes
+  en lugar de sobrescribir en silencio el registro anterior.
+- `registerInto(manager)` registra las herramientas descubiertas
+  (especificación + handler) en un `RegistryToolManager`, de modo que cada
+  llamada pasa por la verificación de *guardrails* y queda auditada
+  exactamente igual que `write_file`/`read_file`/`run_command`.
+  `connect()` y `registerInto()` están separados a propósito: una misma
+  conexión MCP puede compartirse entre varias instancias de
+  `RegistryToolManager`, que es justo lo que hace el ejecutor del
+  experimento para C3 (un *harness*, y un gestor de herramientas, por
+  nodo del grafo — ver `experiment/runner/run-experiment.mjs`).
+- El handler registrado llama a `client.callTool(...)`; un resultado con
+  `isError: true` se convierte en un error lanzado (`RegistryToolManager`
+  lo transforma en un `ToolResult` fallido), y las partes de contenido
+  `text` de un resultado normal se unen y se devuelven.
+- `close()` cierra toda conexión de cliente abierta y descarta los
+  registros descubiertos (de lo contrario sus handlers llamarían a
+  clientes ya cerrados).
 
-Tests: `tests/mcp-tool-provider.spec.ts` exercises a tiny fixture MCP
-server (`tests/fixtures/mcp-fixture-server.mjs`, built on the SDK's
-low-level `Server` + `StdioServerTransport`) end to end, including the
-`isError` path and sharing one connection across two tool managers.
+Tests: `tests/mcp-tool-provider.spec.ts` ejercita un pequeño servidor MCP
+de fixture (`tests/fixtures/mcp-fixture-server.mjs`, construido sobre el
+`Server` de bajo nivel del SDK + `StdioServerTransport`) de punta a punta,
+incluyendo la ruta de `isError` y el compartir una conexión entre dos
+gestores de herramientas.
 
-## Skill catalog — `SkillCatalog`
+## Catálogo de skills — `SkillCatalog`
 
-`src/components/skill-catalog.ts`. Loads every `<dir>/<skill>/SKILL.md`
-under one or more directories, given directories processed in the order
-passed in and, within each directory, subdirectories sorted by name — so
-`list()` and the rendered "Available skills" prompt are stable across
-runs regardless of the OS's `readdir` order. `list()` itself is also
-sorted by skill name. A skill file must start with a `---` frontmatter
-block containing `name` and `description` (simple `key: value` lines,
-quoted values allowed — no YAML dependency). Missing/invalid frontmatter
-and duplicate skill names both throw, naming the offending file. A missing
-configured skills directory throws; inside a directory, only a missing
-`SKILL.md` (ENOENT) is treated as "not a skill" and skipped — any other
-read failure (permissions, a `SKILL.md` that is itself a directory, etc.)
-fails fast, naming the file.
+`src/components/skill-catalog.ts`. Carga cada `<dir>/<skill>/SKILL.md`
+bajo uno o más directorios, procesando los directorios en el orden en que
+se pasan y, dentro de cada directorio, los subdirectorios ordenados por
+nombre — de modo que `list()` y el prompt "Available skills" renderizado
+son estables entre corridas sin importar el orden de `readdir` del
+sistema operativo. `list()` en sí también queda ordenado por nombre de
+*skill*. Un archivo de *skill* debe comenzar con un bloque de frontmatter
+`---` que contenga `name` y `description` (líneas simples `key: value`,
+se permiten valores entre comillas — sin dependencia de YAML). Un
+frontmatter ausente o inválido y los nombres de *skill* duplicados lanzan
+una excepción en ambos casos, nombrando el archivo responsable. Un
+directorio de *skills* configurado que falta lanza una excepción; dentro
+de un directorio, solo un `SKILL.md` ausente (ENOENT) se trata como "no es
+una skill" y se omite — cualquier otro fallo de lectura (permisos, un
+`SKILL.md` que es en realidad un directorio, etc.) falla de inmediato,
+nombrando el archivo.
 
-Progressive disclosure: `catalog.list()` returns only `{ name,
-description }` pairs, which `FsContextManager` (constructor now takes an
-optional `SkillCatalog`) puts on `Context.skills`, and
-`OpenAICompatibleModelAdapter` renders as an "Available skills" system-message section — only when at
-least one skill is loaded — instructing the model to call `load_skill`
-before doing work a skill covers. The full body (frontmatter stripped),
-the skill's directory, and the list of companion files available inside
-it (every file under the skill directory except `SKILL.md` itself,
-recursive, POSIX-style relative paths, e.g. `reference/page-object-model.md`)
-are only returned by the `load_skill` tool (`registerSkillTool`), on
-demand. An unknown skill name is a failed `ToolResult` listing the
-available skill names.
+Divulgación progresiva: `catalog.list()` devuelve solo pares `{ name,
+description }`, que `FsContextManager` (cuyo constructor ahora acepta un
+`SkillCatalog` opcional) coloca en `Context.skills`, y que
+`OpenAICompatibleModelAdapter` renderiza como una sección de mensaje de
+sistema "Available skills" — solo cuando hay al menos una skill cargada —
+instruyendo al modelo a llamar a `load_skill` antes de hacer trabajo que
+una skill cubra. El cuerpo completo (sin el frontmatter), el directorio de
+la skill, y la lista de archivos complementarios disponibles dentro de
+ella (todo archivo bajo el directorio de la skill salvo el propio
+`SKILL.md`, de forma recursiva, con rutas relativas estilo POSIX, p. ej.
+`reference/page-object-model.md`) solo los devuelve la herramienta
+`load_skill` (`registerSkillTool`), a demanda. Un nombre de skill
+desconocido produce un `ToolResult` fallido que lista los nombres de
+skill disponibles.
 
-### Reading a skill's companion files
+### Lectura de los archivos complementarios de una skill
 
-Skills often reference files alongside `SKILL.md` (e.g.
-`reference/page-object-model.md`) that the model cannot otherwise open,
-because `read_file` is confined to the run workspace, not the skills
-directory. `load_skill` takes an optional `file` argument — a path
-relative to that skill's own directory, taken from the `files` list
-returned when `load_skill` is called without `file` — and returns that
-file's text content instead of the skill body:
+Las skills suelen referenciar archivos junto a `SKILL.md` (p. ej.
+`reference/page-object-model.md`) que el modelo no puede abrir de otro
+modo, porque `read_file` está confinado al espacio de trabajo de la
+corrida, no al directorio de skills. `load_skill` acepta un argumento
+opcional `file` — una ruta relativa al propio directorio de esa skill,
+tomada de la lista `files` que se devuelve cuando se llama a `load_skill`
+sin `file` — y devuelve el contenido de texto de ese archivo en lugar del
+cuerpo de la skill:
 
-- **Confinement**: the resolved path must stay inside the skill
-  directory. Absolute paths and `..` escapes are rejected before the
-  filesystem is touched; a symlink (the companion file itself, or a
-  directory on its way to it) that resolves outside the skill directory
-  is rejected too, checked via `fs.realpath` on both the candidate path
-  and the skill directory so a symlink hop can't land outside the
-  confined tree.
-- **Size cap**: capped at the same `MAX_READ_BYTES` (256 KB) as
-  `read_file`, but unlike `read_file` (which silently truncates), an
-  over-cap file is a failed `ToolResult` naming the limit — truncating a
-  reference doc silently would be worse than telling the model to ask
-  for a narrower file.
-- **Unknown file**: a failed `ToolResult` listing the skill's available
-  companion files, same pattern as an unknown skill name.
-- Read-only, and routed through the same guardrail allowlist check as
-  every other tool call (`load_skill` must be in `allowedTools`) — there
-  is no separate execution path for the `file` argument.
+- **Confinamiento**: la ruta resuelta debe permanecer dentro del
+  directorio de la skill. Las rutas absolutas y los escapes `..` se
+  rechazan antes de tocar el sistema de archivos; un symlink (ya sea el
+  propio archivo complementario, o un directorio en el camino hacia él)
+  que resuelva fuera del directorio de la skill también se rechaza,
+  verificado mediante `fs.realpath` tanto sobre la ruta candidata como
+  sobre el directorio de la skill, de modo que un salto de symlink no
+  pueda terminar fuera del árbol confinado.
+- **Tope de tamaño**: topeado al mismo `MAX_READ_BYTES` (256 KB) que
+  `read_file`, pero a diferencia de `read_file` (que trunca en silencio),
+  un archivo que excede el tope produce un `ToolResult` fallido que
+  nombra el límite — truncar en silencio un documento de referencia sería
+  peor que decirle al modelo que pida un archivo más acotado.
+- **Archivo desconocido**: un `ToolResult` fallido que lista los archivos
+  complementarios disponibles de la skill, el mismo patrón que un nombre
+  de skill desconocido.
+- Solo lectura, y enrutado a través de la misma verificación de lista
+  blanca de *guardrails* que cualquier otra llamada a herramienta
+  (`load_skill` debe estar en `allowedTools`) — no hay una ruta de
+  ejecución separada para el argumento `file`.
 
-Tests: `tests/skill-catalog.spec.ts` covers frontmatter parsing (valid,
-missing, incomplete, duplicate), `Context.skills` population (present vs.
-absent), the adapter's conditional rendering, `load_skill` without `file`
-(found vs. unknown, including the companion-file list), and `load_skill`
-with `file` (reading a nested companion file, a `..` escape, an absolute
-path, a symlink resolving outside the skill directory, the size cap, and
-an unknown file).
+Tests: `tests/skill-catalog.spec.ts` cubre el parseo de frontmatter
+(válido, ausente, incompleto, duplicado), la población de
+`Context.skills` (presente vs. ausente), el renderizado condicional del
+adapter, `load_skill` sin `file` (encontrada vs. desconocida, incluyendo
+la lista de archivos complementarios), y `load_skill` con `file` (lectura
+de un archivo complementario anidado, un escape `..`, una ruta absoluta,
+un symlink que resuelve fuera del directorio de la skill, el tope de
+tamaño, y un archivo desconocido).
 
-## Harness config loader — `src/harness-config.ts`
+## Cargador de configuración del harness — `src/harness-config.ts`
 
-`loadHarnessConfig(path)` reads and validates a JSON file
-`{ mcpServers?, skillsDirs? }`: `skillsDirs` entries and each server's
-`cwd` are resolved relative to the config file's own directory (not the
-caller's `cwd`), so a config is portable. Invalid shapes (missing
-`command`, non-array `args`/non-string entries, non-string-record `env`,
-non-string `cwd`, non-object `mcpServers`, non-array `skillsDirs`, bad
-JSON, unreadable file) all throw with the config path (and, for a server
-field, the server name) in the message. The JSON-parsing and validation
-logic lives in `parseHarnessConfig(text, configDir, resolvedPath)`, a pure
-function `loadHarnessConfig` calls after reading the file — a caller that
-also needs the raw bytes (e.g. to hash them) can read the file once and
-pass the same buffer to both, instead of reading it twice.
+`loadHarnessConfig(path)` lee y valida un archivo JSON
+`{ mcpServers?, skillsDirs? }`: las entradas de `skillsDirs` y el `cwd` de
+cada servidor se resuelven relativos al propio directorio del archivo de
+configuración (no al `cwd` del llamador), de modo que una configuración es
+portable. Las formas inválidas (`command` ausente, `args` que no es
+arreglo o con entradas que no son string, `env` que no es un registro de
+strings, `cwd` que no es string, `mcpServers` que no es objeto,
+`skillsDirs` que no es arreglo, JSON inválido, archivo illegible) lanzan
+todas una excepción con la ruta de configuración (y, para un campo de
+servidor, el nombre del servidor) en el mensaje. La lógica de parseo y
+validación de JSON vive en `parseHarnessConfig(text, configDir,
+resolvedPath)`, una función pura que `loadHarnessConfig` llama después de
+leer el archivo — un llamador que también necesite los bytes crudos (p.
+ej. para calcular su hash) puede leer el archivo una sola vez y pasar el
+mismo buffer a ambas, en lugar de leerlo dos veces.
 
-`wireHarnessConfig(config, manager)` is a convenience for the common
-single-harness case: it connects a fresh `McpToolProvider`, loads a fresh
-`SkillCatalog`, registers everything into `manager`, and returns
-`{ specs, catalog, allowedToolNames, close }`. If anything fails after a
-successful `connect()` (`registerInto()`'s collision check, or
-`SkillCatalog.load()`), the provider is closed before the error is
-rethrown. It deliberately does **not** try to share connections across
-managers — a run that builds several harnesses (C3) connects a
-`McpToolProvider` and loads a `SkillCatalog` once, then calls
+`wireHarnessConfig(config, manager)` es una conveniencia para el caso
+común de un único harness: conecta un `McpToolProvider` nuevo, carga un
+`SkillCatalog` nuevo, registra todo en `manager`, y devuelve
+`{ specs, catalog, allowedToolNames, close }`. Si algo falla después de
+un `connect()` exitoso (la verificación de colisión de `registerInto()`,
+o `SkillCatalog.load()`), el proveedor se cierra antes de relanzar el
+error. Deliberadamente **no** intenta compartir conexiones entre gestores
+— una corrida que construye varios *harnesses* (C3) conecta un
+`McpToolProvider` y carga un `SkillCatalog` una sola vez, y luego llama a
 `provider.registerInto(manager)` / `registerSkillTool(manager, catalog)`
-per harness directly, reusing the same MCP connection and skill catalog
-instance. `experiment/runner/run-experiment.mjs` does exactly this.
+por cada harness directamente, reutilizando la misma conexión MCP e
+instancia de catálogo de skills. `experiment/runner/run-experiment.mjs`
+hace exactamente esto.
 
-Tests: `tests/harness-config.spec.ts`, against `examples/harness-config.json`
-(which points at the fixture MCP server and an example `greeter` skill
-under `examples/skills/`).
+Tests: `tests/harness-config.spec.ts`, contra
+`examples/harness-config.json` (que apunta al servidor MCP de fixture y a
+una skill de ejemplo `greeter` bajo `examples/skills/`).
 
-## What C1/C2/C3 get identically
+## Qué obtienen C1/C2/C3 de forma idéntica
 
-The runner wires the same MCP tools, `load_skill`, and guardrail allowlist
-into every configuration's harness(es) — see `experiment/runner/README.md`. Without
-`--harness-config`, none of this code path runs, so C1/C2/C3 behavior is
-unchanged.
+El ejecutor conecta las mismas herramientas MCP, `load_skill`, y la lista
+blanca de *guardrails* en el *harness* (o los *harnesses*) de cada
+configuración — ver `experiment/runner/README.md`. Sin
+`--harness-config`, ninguna parte de esta ruta de código se ejecuta, así
+que el comportamiento de C1/C2/C3 queda sin cambios.
