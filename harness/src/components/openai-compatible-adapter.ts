@@ -113,10 +113,10 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
+          ...this.headers,
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
           'User-Agent': this.userAgent,
-          ...this.headers,
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(this.timeoutMs),

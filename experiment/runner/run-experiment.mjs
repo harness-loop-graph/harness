@@ -106,23 +106,25 @@ function parseArgs(argv) {
   return parsed;
 }
 
-async function loadCredentials() {
-  let apiKey = process.env.MODEL_API_KEY;
-  let modelId = process.env.MODEL_ID;
-  if (!apiKey || !modelId) {
+const ENV_FILE_KEYS = ['MODEL_API_KEY', 'MODEL_ID', 'MODEL_BASE_URL'];
+
+// Values from the root .env are exported to process.env (never overriding it) so the adapter and
+// every router route resolve MODEL_* the same way.
+async function loadCredentials(envPath = path.resolve(__dirname, '..', '..', '.env')) {
+  if (ENV_FILE_KEYS.some((key) => !process.env[key])) {
     try {
-      const envPath = path.resolve(__dirname, '..', '..', '.env');
       const text = await fs.readFile(envPath, 'utf-8');
       for (const line of text.split('\n')) {
         const idx = line.indexOf('=');
         if (idx === -1) continue;
         const key = line.slice(0, idx).trim();
         const value = line.slice(idx + 1).trim();
-        if (key === 'MODEL_API_KEY' && !apiKey) apiKey = value;
-        if (key === 'MODEL_ID' && !modelId) modelId = value;
+        if (ENV_FILE_KEYS.includes(key) && !process.env[key] && value) process.env[key] = value;
       }
     } catch { /* ignore */ }
   }
+  const apiKey = process.env.MODEL_API_KEY;
+  const modelId = process.env.MODEL_ID;
   if (!apiKey || !modelId) {
     console.error('Missing MODEL_API_KEY and/or MODEL_ID. Set in environment or in .env at the repository root.');
     process.exit(1);

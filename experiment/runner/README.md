@@ -29,7 +29,7 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 
 ### Credentials
 
-`MODEL_API_KEY` and `MODEL_ID` are read from `process.env`, falling back to `.env` at the repository root (simple `key=value` parse). A clear error is raised if both are missing. `MODEL_BASE_URL` must also be set (read directly by the adapter, with no provider default): a run that reaches model construction without it fails fast with a clear error naming `MODEL_BASE_URL`. `--dry-run` never constructs a model, so it does not require `MODEL_BASE_URL`.
+`MODEL_API_KEY`, `MODEL_ID` and `MODEL_BASE_URL` are read from `process.env`; any that are missing are filled from `.env` at the repository root (simple `key=value` parse, exported to `process.env` so router routes see the same values; the environment always wins). A clear error is raised if the key or model id is missing. `MODEL_BASE_URL` has no provider default: a run that reaches model construction without it fails fast with a clear error naming `MODEL_BASE_URL`. `--dry-run` never constructs a model, so it does not require `MODEL_BASE_URL`.
 
 ### Validation
 

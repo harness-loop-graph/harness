@@ -31,6 +31,7 @@ import {
   workspaceMayHaveDockerStack,
   clearStaleReviewVerdict,
   buildRouter,
+  loadCredentials,
 } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -993,5 +994,26 @@ test('an invalid --task-file (missing or empty) never creates a workspace under 
     assert.deepEqual(entries.sort(), ['empty.txt'], 'no workspace directory must have been created under --runs-dir');
   } finally {
     await fs.rm(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('loadCredentials exports MODEL_* from the .env file without overriding the environment', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-env-'));
+  const saved = Object.fromEntries(['MODEL_API_KEY', 'MODEL_ID', 'MODEL_BASE_URL'].map((k) => [k, process.env[k]]));
+  try {
+    const envFile = path.join(dir, '.env');
+    await fs.writeFile(envFile, 'MODEL_API_KEY=file-key\nMODEL_ID=file-model\nMODEL_BASE_URL=https://file.example/v1\n');
+    delete process.env.MODEL_API_KEY;
+    delete process.env.MODEL_BASE_URL;
+    process.env.MODEL_ID = 'env-model';
+    const creds = await loadCredentials(envFile);
+    assert.deepEqual(creds, { apiKey: 'file-key', modelId: 'env-model' });
+    assert.equal(process.env.MODEL_BASE_URL, 'https://file.example/v1');
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });
