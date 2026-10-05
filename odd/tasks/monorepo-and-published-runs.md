@@ -56,5 +56,7 @@ Mode: off (source: no project/session TDD configuration). Checks: `npm test` + `
   - Checks: `harness && npm test` 102/102, `npm run build` clean (unchanged, no harness source touched); `node --check run-experiment.mjs` OK; `node --test run-experiment.test.mjs` 48/48 (31 pre-existing, rewritten where behavior changed, + 17 new); `--config c1 --dry-run` from the repo root prints a workspace path under `pi-runs/` and creates nothing; root README quick start commands run successfully from the repo root; `git status --short` on the parent `ProjectoIntegrador1` repo identical before/after.
   - Deviation: none from the review findings text. Noted anomaly (not caused by this task, left untouched): during this session `harness/README.md` was found replaced on disk by an untracked `harness/README 2.md` (byte-identical content) — looks like an OS/iCloud sync conflict-copy artifact on this machine, unrelated to any edit made here (only `run-experiment.mjs`, its test file, and the three READMEs listed above were touched). Flagged for the user; not committed.
 
+- T4 (2026-10-05, user-approved steps 1-3): harness main aef423b..0a5d8d3 pushed (fast-forward); `harness-loop-graph/experiment` got an archive notice (a71f20a) and was archived (read-only), description updated; `harness` description updated. Pending: teammate notification (user), optional local folder rename `glm` → `harness`, moving the checkout out of the iCloud-synced folder.
+
 ## Next step
-T4 (user-approval delivery: push, archive `experiment`, update repo description, notify teammate).
+Notify the teammate about the path change (`src/` → `harness/src/`). Then the first real C1 run on the full SPEC with Qwen.
