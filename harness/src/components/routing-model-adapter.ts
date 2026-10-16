@@ -10,6 +10,8 @@ export interface RouteDecision {
 
 export interface RouteUsage {
   calls: number;
+  /** Transient-failure retries the route's adapter performed (0 for adapters that don't report it). */
+  retries: number;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
@@ -39,6 +41,7 @@ export interface RoutingModelAdapterConfig {
 
 interface UsageLike {
   calls: number;
+  retries?: number;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
@@ -137,9 +140,10 @@ export class RoutingModelAdapter implements ModelAdapter {
    * towards `calls`, with zeroed token/cost fields.
    */
   private recordUsage(route: string, before: UsageLike | undefined, after: UsageLike | undefined): void {
-    const entry = this.usageByRoute.get(route) ?? { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0 };
+    const entry = this.usageByRoute.get(route) ?? { calls: 0, retries: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0 };
     entry.calls += 1;
     if (before && after) {
+      entry.retries += (after.retries ?? 0) - (before.retries ?? 0);
       entry.promptTokens += after.promptTokens - before.promptTokens;
       entry.completionTokens += after.completionTokens - before.completionTokens;
       entry.totalTokens += after.totalTokens - before.totalTokens;
@@ -157,6 +161,7 @@ export class RoutingModelAdapter implements ModelAdapter {
     completionTokens: number;
     totalTokens: number;
     calls: number;
+    retries: number;
     cost: number;
     modelsUsed: string[];
   } {
@@ -164,15 +169,17 @@ export class RoutingModelAdapter implements ModelAdapter {
     let completionTokens = 0;
     let totalTokens = 0;
     let calls = 0;
+    let retries = 0;
     let cost = 0;
     for (const usage of this.usageByRoute.values()) {
       promptTokens += usage.promptTokens;
       completionTokens += usage.completionTokens;
       totalTokens += usage.totalTokens;
       calls += usage.calls;
+      retries += usage.retries;
       cost += usage.cost;
     }
-    return { promptTokens, completionTokens, totalTokens, calls, cost, modelsUsed: [...this.modelsUsed] };
+    return { promptTokens, completionTokens, totalTokens, calls, retries, cost, modelsUsed: [...this.modelsUsed] };
   }
 
   /** Per-route usage plus the ordered route-decision log, for reporting/diagnostics. */

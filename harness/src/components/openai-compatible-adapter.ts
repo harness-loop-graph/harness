@@ -5,6 +5,13 @@ import { truncateMiddle } from './truncate.js';
 /** Max chars of a serialized tool result sent back to the model. */
 const MAX_TOOL_RESULT_CHARS = 8000;
 
+/** HTTP statuses worth retrying: rate limits and transient server-side failures. */
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+/** Cap for the exponential backoff delay. */
+const MAX_BACKOFF_MS = 30_000;
+/** Cap for a provider-supplied Retry-After delay. */
+const MAX_RETRY_AFTER_MS = 60_000;
+
 export interface OpenAICompatibleAdapterConfig {
   /** API key. Falls back to process.env.MODEL_API_KEY. */
   apiKey?: string;
@@ -25,6 +32,18 @@ export interface OpenAICompatibleAdapterConfig {
   headers?: Record<string, string>;
   /** Custom user agent identifying this harness. Default 'pi-harness/0.1.0'. */
   userAgent?: string;
+  /**
+   * Retries after a transient failure (HTTP 429/500/502/503/504, network
+   * error or request timeout). Default 3, so up to 4 attempts per call. 0
+   * disables retrying.
+   */
+  maxRetries?: number;
+  /** Base of the exponential backoff in ms (doubles each retry, capped at 30s). Default 1000. */
+  retryBaseDelayMs?: number;
+  /** Injectable sleep for tests. Defaults to a real timer. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable [0, 1) random source for backoff jitter. Defaults to Math.random. */
+  random?: () => number;
 }
 
 interface ChatMessage {
@@ -62,6 +81,16 @@ interface ChatCompletionResponse {
   };
 }
 
+/** Parses a Retry-After header (delta-seconds or HTTP date) into ms, capped at 60s. */
+function parseRetryAfter(value: string | null): number | undefined {
+  if (value === null || value.trim() === '') return undefined;
+  const trimmed = value.trim();
+  const seconds = /^\d+(\.\d+)?$/.test(trimmed) ? Number(trimmed) : NaN;
+  const ms = Number.isNaN(seconds) ? Date.parse(trimmed) - Date.now() : seconds * 1000;
+  if (Number.isNaN(ms)) return undefined;
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.round(ms)));
+}
+
 /**
  * OpenAI-compatible chat-completions adapter. The only harness component
  * that knows how to talk to a provider; swapping providers means pointing
@@ -75,6 +104,11 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
   private readonly timeoutMs: number;
   private readonly headers: Record<string, string>;
   private readonly userAgent: string;
+  private readonly maxRetries: number;
+  private readonly retryBaseDelayMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly random: () => number;
+  private retries = 0;
   private promptTokens = 0;
   private completionTokens = 0;
   private cost = 0;
@@ -90,6 +124,10 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     this.timeoutMs = config.timeoutMs ?? 120_000;
     this.headers = config.headers ?? {};
     this.userAgent = config.userAgent ?? 'pi-harness/0.1.0';
+    this.maxRetries = Math.max(0, Math.floor(config.maxRetries ?? 3));
+    this.retryBaseDelayMs = config.retryBaseDelayMs ?? 1000;
+    this.sleep = config.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.random = config.random ?? Math.random;
 
     if (this.apiKey === '') {
       throw new Error('MODEL_API_KEY is not set. Export it before constructing OpenAICompatibleModelAdapter.');
@@ -112,35 +150,9 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       tools: request.availTools.length > 0 ? this.buildTools(request) : undefined,
     };
 
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          ...this.headers,
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-          'User-Agent': this.userAgent,
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch (err) {
-      return {
-        type: 'error',
-        code: 'network_error',
-        message: err instanceof Error ? err.message : String(err),
-      };
-    }
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      return {
-        type: 'error',
-        code: `http_${response.status}`,
-        message: text.slice(0, 2000),
-      };
-    }
+    const fetched = await this.fetchWithRetry(body);
+    if (fetched.type === 'error') return fetched;
+    const response = fetched.response;
 
     let payload: ChatCompletionResponse;
     try {
@@ -209,6 +221,63 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     }
 
     return { type: 'error', code: 'empty_content', message: 'The model returned neither content nor a tool call' };
+  }
+
+  /**
+   * POSTs the request, retrying transient failures (see RETRYABLE_STATUSES,
+   * network errors and timeouts) with exponential backoff and jitter.
+   * Failed attempts carry no usage, so nothing is accumulated for them. Any
+   * other non-2xx status is returned immediately; a 2xx response is handed
+   * back for payload validation, which is never retried.
+   */
+  private async fetchWithRetry(
+    body: unknown,
+  ): Promise<{ type: 'response'; response: Response } | Extract<ModelResponse, { type: 'error' }>> {
+    const serialized = JSON.stringify(body);
+    for (let attempt = 1; ; attempt += 1) {
+      let failure: Extract<ModelResponse, { type: 'error' }>;
+      let retryAfterMs: number | undefined;
+
+      try {
+        const response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            ...this.headers,
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.apiKey}`,
+            'User-Agent': this.userAgent,
+          },
+          body: serialized,
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+        if (response.ok) return { type: 'response', response };
+
+        const text = await response.text().catch(() => '');
+        failure = { type: 'error', code: `http_${response.status}`, message: text.slice(0, 2000) };
+        if (!RETRYABLE_STATUSES.has(response.status)) return failure;
+        retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+      } catch (err) {
+        // fetch only rejects on network failures and aborts (incl. timeout).
+        failure = {
+          type: 'error',
+          code: 'network_error',
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
+
+      if (attempt > this.maxRetries) {
+        return attempt > 1 ? { ...failure, message: `${failure.message} (after ${attempt} attempts)` } : failure;
+      }
+
+      this.retries += 1;
+      await this.sleep(retryAfterMs ?? this.backoffDelay(attempt));
+    }
+  }
+
+  /** Exponential backoff (base * 2^(attempt-1), capped) with jitter in [50%, 100%]. */
+  private backoffDelay(attempt: number): number {
+    const exponential = Math.min(MAX_BACKOFF_MS, this.retryBaseDelayMs * 2 ** (attempt - 1));
+    return Math.round(exponential * (0.5 + this.random() * 0.5));
   }
 
   /** Maps a ModelRequest to chat messages, including fed-back tool results. */
@@ -281,6 +350,8 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     modelsUsed: string[];
     cost: number;
     calls: number;
+    /** Attempts repeated after a transient failure; not part of `calls`. */
+    retries: number;
     promptTokens: number;
     totalTokens: number;
     completionTokens: number
@@ -290,6 +361,7 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       completionTokens: this.completionTokens,
       totalTokens: this.promptTokens + this.completionTokens,
       calls: this.calls,
+      retries: this.retries,
       cost: this.cost,
       modelsUsed: [...this.modelsUsed],
     };

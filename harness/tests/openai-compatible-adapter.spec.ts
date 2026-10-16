@@ -207,7 +207,10 @@ describe('OpenAICompatibleModelAdapter', () => {
     process.env.MODEL_ID = 'test-model';
     process.env.MODEL_BASE_URL = 'https://test.example/v1';
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const adapter = new OpenAICompatibleModelAdapter({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      sleep: async () => {},
+    });
 
     const response = await adapter.complete(request());
 
@@ -285,6 +288,7 @@ describe('OpenAICompatibleModelAdapter', () => {
       completionTokens: 13,
       totalTokens: 43,
       calls: 2,
+      retries: 0,
       cost: 0.000003,
       modelsUsed: [],
     });
@@ -329,6 +333,7 @@ describe('OpenAICompatibleModelAdapter', () => {
       completionTokens: 0,
       totalTokens: 0,
       calls: 1,
+      retries: 0,
       cost: 0,
       modelsUsed: [],
     });
@@ -760,6 +765,243 @@ describe('OpenAICompatibleModelAdapter', () => {
     expect(userMessage.content).toContain(
         'expected status 200 but received 500',
     );
+  });
+
+  describe('retry policy', () => {
+    const OK_BODY = {
+      model: 'm-1',
+      choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'fine' } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 },
+    };
+
+    function retryAdapter(
+      fetchImpl: ReturnType<typeof vi.fn>,
+      extra: { maxRetries?: number; random?: () => number } = {},
+    ) {
+      const sleep = vi.fn<(ms: number) => Promise<void>>().mockResolvedValue(undefined);
+      const adapter = new OpenAICompatibleModelAdapter({
+        apiKey: 'test-key',
+        baseUrl: 'https://test.example/v1',
+        model: 'test-model',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        sleep,
+        random: extra.random ?? (() => 0.5),
+        ...(extra.maxRetries !== undefined ? { maxRetries: extra.maxRetries } : {}),
+      });
+      return { adapter, sleep };
+    }
+
+    it('retries a 429 and succeeds, reporting one retry', async () => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(429, { error: { message: 'slow down' } }))
+        .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+      const { adapter, sleep } = retryAdapter(fetchImpl);
+
+      const result = await adapter.complete(request());
+
+      expect(result).toEqual({ type: 'finish', content: 'fine' });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledTimes(1);
+      expect(adapter.getUsage()).toMatchObject({ calls: 1, retries: 1 });
+    });
+
+    it.each([500, 502, 503, 504])('retries HTTP %i', async (status) => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(status, { error: { message: 'boom' } }))
+        .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+      const { adapter } = retryAdapter(fetchImpl);
+
+      expect(await adapter.complete(request())).toEqual({ type: 'finish', content: 'fine' });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns an error mentioning the attempt count once retries are exhausted', async () => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(503, { error: { message: 'unavailable' } }));
+      const { adapter, sleep } = retryAdapter(fetchImpl, { maxRetries: 2 });
+
+      const result = await adapter.complete(request());
+
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(sleep).toHaveBeenCalledTimes(2);
+      expect(result.type).toBe('error');
+      if (result.type === 'error') {
+        expect(result.code).toBe('http_503');
+        expect(result.message).toContain('unavailable');
+        expect(result.message).toMatch(/3 attempts/);
+      }
+      expect(adapter.getUsage()).toMatchObject({ calls: 1, retries: 2, promptTokens: 0, cost: 0 });
+    });
+
+    it('uses maxRetries 3 by default (4 fetch calls)', async () => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(503, {}));
+      const { adapter } = retryAdapter(fetchImpl);
+
+      const result = await adapter.complete(request());
+
+      expect(fetchImpl).toHaveBeenCalledTimes(4);
+      expect(result.type).toBe('error');
+      if (result.type === 'error') expect(result.message).toMatch(/4 attempts/);
+    });
+
+    it('does not retry when maxRetries is 0', async () => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(503, { error: { message: 'down' } }));
+      const { adapter, sleep } = retryAdapter(fetchImpl, { maxRetries: 0 });
+
+      const result = await adapter.complete(request());
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(result.type).toBe('error');
+    });
+
+    it.each([400, 401, 403, 404, 422])('does not retry HTTP %i', async (status) => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(status, { error: { message: 'nope' } }));
+      const { adapter, sleep } = retryAdapter(fetchImpl);
+
+      const result = await adapter.complete(request());
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ type: 'error', code: `http_${status}` });
+      expect(adapter.getUsage().retries).toBe(0);
+    });
+
+    it('does not retry a successful-but-invalid payload', async () => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(200, { choices: [] }));
+      const { adapter } = retryAdapter(fetchImpl);
+
+      const result = await adapter.complete(request());
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ type: 'error', code: 'empty_response' });
+    });
+
+    it('retries a network TypeError and succeeds', async () => {
+      const fetchImpl = vi
+        .fn()
+        .mockRejectedValueOnce(new TypeError('fetch failed'))
+        .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+      const { adapter } = retryAdapter(fetchImpl);
+
+      expect(await adapter.complete(request())).toEqual({ type: 'finish', content: 'fine' });
+      expect(adapter.getUsage().retries).toBe(1);
+    });
+
+    it('retries a per-request timeout abort', async () => {
+      const timeout = new DOMException('The operation timed out.', 'TimeoutError');
+      const fetchImpl = vi
+        .fn()
+        .mockRejectedValueOnce(timeout)
+        .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+      const { adapter } = retryAdapter(fetchImpl);
+
+      expect(await adapter.complete(request())).toEqual({ type: 'finish', content: 'fine' });
+    });
+
+    it('reports network_error with the attempt count when a network failure persists', async () => {
+      const fetchImpl = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+      const { adapter } = retryAdapter(fetchImpl, { maxRetries: 1 });
+
+      const result = await adapter.complete(request());
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(result).toMatchObject({ type: 'error', code: 'network_error' });
+      if (result.type === 'error') {
+        expect(result.message).toContain('fetch failed');
+        expect(result.message).toMatch(/2 attempts/);
+      }
+    });
+
+    it('honors Retry-After in seconds', async () => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response('{}', { status: 429, headers: { 'Retry-After': '2' } }),
+        )
+        .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+      const { adapter, sleep } = retryAdapter(fetchImpl);
+
+      await adapter.complete(request());
+
+      expect(sleep).toHaveBeenCalledTimes(1);
+      expect(sleep).toHaveBeenCalledWith(2000);
+    });
+
+    it('honors Retry-After as an HTTP date', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+        const fetchImpl = vi
+          .fn()
+          .mockResolvedValueOnce(
+            new Response('{}', { status: 503, headers: { 'Retry-After': 'Tue, 01 Jan 2030 00:00:05 GMT' } }),
+          )
+          .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+        const { adapter, sleep } = retryAdapter(fetchImpl);
+
+        await adapter.complete(request());
+
+        expect(sleep).toHaveBeenCalledWith(5000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('caps Retry-After at 60 seconds', async () => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response('{}', { status: 429, headers: { 'Retry-After': '86400' } }),
+        )
+        .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+      const { adapter, sleep } = retryAdapter(fetchImpl);
+
+      await adapter.complete(request());
+
+      expect(sleep).toHaveBeenCalledWith(60_000);
+    });
+
+    it('backs off exponentially with jitter, capped at 30s', async () => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(500, {}));
+      const { adapter, sleep } = retryAdapter(fetchImpl, { maxRetries: 7, random: () => 1 });
+
+      await adapter.complete(request());
+
+      const delays = sleep.mock.calls.map(([ms]) => ms);
+      expect(delays).toEqual([1000, 2000, 4000, 8000, 16_000, 30_000, 30_000]);
+    });
+
+    it('applies jitter within [50%, 100%] of the exponential delay', async () => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(500, {}));
+      const { adapter, sleep } = retryAdapter(fetchImpl, { maxRetries: 2, random: () => 0 });
+
+      await adapter.complete(request());
+
+      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([500, 1000]);
+    });
+
+    it('counts usage from the successful attempt once, not from failed attempts', async () => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(429, { usage: { prompt_tokens: 999, completion_tokens: 999, cost: 9 } }))
+        .mockResolvedValueOnce(jsonResponse(503, {}))
+        .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+      const { adapter } = retryAdapter(fetchImpl);
+
+      await adapter.complete(request());
+
+      expect(adapter.getUsage()).toEqual({
+        promptTokens: 10,
+        completionTokens: 5,
+        totalTokens: 15,
+        calls: 1,
+        retries: 2,
+        cost: 0.001,
+        modelsUsed: ['m-1'],
+      });
+    });
   });
 
 });

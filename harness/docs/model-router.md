@@ -58,11 +58,11 @@ const router = new RoutingModelAdapter({
 
 `getUsage()` devuelve la misma forma que
 `OpenAICompatibleModelAdapter.getUsage()` (`promptTokens`,
-`completionTokens`, `totalTokens`, `calls`, `cost`, `modelsUsed`), agregada a
+`completionTokens`, `totalTokens`, `calls`, `retries`, `cost`, `modelsUsed`), agregada a
 través de cada ruta — de modo que un llamador que solo lee `getUsage()` (p.
 ej. `report.usage` del runner del experimento) no necesita ningún cambio
 cuando se introduce un *router*. `getRouting()` es la superficie específica
-del *router*: `{ byRoute: { <name>: { calls, promptTokens, completionTokens,
+del *router*: `{ byRoute: { <name>: { calls, retries, promptTokens, completionTokens,
 totalTokens, cost } }, decisions: { route, reason }[] }`.
 
 ## Conexión en la configuración del harness

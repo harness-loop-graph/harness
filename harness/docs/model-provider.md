@@ -105,9 +105,10 @@ defecto).
 
 ## Mapeo de respuesta — `complete`
 
-- Fallo de red (fetch lanza error) → `{ type: 'error', code: 'network_error', message }`.
+- Fallo de red (fetch lanza error) → `{ type: 'error', code: 'network_error', message }`
+  (tras agotar los reintentos, ver "Política de reintentos").
 - HTTP no 2xx → `{ type: 'error', code: 'http_<status>', message }` (cuerpo
-  truncado a 2000 caracteres).
+  truncado a 2000 caracteres; tras agotar los reintentos, ver "Política de reintentos").
 - Cuerpo no JSON → `{ type: 'error', code: 'invalid_json', ... }`.
 - Un campo `error` JSON en el payload → `{ type: 'error', code, message }`.
 - `choices[0].finish_reason` es `length` → `{ type: 'error', code: 'output_truncated', ... }`; es `content_filter` → `{ type: 'error', code: 'content_filtered', ... }`. Se evalúa antes de leer `content`/`tool_calls`, así una respuesta cortada nunca se toma como final ni como llamada a herramienta (el uso de tokens igual se contabiliza).
@@ -120,7 +121,39 @@ defecto).
 
 El uso de tokens (`payload.usage.prompt_tokens` / `completion_tokens`) se
 acumula a través de cada llamada en la instancia y se expone mediante
-`getUsage(): { promptTokens, completionTokens, totalTokens, calls }`.
+`getUsage(): { promptTokens, completionTokens, totalTokens, calls, retries, cost, modelsUsed }`.
+Los intentos fallidos no traen `usage`, así que un reintento nunca duplica
+tokens ni costo: solo cuenta el payload del intento exitoso. `calls` cuenta
+llamadas a `complete()` (no intentos HTTP); `retries` cuenta los intentos
+repetidos por fallos transitorios, para que los reportes de corrida muestren
+la inestabilidad del proveedor (`report.usage.retries`).
+
+## Política de reintentos
+
+`complete()` reintenta los fallos transitorios en lugar de abortar el turno:
+
+- **Se reintenta**: HTTP 429, 500, 502, 503, 504; errores de red (fetch
+  rechaza: `TypeError`, `ECONNRESET`, etc.) y el aborto por *timeout* de la
+  solicitud (`timeoutMs`).
+- **No se reintenta**: cualquier otro 4xx (400, 401, 403, 404, 422) ni un
+  payload exitoso pero inválido (`invalid_json`, `empty_response`,
+  `output_truncated`, etc.); esos se devuelven de inmediato.
+- **Espera**: *backoff* exponencial con *jitter*: `base * 2^(n-1)` (base 1 s,
+  tope 30 s), multiplicado por un factor aleatorio en [0.5, 1]. Si la
+  respuesta trae `Retry-After` (segundos o fecha HTTP) se usa ese valor en
+  lugar del *backoff*, topeado a 60 s.
+- **Agotados los reintentos**: se devuelve la misma forma de error de siempre
+  (`http_<status>` o `network_error`) con el mensaje terminado en
+  `(after N attempts)`.
+
+Configuración en `OpenAICompatibleAdapterConfig` (todo opcional):
+
+| Campo | Default | Descripción |
+|---|---|---|
+| `maxRetries` | `3` | Reintentos tras el primer intento (hasta 4 intentos). `0` desactiva. |
+| `retryBaseDelayMs` | `1000` | Base del *backoff* exponencial. |
+| `sleep` | `setTimeout` | `(ms) => Promise<void>` inyectable para que los tests no esperen. |
+| `random` | `Math.random` | Fuente `[0, 1)` inyectable para el *jitter*. |
 
 ## Dónde está conectado
 
@@ -143,5 +176,8 @@ junto con `Authorization` y `User-Agent`; una respuesta de contenido simple se
 mapea a `finish`; apuntar `baseUrl` a `https://api.openai.com/v1` produce la
 forma de solicitud idéntica contra un proveedor distinto; HTTP 401 y fallos de
 red se mapean ambos a respuestas `error` tipadas; el uso se acumula a través
-de llamadas y vuelve a cero por defecto cuando el payload lo omite; y
+de llamadas y vuelve a cero por defecto cuando el payload lo omite; la
+política de reintentos (429/5xx/red/*timeout* sí, otros 4xx y payloads
+inválidos no; `Retry-After`, tope de *backoff*, `retries` en `getUsage()` y
+sin doble conteo de uso); y
 `history` se reconstruye correctamente en mensajes `assistant`/`tool`.

@@ -14,11 +14,12 @@ class UsageStubAdapter implements ModelAdapter {
   private completionTokens = 0;
   private cost = 0;
   private calls = 0;
+  private retries = 0;
   public readonly seenRequests: ModelRequest[] = [];
 
   constructor(
     private readonly response: ModelResponse = { type: 'finish', content: 'ok' },
-    private readonly perCall = { promptTokens: 10, completionTokens: 5, cost: 0.01 },
+    private readonly perCall = { promptTokens: 10, completionTokens: 5, cost: 0.01, retries: 0 },
   ) {}
 
   async complete(req: ModelRequest): Promise<ModelResponse> {
@@ -27,6 +28,7 @@ class UsageStubAdapter implements ModelAdapter {
     this.promptTokens += this.perCall.promptTokens;
     this.completionTokens += this.perCall.completionTokens;
     this.cost += this.perCall.cost;
+    this.retries += this.perCall.retries ?? 0;
     return this.response;
   }
 
@@ -36,6 +38,7 @@ class UsageStubAdapter implements ModelAdapter {
       completionTokens: this.completionTokens,
       totalTokens: this.promptTokens + this.completionTokens,
       calls: this.calls,
+      retries: this.retries,
       cost: this.cost,
       modelsUsed: [] as string[],
     };
@@ -197,7 +200,26 @@ describe('RoutingModelAdapter', () => {
     const { byRoute } = router.getRouting();
     expect(byRoute.default).toMatchObject({ calls: 2, promptTokens: 20, completionTokens: 10, totalTokens: 30 });
     expect(byRoute.default.cost).toBeCloseTo(0.02);
-    expect(byRoute.longContext).toEqual({ calls: 1, promptTokens: 100, completionTokens: 50, totalTokens: 150, cost: 0.1 });
+    expect(byRoute.longContext).toEqual({ calls: 1, retries: 0, promptTokens: 100, completionTokens: 50, totalTokens: 150, cost: 0.1 });
+  });
+
+  it('aggregates retries across routes in getUsage() and per route in getRouting()', async () => {
+    const def = new UsageStubAdapter({ type: 'finish', content: 'ok' }, { promptTokens: 10, completionTokens: 5, cost: 0.01, retries: 2 });
+    const long = new UsageStubAdapter({ type: 'finish', content: 'ok' }, { promptTokens: 1, completionTokens: 1, cost: 0, retries: 1 });
+    const router = new RoutingModelAdapter({
+      routes: { default: def, longContext: long },
+      longContextThreshold: 100,
+      estimateTokens: (req) => (req.task === 'big' ? 999 : 1),
+    });
+
+    await router.complete(request());
+    await router.complete(request());
+    await router.complete(request({ task: 'big' }));
+
+    expect(router.getUsage().retries).toBe(5);
+    const { byRoute } = router.getRouting();
+    expect(byRoute.default.retries).toBe(4);
+    expect(byRoute.longContext.retries).toBe(1);
   });
 
   it('counts calls for adapters without getUsage(), with zeroed token/cost fields', async () => {
@@ -207,7 +229,7 @@ describe('RoutingModelAdapter', () => {
     await router.complete(request());
     await router.complete(request());
 
-    expect(router.getUsage()).toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 2, cost: 0, modelsUsed: [] });
+    expect(router.getUsage()).toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 2, retries: 0, cost: 0, modelsUsed: [] });
   });
 
   it('records the call and any usage delta when the delegate throws, then rethrows', async () => {
@@ -243,7 +265,7 @@ describe('RoutingModelAdapter', () => {
     await router.complete(request({ feedback: 'retry this' }));
 
     const { byRoute } = router.getRouting();
-    expect(byRoute.default).toEqual({ calls: 1, promptTokens: 10, completionTokens: 5, totalTokens: 15, cost: 0.01 });
-    expect(byRoute.retry).toEqual({ calls: 1, promptTokens: 10, completionTokens: 5, totalTokens: 15, cost: 0.01 });
+    expect(byRoute.default).toEqual({ calls: 1, retries: 0, promptTokens: 10, completionTokens: 5, totalTokens: 15, cost: 0.01 });
+    expect(byRoute.retry).toEqual({ calls: 1, retries: 0, promptTokens: 10, completionTokens: 5, totalTokens: 15, cost: 0.01 });
   });
 });
