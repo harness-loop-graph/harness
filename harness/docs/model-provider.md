@@ -110,6 +110,7 @@ defecto).
   truncado a 2000 caracteres).
 - Cuerpo no JSON → `{ type: 'error', code: 'invalid_json', ... }`.
 - Un campo `error` JSON en el payload → `{ type: 'error', code, message }`.
+- `choices[0].finish_reason` es `length` → `{ type: 'error', code: 'output_truncated', ... }`; es `content_filter` → `{ type: 'error', code: 'content_filtered', ... }`. Se evalúa antes de leer `content`/`tool_calls`, así una respuesta cortada nunca se toma como final ni como llamada a herramienta (el uso de tokens igual se contabiliza).
 - Sin `choices[0].message` → `{ type: 'error', code: 'empty_response', ... }`.
 - `message.tool_calls[0]` presente → parsea `function.arguments` como JSON y
   devuelve `{ type: 'tool_call', tool, args }`; argumentos no parseables se

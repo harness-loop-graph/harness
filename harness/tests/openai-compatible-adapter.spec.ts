@@ -486,6 +486,137 @@ describe('OpenAICompatibleModelAdapter', () => {
     });
   });
 
+  describe('non-clean finish_reason', () => {
+    function adapterFor(body: unknown): OpenAICompatibleModelAdapter {
+      process.env.MODEL_API_KEY = 'test-key';
+      process.env.MODEL_ID = 'test-model';
+      process.env.MODEL_BASE_URL = 'https://test.example/v1';
+      const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, body));
+      return new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    }
+
+    const USAGE = { prompt_tokens: 10, completion_tokens: 4096, total_tokens: 4106 };
+
+    it('returns an error instead of a finish when finish_reason is length', async () => {
+      const adapter = adapterFor({
+        choices: [
+          { finish_reason: 'length', message: { role: 'assistant', content: 'The answer is cut o' } },
+        ],
+        usage: USAGE,
+      });
+
+      const response = await adapter.complete(request());
+
+      expect(response).toEqual({
+        type: 'error',
+        code: 'output_truncated',
+        message: 'Model output truncated (finish_reason: length)',
+      });
+    });
+
+    it('does not return a tool_call when finish_reason is length', async () => {
+      const adapter = adapterFor({
+        choices: [
+          {
+            finish_reason: 'length',
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'write_file', arguments: '{"path": "a.t' },
+                },
+              ],
+            },
+          },
+        ],
+        usage: USAGE,
+      });
+
+      const response = await adapter.complete(request());
+
+      expect(response).toEqual({
+        type: 'error',
+        code: 'output_truncated',
+        message: 'Model output truncated (finish_reason: length)',
+      });
+    });
+
+    it('does not return a complete tool_call when finish_reason is length', async () => {
+      const adapter = adapterFor({
+        choices: [
+          {
+            finish_reason: 'length',
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'write_file', arguments: '{"path": "a.txt"}' },
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      const response = await adapter.complete(request());
+
+      expect(response.type).toBe('error');
+    });
+
+    it('returns an error when finish_reason is content_filter', async () => {
+      const adapter = adapterFor({
+        choices: [
+          { finish_reason: 'content_filter', message: { role: 'assistant', content: 'partial' } },
+        ],
+      });
+
+      const response = await adapter.complete(request());
+
+      expect(response).toEqual({
+        type: 'error',
+        code: 'content_filtered',
+        message: 'Model output blocked by content filter (finish_reason: content_filter)',
+      });
+    });
+
+    it('still accumulates usage for a truncated call', async () => {
+      const adapter = adapterFor({
+        choices: [
+          { finish_reason: 'length', message: { role: 'assistant', content: 'cut o' } },
+        ],
+        usage: USAGE,
+      });
+
+      await adapter.complete(request());
+
+      expect(adapter.getUsage()).toMatchObject({
+        calls: 1,
+        promptTokens: 10,
+        completionTokens: 4096,
+        totalTokens: 4106,
+      });
+    });
+
+    it.each(['stop', 'tool_calls', 'function_call'])(
+      'keeps normal behavior for finish_reason %s',
+      async (finishReason) => {
+        const adapter = adapterFor({
+          choices: [
+            { finish_reason: finishReason, message: { role: 'assistant', content: 'done' } },
+          ],
+        });
+
+        expect(await adapter.complete(request())).toEqual({ type: 'finish', content: 'done' });
+      },
+    );
+  });
+
   it('reconstructs multiple tool-call/tool-result history entries correctly', async () => {
     process.env.MODEL_API_KEY = 'test-key';
     process.env.MODEL_ID = 'test-model';

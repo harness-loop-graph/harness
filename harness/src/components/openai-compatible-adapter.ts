@@ -167,6 +167,24 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       };
     }
 
+    // A cut-off or blocked completion is never a valid answer or tool call.
+    // Checked after usage accounting: the tokens were spent either way.
+    const finishReason = payload.choices?.[0]?.finish_reason;
+    if (finishReason === 'length') {
+      return {
+        type: 'error',
+        code: 'output_truncated',
+        message: 'Model output truncated (finish_reason: length)',
+      };
+    }
+    if (finishReason === 'content_filter') {
+      return {
+        type: 'error',
+        code: 'content_filtered',
+        message: 'Model output blocked by content filter (finish_reason: content_filter)',
+      };
+    }
+
     const message = payload.choices?.[0]?.message;
     if (!message) {
       return { type: 'error', code: 'empty_response', message: 'No choice in the API response' };
