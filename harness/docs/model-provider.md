@@ -97,7 +97,8 @@ defecto).
   reproduce como mensajes al estilo OpenAI: un `tool_call` se convierte en un
   mensaje `assistant` con `tool_calls` (id sintético `` call_${tool} ``); un
   `tool_result` se convierte en un mensaje `role: 'tool'` con el
-  `tool_call_id` correspondiente, contenido topeado a 8000 caracteres; un
+  `tool_call_id` correspondiente, contenido topeado a 8000 caracteres conservando inicio y final (marcador
+  `…[truncated N chars]…` en el medio; no es JSON válido); un
   `finish` se convierte en un mensaje `assistant` simple; cualquier otra cosa
   (un `error`) se convierte en un mensaje `assistant` que resume el código y
   el texto del error.

@@ -1,6 +1,7 @@
 import type { ExecutionRequest, ExecutionResult } from '../contracts/core.js';
 import { spawn } from 'node:child_process';
 import * as path from 'node:path';
+import { BoundedOutput } from './truncate.js';
 
 /** Executes commands in an isolated workspace directory. */
 export interface ExecutionManager {
@@ -39,26 +40,23 @@ export class LocalExecutionManager implements ExecutionManager {
         env: { ...process.env, ...req.env },
       });
 
-      let stdout = '';
-      let stderr = '';
+      const out = new BoundedOutput(MAX_OUTPUT_BYTES);
+      const err = new BoundedOutput(MAX_OUTPUT_BYTES);
       let killed = false;
 
-      const cap = (current: string, chunk: Buffer | string): string => {
-        const next = current + chunk.toString('utf8');
-        return next.length > MAX_OUTPUT_BYTES ? next.slice(0, MAX_OUTPUT_BYTES) : next;
-      };
-
-      child.stdout.on('data', (chunk) => (stdout = cap(stdout, chunk)));
-      child.stderr.on('data', (chunk) => (stderr = cap(stderr, chunk)));
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string) => out.append(chunk));
+      child.stderr.on('data', (chunk: string) => err.append(chunk));
 
       const timer = setTimeout(() => {
         killed = true;
         child.kill('SIGKILL');
       }, this.timeoutMs);
 
-      child.on('error', (err) => {
+      child.on('error', (error) => {
         clearTimeout(timer);
-        resolve({ exitCode: 127, stdout, stderr: stderr + String(err) });
+        resolve({ exitCode: 127, stdout: out.toString(), stderr: err.toString() + String(error) });
       });
 
       child.on('close', (code) => {
@@ -66,11 +64,11 @@ export class LocalExecutionManager implements ExecutionManager {
         if (killed) {
           resolve({
             exitCode: 124,
-            stdout,
-            stderr: stderr + `\n[timeout] killed after ${this.timeoutMs}ms`,
+            stdout: out.toString(),
+            stderr: err.toString() + `\n[timeout] killed after ${this.timeoutMs}ms`,
           });
         } else {
-          resolve({ exitCode: code ?? 1, stdout, stderr });
+          resolve({ exitCode: code ?? 1, stdout: out.toString(), stderr: err.toString() });
         }
       });
     });

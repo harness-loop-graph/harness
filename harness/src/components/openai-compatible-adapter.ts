@@ -1,5 +1,9 @@
 import type { ModelRequest, ModelResponse } from '../contracts/core.js';
 import type { ModelAdapter } from './model-adapter.js';
+import { truncateMiddle } from './truncate.js';
+
+/** Max chars of a serialized tool result sent back to the model. */
+const MAX_TOOL_RESULT_CHARS = 8000;
 
 export interface OpenAICompatibleAdapterConfig {
   /** API key. Falls back to process.env.MODEL_API_KEY. */
@@ -243,7 +247,7 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
         messages.push({
           role: 'tool',
           tool_call_id: `call_${entry.tool}`,
-          content: JSON.stringify(entry.result).slice(0, 8000),
+          content: truncateMiddle(JSON.stringify(entry.result), MAX_TOOL_RESULT_CHARS),
         });
       } else if (entry.type === 'finish') {
         messages.push({ role: 'assistant', content: entry.content });

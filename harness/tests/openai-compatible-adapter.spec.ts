@@ -360,6 +360,34 @@ describe('OpenAICompatibleModelAdapter', () => {
     expect(body.messages[3].tool_call_id).toBe('call_write_file');
   });
 
+  it('keeps the tail of a long tool result so trailing errors reach the model', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }],
+      }),
+    );
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const stdout = 'BUILD START\n' + 'noise line\n'.repeat(5000) + 'error TS2322: final failure';
+
+    await adapter.complete(
+      request([
+        { type: 'tool_call', tool: 'write_file', args: { path: 'x.txt' } },
+        { type: 'tool_result', tool: 'write_file', success: false, result: { exitCode: 2, stdout } },
+      ]),
+    );
+
+    const init = (fetchImpl.mock.calls[0] as unknown[])[1] as RequestInit;
+    const body = JSON.parse(String(init.body));
+    const content: string = body.messages[3].content;
+    expect(content.length).toBeLessThanOrEqual(8000);
+    expect(content).toContain('BUILD START');
+    expect(content).toContain('error TS2322: final failure');
+    expect(content).toMatch(/\[truncated \d+ chars\]/);
+  });
+
   it('returns invalid_tool_arguments when a tool call has malformed JSON arguments', async () => {
     process.env.MODEL_API_KEY = 'test-key';
     process.env.MODEL_ID = 'test-model';
