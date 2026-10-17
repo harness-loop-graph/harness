@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { McpToolProvider, OpenAICompatibleModelAdapter, RoutingModelAdapter, BudgetedModelAdapter } from '../../harness/dist/index.js';
 import {
+  HARNESS_INSTRUCTIONS,
   parseArgs,
   buildNodes,
   loadHarnessExtras,
@@ -1354,4 +1355,10 @@ test('spawnCommand({ scrubEnv: true }) strips inherited secrets but keeps explic
       else process.env[k] = v;
     }
   }
+});
+
+test('harness instructions pin the repository root to the workspace root', () => {
+  assert.match(HARNESS_INSTRUCTIONS, /workspace root is the repository root/i);
+  assert.match(HARNESS_INSTRUCTIONS, /docker-compose\.yml/);
+  assert.match(HARNESS_INSTRUCTIONS, /Stay inside the workspace/);
 });

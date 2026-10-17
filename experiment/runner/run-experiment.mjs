@@ -152,6 +152,15 @@ function parseArgs(argv) {
   return parsed;
 }
 
+// Identical for c1/c2/c3. The repository-root sentence exists because the
+// SPEC runs `docker compose up` and Playwright "from the repo root" without
+// saying where that is, and a real run nested the project under project/.
+const HARNESS_INSTRUCTIONS =
+  'You are an agent inside a controlled harness. Use the provided tools to complete your task. ' +
+  'Stay inside the workspace. The workspace root is the repository root: place docker-compose.yml ' +
+  'and the project files there, not in a nested folder. ' +
+  'Finish with a final answer once your task is complete.';
+
 const ENV_FILE_KEYS = ['MODEL_API_KEY', 'MODEL_ID', 'MODEL_BASE_URL'];
 
 // Values from the root .env are exported to process.env (never overriding it) so the adapter and
@@ -742,9 +751,7 @@ function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
     {
       workspaceRoot: ws,
       availTools,
-      instructions:
-        "You are an agent inside a controlled harness. Use the provided tools to complete your task. " +
-        "Stay inside the workspace. Finish with a final answer once your task is complete.",
+      instructions: HARNESS_INSTRUCTIONS,
       maxToolRounds: toolRounds,
     },
   );
@@ -1197,6 +1204,7 @@ if (isEntryPoint) {
 }
 
 export {
+  HARNESS_INSTRUCTIONS,
   parseArgs,
   loadCredentials,
   loadHarnessExtras,
