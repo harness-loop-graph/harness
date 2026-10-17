@@ -1004,4 +1004,53 @@ describe('OpenAICompatibleModelAdapter', () => {
     });
   });
 
+  describe('sampling parameters', () => {
+    const OK = { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }] };
+
+    function samplingAdapter(sampling: Record<string, number> = {}) {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(200, OK));
+      const adapter = new OpenAICompatibleModelAdapter({
+        apiKey: 'k',
+        model: 'm',
+        baseUrl: 'https://api.example.test/v1',
+        fetchImpl,
+        ...sampling,
+      });
+      const sentBody = () => JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string) as Record<string, unknown>;
+      return { adapter, sentBody };
+    }
+
+    it('omits every sampling field from the request body when none is set', async () => {
+      const { adapter, sentBody } = samplingAdapter();
+      await adapter.complete(request());
+      const body = sentBody();
+      for (const key of ['temperature', 'top_p', 'seed', 'max_tokens']) {
+        expect(key in body).toBe(false);
+      }
+      expect(adapter.getSamplingConfig()).toEqual({ temperature: null, topP: null, seed: null, maxTokens: null });
+    });
+
+    it('sends each set field with the provider names and exact values', async () => {
+      const { adapter, sentBody } = samplingAdapter({ temperature: 0.2, topP: 0.9, seed: 42, maxTokens: 4096 });
+      await adapter.complete(request());
+      const body = sentBody();
+      expect(body.temperature).toBe(0.2);
+      expect(body.top_p).toBe(0.9);
+      expect(body.seed).toBe(42);
+      expect(body.max_tokens).toBe(4096);
+      expect(adapter.getSamplingConfig()).toEqual({ temperature: 0.2, topP: 0.9, seed: 42, maxTokens: 4096 });
+    });
+
+    it('treats zero as set (temperature 0, seed 0) and omits only the unset fields', async () => {
+      const { adapter, sentBody } = samplingAdapter({ temperature: 0, seed: 0 });
+      await adapter.complete(request());
+      const body = sentBody();
+      expect(body.temperature).toBe(0);
+      expect(body.seed).toBe(0);
+      expect('top_p' in body).toBe(false);
+      expect('max_tokens' in body).toBe(false);
+      expect(adapter.getSamplingConfig()).toEqual({ temperature: 0, topP: null, seed: 0, maxTokens: null });
+    });
+  });
+
 });

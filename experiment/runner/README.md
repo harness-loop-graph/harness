@@ -65,6 +65,10 @@ Router:
 | `--max-turns <n>` | 8 | Presupuesto de turnos del *loop* (nodos C2/C3). Debe ser un entero positivo |
 | `--max-steps <n>` | 12 | Presupuesto de pasos del grafo (solo C3). Debe ser un entero positivo |
 | `--tool-rounds <n>` | 80 (c1), 30 (c2/c3) | Presupuesto de llamadas a herramienta por interacción. Debe ser un entero positivo |
+| `--temperature <n>` | sin valor (default del proveedor) | Temperatura de muestreo, número en [0, 2]. Se aplica a **todos** los adaptadores que crea el runner (el predeterminado y los de cada ruta del *router*), de modo que C1/C2/C3 muestreen igual |
+| `--top-p <n>` | sin valor | `top_p`, número en (0, 1]. Mismo alcance que `--temperature` |
+| `--seed <n>` | sin valor | `seed` de muestreo, entero. Mismo alcance que `--temperature` |
+| `--max-tokens <n>` | sin valor | `max_tokens` por llamada, entero positivo. Mismo alcance que `--temperature` |
 | `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf http://localhost:3000/health` | Comando de verificación de C2 |
 | `--with-batteries` | desactivado | Después de la generación, levanta el stack y corre las baterías de aceptación |
 | `--keep` | desactivado | Con `--with-batteries`, **no** desmonta el stack al final |
@@ -72,6 +76,11 @@ Router:
 | `--harness-config <path>` | — | JSON `{ mcpServers, skillsDirs }`; conecta herramientas MCP + *skills* a cada *harness* que construye la corrida |
 | `--publish` | desactivado | Después de la corrida (y su commit local de git), crea un repositorio **público** de GitHub para el espacio de trabajo vía `gh` y lo empuja (ver abajo) |
 | `--publish-org <org>` | `harness-loop-graph` | Organización/usuario de GitHub bajo el que se crea el repositorio de `--publish` |
+
+Los flags de muestreo que no se pasan quedan sin definir: el campo se omite
+de la solicitud y rige el default del proveedor. Un valor inválido termina con
+un error de uso. Si se usa un *router*, todas las rutas reciben el mismo
+muestreo.
 
 ### Credenciales
 
@@ -260,12 +269,19 @@ publicado.
 
 ## Referencia de `run-report.json`
 
-Cada corrida escribe `run-report.json` en el espacio de trabajo:
+Cada corrida escribe `run-report.json` en el espacio de trabajo. `sampling`
+(`null` por cada parámetro sin definir), `harnessGitSha` (`git rev-parse HEAD`
+del repositorio del *harness*) y `harnessGitDirty` (`git status --porcelain`
+no vacío) están presentes en toda corrida, también las fallidas y el plan de
+`--dry-run`; los dos últimos valen `null` si git no está disponible:
 
 ```json
 {
   "config": "c1|c2|c3",
   "model": "gpt-4o-mini",
+  "sampling": { "temperature": null, "topP": null, "seed": null, "maxTokens": null },
+  "harnessGitSha": "<git rev-parse HEAD del repo, o null>",
+  "harnessGitDirty": false,
   "startedAt": "...",
   "finishedAt": "...",
   "durationMs": 0,

@@ -14,6 +14,7 @@ import {
   loadHarnessExtras,
   buildHarness,
   createModel,
+  readGitMetadata,
   createWorkspace,
   summarizeRouting,
   attachUsageAndRouting,
@@ -431,6 +432,102 @@ test('parseArgs() --publish and --publish-org', () => {
   const parsed = parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--publish', '--publish-org', 'some-org']);
   assert.equal(parsed.publish, true);
   assert.equal(parsed.publishOrg, 'some-org');
+});
+
+test('parseArgs() sampling flags default to unset (null)', () => {
+  const parsed = parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']);
+  assert.deepEqual(parsed.sampling, { temperature: null, topP: null, seed: null, maxTokens: null });
+});
+
+test('parseArgs() parses valid --temperature/--top-p/--seed/--max-tokens', () => {
+  const parsed = parseArgs([
+    'node', 'run-experiment.mjs', '--config', 'c2',
+    '--temperature', '0', '--top-p', '1', '--seed', '-7', '--max-tokens', '4096',
+  ]);
+  assert.deepEqual(parsed.sampling, { temperature: 0, topP: 1, seed: -7, maxTokens: 4096 });
+  const edge = parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--temperature', '2', '--top-p', '0.05']);
+  assert.deepEqual(edge.sampling, { temperature: 2, topP: 0.05, seed: null, maxTokens: null });
+});
+
+test('invalid sampling flag values exit with a usage error', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const cases = [
+    [['--temperature', '2.5'], /--temperature/],
+    [['--temperature', '-0.1'], /--temperature/],
+    [['--temperature', 'abc'], /--temperature/],
+    [['--temperature'], /--temperature/],
+    [['--top-p', '0'], /--top-p/],
+    [['--top-p', '1.5'], /--top-p/],
+    [['--seed', '1.5'], /--seed/],
+    [['--seed', 'x'], /--seed/],
+    [['--max-tokens', '0'], /--max-tokens/],
+    [['--max-tokens', '2.5'], /--max-tokens/],
+  ];
+  for (const [flags, pattern] of cases) {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', ...flags],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.equal(res.status, 1, `${flags.join(' ')} should exit 1`);
+    assert.match(res.stderr, /Usage/);
+    assert.match(res.stderr, pattern);
+  }
+});
+
+test('--dry-run plan records sampling and reproducibility metadata (git sha + dirty flag)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const res = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', '--temperature', '0.3', '--seed', '7'],
+    { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  const plan = JSON.parse(res.stdout);
+  assert.deepEqual(plan.sampling, { temperature: 0.3, topP: null, seed: 7, maxTokens: null });
+  assert.ok('harnessGitSha' in plan);
+  assert.ok(plan.harnessGitSha === null || /^[0-9a-f]{40}$/.test(plan.harnessGitSha));
+  assert.ok('harnessGitDirty' in plan);
+  assert.ok(plan.harnessGitDirty === null || typeof plan.harnessGitDirty === 'boolean');
+});
+
+test('readGitMetadata() returns nulls instead of throwing when git is unavailable', async () => {
+  const meta = await readGitMetadata({ cwd: '/nonexistent-dir-for-git-metadata' });
+  assert.deepEqual(meta, { harnessGitSha: null, harnessGitDirty: null });
+});
+
+test('createModel() applies the same sampling to the default adapter and every route adapter', async () => {
+  const created = [];
+  const makeAdapter = (cfg) => {
+    created.push(cfg);
+    return { async complete() { return { type: 'finish', content: 'stub' }; } };
+  };
+  const previous = { MODEL_API_KEY: process.env.MODEL_API_KEY, MODEL_BASE_URL: process.env.MODEL_BASE_URL };
+  process.env.MODEL_API_KEY = 'env-key';
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  const sampling = { temperature: 0.4, topP: 0.8, seed: 11, maxTokens: 2048 };
+  try {
+    const harnessExtras = { router: { routes: { retry: { model: 'retry-model' } } } };
+    const model = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, makeAdapter, sampling });
+    assert.deepEqual(created, [
+      { apiKey: 'env-key', model: 'retry-model', baseUrl: 'https://test.example/v1', ...sampling },
+    ]);
+    assert.ok(model instanceof RoutingModelAdapter);
+
+    // Plain (no router) adapter exposes the effective sampling too.
+    const plain = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null, sampling });
+    assert.deepEqual(plain.getSamplingConfig(), sampling);
+
+    // Unset sampling leaves route adapter configs untouched (no extra keys).
+    created.length = 0;
+    await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, makeAdapter });
+    assert.deepEqual(created, [{ apiKey: 'env-key', model: 'retry-model', baseUrl: 'https://test.example/v1' }]);
+  } finally {
+    for (const [k, v] of Object.entries(previous)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });
 
 test('slugifyModelId() lowercases and collapses non [a-z0-9] runs into single trimmed hyphens', () => {

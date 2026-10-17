@@ -52,6 +52,21 @@ function parsePositiveIntFlag(flag, raw) {
   return n;
 }
 
+// Parses a numeric sampling flag, or exits with a usage error. `describe`
+// names the accepted range in the message; `valid` is the range predicate.
+function parseNumberFlag(flag, raw, { describe, valid }) {
+  if (raw === undefined) {
+    console.error(`Usage: ${flag} <n> requires a value`);
+    process.exit(1);
+  }
+  const n = raw.trim() === '' ? NaN : Number(raw);
+  if (!Number.isFinite(n) || !valid(n)) {
+    console.error(`Usage: ${flag} <n> must be ${describe} (got: ${raw})`);
+    process.exit(1);
+  }
+  return n;
+}
+
 function parseArgs(argv) {
   const args = argv.slice(2);
   const parsed = {
@@ -71,6 +86,8 @@ function parseArgs(argv) {
     harnessConfig: null,
     publish: false,
     publishOrg: 'harness-loop-graph',
+    // null = unset: the provider default applies and the field is omitted from requests.
+    sampling: { temperature: null, topP: null, seed: null, maxTokens: null },
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -81,6 +98,22 @@ function parseArgs(argv) {
     else if (a === '--max-turns') parsed.maxTurns = parsePositiveIntFlag('--max-turns', args[++i]);
     else if (a === '--max-steps') parsed.maxSteps = parsePositiveIntFlag('--max-steps', args[++i]);
     else if (a === '--tool-rounds') parsed.toolRounds = parsePositiveIntFlag('--tool-rounds', args[++i]);
+    else if (a === '--temperature') {
+      parsed.sampling.temperature = parseNumberFlag('--temperature', args[++i], {
+        describe: 'a number between 0 and 2',
+        valid: (n) => n >= 0 && n <= 2,
+      });
+    } else if (a === '--top-p') {
+      parsed.sampling.topP = parseNumberFlag('--top-p', args[++i], {
+        describe: 'a number greater than 0 and at most 1',
+        valid: (n) => n > 0 && n <= 1,
+      });
+    } else if (a === '--seed') {
+      parsed.sampling.seed = parseNumberFlag('--seed', args[++i], {
+        describe: 'an integer',
+        valid: Number.isInteger,
+      });
+    } else if (a === '--max-tokens') parsed.sampling.maxTokens = parsePositiveIntFlag('--max-tokens', args[++i]);
     else if (a === '--verify-cmd') parsed.verifyCmd = args[++i];
     else if (a === '--with-batteries') parsed.withBatteries = true;
     else if (a === '--keep') parsed.keep = true;
@@ -549,10 +582,41 @@ async function loadHarnessExtras(configPath) {
  * output without --harness-config (or without a router section) is
  * unaffected.
  */
-async function createModel({ apiKey, modelId, harnessExtras, makeAdapter }) {
-  const defaultAdapter = new OpenAICompatibleModelAdapter({ apiKey, model: modelId });
+async function createModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling }) {
+  const defaultAdapter = new OpenAICompatibleModelAdapter({ apiKey, model: modelId, ...samplingToAdapterConfig(sampling) });
   if (!harnessExtras?.router) return defaultAdapter;
-  return createRoutedModel(harnessExtras.router, defaultAdapter, { makeAdapter });
+  // Route adapters get the same sampling as the default one: equal sampling across c1/c2/c3 is the point.
+  const build = makeAdapter ?? ((cfg) => new OpenAICompatibleModelAdapter(cfg));
+  return createRoutedModel(harnessExtras.router, defaultAdapter, {
+    makeAdapter: (cfg) => build({ ...cfg, ...samplingToAdapterConfig(sampling) }),
+  });
+}
+
+// Adapter config for the set sampling fields only; unset (null/undefined)
+// fields are left out so the adapter omits them from the request body.
+function samplingToAdapterConfig(sampling) {
+  const cfg = {};
+  if (sampling?.temperature != null) cfg.temperature = sampling.temperature;
+  if (sampling?.topP != null) cfg.topP = sampling.topP;
+  if (sampling?.seed != null) cfg.seed = sampling.seed;
+  if (sampling?.maxTokens != null) cfg.maxTokens = sampling.maxTokens;
+  return cfg;
+}
+
+// Commit and dirty flag of the harness checkout, for run reproducibility.
+// Never throws: a missing git or a non-repo directory yields nulls.
+async function readGitMetadata({ cwd = path.resolve(__dirname, '..', '..') } = {}) {
+  let harnessGitSha = null;
+  let harnessGitDirty = null;
+  try {
+    const { stdout } = await spawnCommand('git', ['rev-parse', 'HEAD'], { cwd });
+    harnessGitSha = stdout.trim() || null;
+  } catch { /* git missing or not a repository */ }
+  try {
+    const { stdout } = await spawnCommand('git', ['status', '--porcelain'], { cwd });
+    harnessGitDirty = stdout.trim().length > 0;
+  } catch { /* git missing or not a repository */ }
+  return { harnessGitSha, harnessGitDirty };
 }
 
 /**
@@ -813,6 +877,8 @@ async function main() {
   const { apiKey, modelId } = await loadCredentials();
   const ws = await createWorkspace(parsed.runsDir, parsed.config, modelId, parsed.spec, { dryRun: parsed.dryRun });
 
+  const gitMetadata = await readGitMetadata();
+
   if (parsed.dryRun) {
     const plan = {
       workspace: ws,
@@ -823,6 +889,8 @@ async function main() {
         maxSteps: parsed.maxSteps,
         toolRoundsPerTurn: parsed.toolRounds,
       },
+      sampling: parsed.sampling,
+      ...gitMetadata,
       batteryPhase: parsed.withBatteries,
       harnessConfig: parsed.harnessConfig ?? undefined,
     };
@@ -849,6 +917,8 @@ async function main() {
   let report = {
     config: parsed.config,
     model: modelId,
+    sampling: parsed.sampling,
+    ...gitMetadata,
     startedAt,
     finishedAt: null,
     durationMs: 0,
@@ -874,7 +944,7 @@ async function main() {
   let runException = null;
   if (!configFailure) try {
     if (parsed.config === 'c1') {
-      const model = await createModel({ apiKey, modelId, harnessExtras });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling });
       const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
       report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
@@ -887,7 +957,7 @@ async function main() {
         report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
       }
     } else if (parsed.config === 'c2') {
-      const model = await createModel({ apiKey, modelId, harnessExtras });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling });
       const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
       const loopResult = await loop.run({
@@ -906,7 +976,7 @@ async function main() {
         report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
       }
     } else if (parsed.config === 'c3') {
-      const model = await createModel({ apiKey, modelId, harnessExtras });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling });
       const factory = (node) => {
         if (node.id === 'reviewer') clearStaleReviewVerdict(ws);
         const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`), harnessExtras);
@@ -1042,6 +1112,7 @@ export {
   buildRouter,
   createWorkspace,
   createModel,
+  readGitMetadata,
   summarizeRouting,
   attachUsageAndRouting,
   compactTraceC3,

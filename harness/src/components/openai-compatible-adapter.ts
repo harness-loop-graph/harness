@@ -44,6 +44,22 @@ export interface OpenAICompatibleAdapterConfig {
   sleep?: (ms: number) => Promise<void>;
   /** Injectable [0, 1) random source for backoff jitter. Defaults to Math.random. */
   random?: () => number;
+  /** Sampling temperature. Sent as `temperature` only when set; unset leaves the provider default. */
+  temperature?: number;
+  /** Nucleus sampling mass. Sent as `top_p` only when set. */
+  topP?: number;
+  /** Sampling seed for best-effort reproducibility. Sent as `seed` only when set. */
+  seed?: number;
+  /** Max completion tokens. Sent as `max_tokens` only when set. */
+  maxTokens?: number;
+}
+
+/** Effective sampling settings; `null` means unset (provider default, field omitted from requests). */
+export interface SamplingConfig {
+  temperature: number | null;
+  topP: number | null;
+  seed: number | null;
+  maxTokens: number | null;
 }
 
 interface ChatMessage {
@@ -108,6 +124,7 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
   private readonly retryBaseDelayMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
+  private readonly sampling: SamplingConfig;
   private retries = 0;
   private promptTokens = 0;
   private completionTokens = 0;
@@ -128,6 +145,12 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     this.retryBaseDelayMs = config.retryBaseDelayMs ?? 1000;
     this.sleep = config.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.random = config.random ?? Math.random;
+    this.sampling = {
+      temperature: config.temperature ?? null,
+      topP: config.topP ?? null,
+      seed: config.seed ?? null,
+      maxTokens: config.maxTokens ?? null,
+    };
 
     if (this.apiKey === '') {
       throw new Error('MODEL_API_KEY is not set. Export it before constructing OpenAICompatibleModelAdapter.');
@@ -148,6 +171,10 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       model: this.model,
       messages: this.buildMessages(request),
       tools: request.availTools.length > 0 ? this.buildTools(request) : undefined,
+      ...(this.sampling.temperature !== null && { temperature: this.sampling.temperature }),
+      ...(this.sampling.topP !== null && { top_p: this.sampling.topP }),
+      ...(this.sampling.seed !== null && { seed: this.sampling.seed }),
+      ...(this.sampling.maxTokens !== null && { max_tokens: this.sampling.maxTokens }),
     };
 
     const fetched = await this.fetchWithRetry(body);
@@ -344,6 +371,11 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     }
 
     return messages;
+  }
+
+  /** Effective sampling settings (null = unset), for recording in run reports. */
+  getSamplingConfig(): SamplingConfig {
+    return { ...this.sampling };
   }
 
   getUsage(): {

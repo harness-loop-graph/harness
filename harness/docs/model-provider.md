@@ -38,6 +38,17 @@ qué el diseño en sí se mantiene agnóstico de proveedor.
 | `timeoutMs` | argumento del constructor | `120_000` |
 | `headers` | argumento del constructor | `{}` — combinado en cada solicitud, para un endpoint que necesite un encabezado personalizado |
 | `userAgent` | argumento del constructor | `'pi-harness/0.1.0'` |
+| `temperature` | argumento del constructor | sin valor (default del proveedor); se envía como `temperature` |
+| `topP` | argumento del constructor | sin valor (default del proveedor); se envía como `top_p` |
+| `seed` | argumento del constructor | sin valor (default del proveedor); se envía como `seed` |
+| `maxTokens` | argumento del constructor | sin valor (default del proveedor); se envía como `max_tokens` |
+
+Los cuatro campos de muestreo son opcionales: cada uno se incluye en el cuerpo
+de la solicitud **solo si está definido** (el `0` cuenta como definido); si no,
+el campo se omite y rige el default del proveedor. `getSamplingConfig()`
+devuelve los valores efectivos `{ temperature, topP, seed, maxTokens }` con
+`null` para los no definidos, de modo que quien invoca pueda registrarlos
+(el runner del experimento los guarda en `run-report.json`).
 
 El constructor lanza error inmediatamente (`MODEL_API_KEY is not set...` /
 `MODEL_ID is not set...` / `MODEL_BASE_URL is not set...`) si la clave, el
@@ -62,7 +73,11 @@ proveedor); apunta a cualquier endpoint compatible con OpenAI, p. ej.
 {
   "model": "<MODEL_ID>",
   "messages": [ ... ],
-  "tools": [ ... ]   // se omite cuando availTools está vacío
+  "tools": [ ... ],   // se omite cuando availTools está vacío
+  "temperature": 0.2, // opcionales: solo si están configurados
+  "top_p": 0.9,
+  "seed": 42,
+  "max_tokens": 4096
 }
 ```
 
@@ -179,5 +194,7 @@ red se mapean ambos a respuestas `error` tipadas; el uso se acumula a través
 de llamadas y vuelve a cero por defecto cuando el payload lo omite; la
 política de reintentos (429/5xx/red/*timeout* sí, otros 4xx y payloads
 inválidos no; `Retry-After`, tope de *backoff*, `retries` en `getUsage()` y
-sin doble conteo de uso); y
+sin doble conteo de uso); los parámetros de muestreo (ausentes del cuerpo
+si no se configuran, presentes con nombres y valores exactos si se
+configuran, y `getSamplingConfig()`); y
 `history` se reconstruye correctamente en mensajes `assistant`/`tool`.
