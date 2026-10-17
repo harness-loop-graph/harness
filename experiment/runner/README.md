@@ -412,6 +412,15 @@ false` y un tope definido se agrega `budget.warning`.
   pidieron juntos `--with-batteries --keep`, ya que la fase de baterías ya
   dejó intencionalmente el stack levantado para inspección. La fase de
   baterías (arriba) reutiliza este mismo ayudante de desmontaje.
+- **Secretos fuera del entorno del código generado.** `MODEL_API_KEY` (y
+  `MODEL_BASE_URL`) se exportan a `process.env` del runner, pero los comandos
+  emitidos por el modelo y el `--verify-cmd` (`LocalExecutionManager`) y los
+  procesos de la fase de baterías y `docker compose up` ya no los heredan: se
+  eliminan del entorno heredado las variables cuyo nombre contiene `API_KEY`,
+  `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, etc., más el `apiKeyEnv` de cada
+  ruta del router. Las variables pasadas explícitamente (`BACKEND_URL`,
+  `FRONTEND_URL`, `DB_URL`, `WORKSPACE`) siguen llegando a las baterías. Los
+  procesos `git`/`gh` conservan el entorno completo.
 - **Guardas de publicación.** El escaneo de secretos y la verificación de
   filtración del banco de aceptación descritos en "Publicación" arriba
   corren antes de cualquier llamada a `gh`/`git`, y solo sobre archivos

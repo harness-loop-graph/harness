@@ -86,6 +86,14 @@ medio, y aplica un timeout estricto
 `exitCode: 124` con un marcador `[timeout]` en stderr. Un error de spawn en sí
 mismo se traduce en `exitCode: 127`.
 
+El entorno del hijo se construye con `scrubEnv(process.env, envDenylist)`: se
+eliminan las variables cuyo nombre contiene (sin distinguir mayúsculas)
+`API_KEY`, `APIKEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL` o
+`PRIVATE_KEY`, más `MODEL_API_KEY`, `MODEL_BASE_URL` y los nombres exactos de la
+opción `envDenylist`. El resto (`PATH`, `HOME`, `DOCKER_HOST`, …) se conserva, y
+las entradas explícitas de `req.env` se aplican después, así que ganan. Así un
+`env` o `printenv` emitido por el modelo no puede leer la clave de API.
+
 ### 5. Verification Manager — `RecordingVerificationManager`
 
 `verify(result: ExecutionResult)` convierte un resultado de ejecución en un

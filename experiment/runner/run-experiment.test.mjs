@@ -34,6 +34,8 @@ import {
   clearStaleReviewVerdict,
   buildRouter,
   loadCredentials,
+  routeApiKeyEnvNames,
+  spawnCommand,
 } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1222,4 +1224,68 @@ test('applyBudgetToReport() flags costReported=false when calls happened at zero
   assert.equal(report.budget.costReported, false);
   assert.equal(report.budget.exhausted, false);
   assert.equal(report.failure, undefined, 'an unknown cost warns but never fails the run');
+});
+
+test('routeApiKeyEnvNames() lists every router route apiKeyEnv, and is empty without a router', () => {
+  assert.deepEqual(routeApiKeyEnvNames(null), []);
+  assert.deepEqual(routeApiKeyEnvNames({}), []);
+  assert.deepEqual(
+    routeApiKeyEnvNames({ router: { routes: { a: { apiKeyEnv: 'ROUTE_A_VAR' }, b: {}, c: { apiKeyEnv: 'ROUTE_C_VAR' } } } }).sort(),
+    ['ROUTE_A_VAR', 'ROUTE_C_VAR'],
+  );
+});
+
+test('buildHarness() execution hides MODEL_API_KEY and router apiKeyEnv values from model-issued commands', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-scrub-'));
+  const saved = { MODEL_API_KEY: process.env.MODEL_API_KEY, ROUTE_PLAIN_VAR: process.env.ROUTE_PLAIN_VAR };
+  process.env.MODEL_API_KEY = 'sk-leak';
+  process.env.ROUTE_PLAIN_VAR = 'route-leak';
+  try {
+    const extras = {
+      router: { routes: { cheap: { apiKeyEnv: 'ROUTE_PLAIN_VAR' } } },
+      mcpProvider: { registerInto: () => [] },
+      allowedToolNames: [],
+    };
+    const { execution } = buildHarness(workspace, {}, 5, path.join(workspace, 'audit.jsonl'), extras);
+    const res = await execution.run({ command: `node -e "console.log(JSON.stringify(process.env))"`, cwd: '.' });
+    const env = JSON.parse(res.stdout);
+    assert.equal(env.MODEL_API_KEY, undefined);
+    assert.equal(env.ROUTE_PLAIN_VAR, undefined);
+    assert.ok(env.PATH);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('spawnCommand({ scrubEnv: true }) strips inherited secrets but keeps explicit env (e.g. SEED_PASSWORD)', async () => {
+  const saved = { MODEL_API_KEY: process.env.MODEL_API_KEY, ROUTE_PLAIN_VAR: process.env.ROUTE_PLAIN_VAR };
+  process.env.MODEL_API_KEY = 'sk-leak';
+  process.env.ROUTE_PLAIN_VAR = 'route-leak';
+  try {
+    const script = 'console.log(JSON.stringify(process.env))';
+    const scrubbed = await spawnCommand('node', ['-e', script], {
+      scrubEnv: true,
+      scrubNames: ['ROUTE_PLAIN_VAR'],
+      env: { SEED_PASSWORD: 'seed', BACKEND_URL: 'http://localhost:3000' },
+    });
+    const env = JSON.parse(scrubbed.stdout);
+    assert.equal(env.MODEL_API_KEY, undefined);
+    assert.equal(env.ROUTE_PLAIN_VAR, undefined);
+    assert.equal(env.SEED_PASSWORD, 'seed');
+    assert.equal(env.BACKEND_URL, 'http://localhost:3000');
+    assert.ok(env.PATH);
+
+    // Default (git/gh) spawns keep the inherited env untouched.
+    const plain = await spawnCommand('node', ['-e', script], {});
+    assert.equal(JSON.parse(plain.stdout).MODEL_API_KEY, 'sk-leak');
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });

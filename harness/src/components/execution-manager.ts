@@ -10,11 +10,34 @@ export interface ExecutionManager {
 
 const MAX_OUTPUT_BYTES = 512 * 1024;
 
+const SECRET_NAME_PATTERN = /API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY/i;
+const DEFAULT_SECRET_NAMES = ['MODEL_API_KEY', 'MODEL_BASE_URL'];
+
+/**
+ * Returns a copy of `env` without secrets: names matching the default secret pattern
+ * (case-insensitive), the default explicit names, and any exact name in `extraNames`.
+ * Undefined values are dropped.
+ */
+export function scrubEnv(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  extraNames: readonly string[] = [],
+): Record<string, string> {
+  const denied = new Set([...DEFAULT_SECRET_NAMES, ...extraNames]);
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined || denied.has(name) || SECRET_NAME_PATTERN.test(name)) continue;
+    out[name] = value;
+  }
+  return out;
+}
+
 export interface LocalExecutionOptions {
   /** Absolute path the agent is confined to; commands never run outside it. */
   workspaceRoot: string;
   /** Hard kill after this many milliseconds. Default 30_000. */
   timeoutMs?: number;
+  /** Extra exact env var names removed from the inherited environment (on top of the default secret filter). */
+  envDenylist?: string[];
 }
 
 /** Spawns commands confined to the workspace, with output caps and a hard timeout. */
@@ -37,7 +60,7 @@ export class LocalExecutionManager implements ExecutionManager {
       const child = spawn(req.command, {
         shell: true,
         cwd,
-        env: { ...process.env, ...req.env },
+        env: { ...scrubEnv(process.env, this.opts.envDenylist), ...req.env },
       });
 
       const out = new BoundedOutput(MAX_OUTPUT_BYTES);

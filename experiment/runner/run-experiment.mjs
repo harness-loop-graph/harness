@@ -16,6 +16,7 @@ import {
   BudgetedModelAdapter,
   FsContextManager,
   LocalExecutionManager,
+  scrubEnv,
   PolicyGuardrails,
   RegistryToolManager,
   registerBuiltinTools,
@@ -425,11 +426,24 @@ async function publishWorkspace({ ws, report, modelId, config, org, secrets, run
   }
 }
 
+// Env var names of every router route's own API key (routes may point at keys other than
+// MODEL_API_KEY). Generated code and model-issued commands must never inherit them.
+function routeApiKeyEnvNames(harnessExtras) {
+  const routes = harnessExtras?.router?.routes;
+  if (!routes) return [];
+  return Object.values(routes).map((route) => route.apiKeyEnv).filter(Boolean);
+}
+
+// `opts.scrubEnv` strips secrets (see scrubEnv() in the harness, plus `opts.scrubNames`) from the
+// inherited environment before the explicit `opts.env` is applied, so caller-passed variables
+// (e.g. SEED_PASSWORD for the batteries) still reach the child. Use it for every spawn that runs
+// generated code; git/gh spawns keep the full environment (gh may authenticate through it).
 function spawnCommand(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
+    const inherited = opts.scrubEnv ? scrubEnv(process.env, opts.scrubNames) : process.env;
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
-      env: { ...process.env, ...opts.env },
+      env: { ...inherited, ...opts.env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -485,11 +499,13 @@ async function workspaceMayHaveDockerStack(ws, verifyCmd) {
   return false;
 }
 
-async function runBatteries(ws, keep) {
+async function runBatteries(ws, keep, scrubNames = []) {
   let batteryReport = null;
   let batteryError = null;
+  // SEED_PASSWORD matches the secret filter but is an operator-set seed value the app and batteries share.
+  const seedEnv = process.env.SEED_PASSWORD ? { SEED_PASSWORD: process.env.SEED_PASSWORD } : {};
   try {
-    await spawnCommand('docker', ['compose', 'up', '-d', '--build'], { cwd: ws, timeoutMs: 600_000 });
+    await spawnCommand('docker', ['compose', 'up', '-d', '--build'], { cwd: ws, timeoutMs: 600_000, scrubEnv: true, scrubNames, env: seedEnv });
     let healthy = false;
     for (let i = 0; i < 120; i++) {
       try {
@@ -506,7 +522,10 @@ async function runBatteries(ws, keep) {
     const acceptanceDir = path.resolve(__dirname, '..', 'acceptance');
     const result = await spawnCommand('node', ['run-all.mjs'], {
       cwd: acceptanceDir,
+      scrubEnv: true,
+      scrubNames,
       env: {
+        ...seedEnv,
         BACKEND_URL: 'http://localhost:3000',
         FRONTEND_URL: 'http://localhost:8080',
         DB_URL: 'postgres://medapp:medapp@localhost:5432/medapp',
@@ -688,7 +707,11 @@ function applyBudgetToReport(report, model, maxCostUsd) {
 }
 
 function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
-  const execution = new LocalExecutionManager({ workspaceRoot: ws, timeoutMs: 600_000 });
+  const execution = new LocalExecutionManager({
+    workspaceRoot: ws,
+    timeoutMs: 600_000,
+    envDenylist: routeApiKeyEnvNames(harnessExtras),
+  });
   const guardrails = new PolicyGuardrails(
     {
       workspaceRoot: ws,
@@ -1052,7 +1075,7 @@ async function main() {
     }
 
     if (parsed.withBatteries) {
-      const batteryInfo = await runBatteries(ws, parsed.keep);
+      const batteryInfo = await runBatteries(ws, parsed.keep, routeApiKeyEnvNames(harnessExtras));
       report.batteryPhase = {
         ran: true,
         passed: !batteryInfo.batteryError && (batteryInfo.batteryReport?.passed ?? false),
@@ -1188,6 +1211,8 @@ export {
   checkGhAuthenticated,
   publishWorkspace,
   teardownDockerCompose,
+  routeApiKeyEnvNames,
+  spawnCommand,
   workspaceMayHaveDockerStack,
   clearStaleReviewVerdict,
   main,
