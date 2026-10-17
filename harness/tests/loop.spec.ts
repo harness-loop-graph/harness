@@ -199,6 +199,24 @@ describe('C2 corrective loop', () => {
     expect(result.trace[0].decision.action).toBe('RETRY');
   });
 
+  it('FAIL immediately without verifying when the model budget is exhausted', async () => {
+    const budgetError: ModelResponse = { type: 'error', code: 'budget_exceeded', message: 'spent $5 of $5 limit' };
+    const model = new TurnScriptedModelAdapter([[budgetError], [budgetError], [budgetError]]);
+    const loop = buildLoop(model);
+
+    const result = await loop.run({
+      task: 'Create out.txt',
+      maxTurns: 3,
+      verification: { command: 'test -f out.txt' },
+    });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.turns).toBe(1);
+    expect(result.decision.action).toBe('FAIL');
+    expect(result.decision.reason).toContain('budget_exceeded');
+    expect(result.verifications).toHaveLength(0);
+  });
+
   it('accepts a finish without verification configured', async () => {
     const model = new TurnScriptedModelAdapter([[{ type: 'finish', content: 'done' }]]);
     const loop = buildLoop(model);

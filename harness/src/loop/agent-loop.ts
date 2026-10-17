@@ -51,8 +51,14 @@ export class AgentLoop {
 
       state.phase = 'observing';
 
+      // An exhausted model budget refuses every later call, so neither
+      // verifying nor retrying can change the outcome.
+      const budgetError =
+        finalResponse.type === 'error' && finalResponse.code === 'budget_exceeded' ? finalResponse : undefined;
+      const budgetExhausted = budgetError !== undefined;
+
       let verification: VerificationResult | undefined;
-      if (request.verification) {
+      if (request.verification && !budgetExhausted) {
         state.phase = 'verifying';
         const execution = await this.deps.execution.run({
           command: request.verification.command,
@@ -63,7 +69,9 @@ export class AgentLoop {
       }
 
       state.phase = 'deciding';
-      decision = this.decide(finalResponse, verification, request.maxTurns - turn);
+      decision = budgetExhausted
+        ? { action: 'FAIL', reason: `Model budget exhausted (budget_exceeded: ${budgetError.message})` }
+        : this.decide(finalResponse, verification, request.maxTurns - turn);
       state.lastAction = decision.action;
 
       trace.push({
