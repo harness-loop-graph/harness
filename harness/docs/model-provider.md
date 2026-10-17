@@ -149,17 +149,31 @@ la inestabilidad del proveedor (`report.usage.retries`).
 
 - **Se reintenta**: HTTP 429, 500, 502, 503, 504; errores de red (fetch
   rechaza: `TypeError`, `ECONNRESET`, etc.) y el aborto por *timeout* de la
-  solicitud (`timeoutMs`).
+  solicitud (`timeoutMs`). También se reintenta una respuesta 2xx cuyo
+  **cuerpo** falla: (a) la lectura del cuerpo rechaza (conexión cortada a
+  mitad del cuerpo, o el *timeout* se dispara mientras el cuerpo se
+  descarga), (b) el cuerpo está vacío, o (c) el cuerpo no es JSON válido
+  (p. ej. una página HTML de error de un proxy). Cada intento repetido suma
+  a `retries`, y el uso solo se acumula del payload exitoso ya parseado.
+  Igual se reintenta un 200 cuyo JSON trae un objeto `error` con `code`
+  numérico (o cadena numérica) en 429, 500, 502, 503, 504 o 408: es un fallo
+  transitorio del proveedor upstream (p. ej. OpenRouter).
 - **No se reintenta**: cualquier otro 4xx (400, 401, 403, 404, 422) ni un
-  payload exitoso pero inválido (`invalid_json`, `empty_response`,
-  `output_truncated`, etc.); esos se devuelven de inmediato.
+  payload exitoso pero semánticamente inválido (JSON válido con `error` de
+  otro código, p. ej. 400, 401, 402 sin créditos o 403; `empty_response`, `output_truncated`, etc.); esos se devuelven de
+  inmediato. Si el JSON trae un objeto `error`, el mensaje devuelto incluye
+  su `message` y `code`.
 - **Espera**: *backoff* exponencial con *jitter*: `base * 2^(n-1)` (base 1 s,
   tope 30 s), multiplicado por un factor aleatorio en [0.5, 1]. Si la
   respuesta trae `Retry-After` (segundos o fecha HTTP) se usa ese valor en
   lugar del *backoff*, topeado a 60 s.
 - **Agotados los reintentos**: se devuelve la misma forma de error de siempre
   (`http_<status>` o `network_error`) con el mensaje terminado en
-  `(after N attempts)`.
+  `(after N attempts)`. Los fallos de cuerpo usan `body_read_error` (la
+  lectura falló) o `invalid_json` (cuerpo vacío o no parseable); su mensaje
+  incluye el error subyacente, el status HTTP, el `content-type`, el largo
+  del cuerpo y los primeros ~300 caracteres en una sola línea, para poder
+  diagnosticarlo después. Nunca incluye cabeceras de la solicitud (la API key).
 
 Configuración en `OpenAICompatibleAdapterConfig` (todo opcional):
 
@@ -208,8 +222,8 @@ mapea a `finish`; apuntar `baseUrl` a `https://api.openai.com/v1` produce la
 forma de solicitud idéntica contra un proveedor distinto; HTTP 401 y fallos de
 red se mapean ambos a respuestas `error` tipadas; el uso se acumula a través
 de llamadas y vuelve a cero por defecto cuando el payload lo omite; la
-política de reintentos (429/5xx/red/*timeout* sí, otros 4xx y payloads
-inválidos no; `Retry-After`, tope de *backoff*, `retries` en `getUsage()` y
+política de reintentos (429/5xx/red/*timeout* y cuerpos ilegibles, vacíos o
+no-JSON y `error` 429/5xx/408 dentro de un 200 sí; otros 4xx y payloads semánticamente inválidos no; `Retry-After`, tope de *backoff*, `retries` en `getUsage()` y
 sin doble conteo de uso); los parámetros de muestreo (ausentes del cuerpo
 si no se configuran, presentes con nombres y valores exactos si se
 configuran, y `getSamplingConfig()`); y

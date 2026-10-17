@@ -9,6 +9,8 @@ const MAX_TOOL_RESULT_CHARS = 8000;
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 /** Cap for the exponential backoff delay. */
 const MAX_BACKOFF_MS = 30_000;
+/** Max chars of a bad response body quoted in an error message. */
+const MAX_BODY_SNIPPET_CHARS = 300;
 /** Cap for a provider-supplied Retry-After delay. */
 const MAX_RETRY_AFTER_MS = 60_000;
 
@@ -107,6 +109,24 @@ function parseRetryAfter(value: string | null): number | undefined {
   return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.round(ms)));
 }
 
+type ApiError = NonNullable<ChatCompletionResponse['error']>;
+
+/** True when a 200 payload's `error.code` (number or numeric string) is a transient HTTP status. */
+function isRetryableApiError(error: ApiError): boolean {
+  const code = typeof error.code === 'string' && /^\d+$/.test(error.code.trim()) ? Number(error.code) : error.code;
+  return typeof code === 'number' && (RETRYABLE_STATUSES.has(code) || code === 408);
+}
+
+/** Maps a payload `error` object to a typed error, keeping message and code diagnosable. */
+function describeApiError(error: ApiError): Extract<ModelResponse, { type: 'error' }> {
+  const message = error.message ?? 'Unknown API error';
+  return {
+    type: 'error',
+    code: String(error.code ?? 'api_error'),
+    message: error.code === undefined ? message : `${message} (code: ${error.code})`,
+  };
+}
+
 /**
  * OpenAI-compatible chat-completions adapter. The only harness component
  * that knows how to talk to a provider; swapping providers means pointing
@@ -179,14 +199,7 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
 
     const fetched = await this.fetchWithRetry(body);
     if (fetched.type === 'error') return fetched;
-    const response = fetched.response;
-
-    let payload: ChatCompletionResponse;
-    try {
-      payload = (await response.json()) as ChatCompletionResponse;
-    } catch {
-      return { type: 'error', code: 'invalid_json', message: 'The endpoint returned non-JSON content' };
-    }
+    const payload = fetched.payload;
 
     if (payload.model) {
       this.modelsUsed.add(payload.model);
@@ -198,13 +211,7 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       this.cost += payload.usage.cost ?? 0;
     }
 
-    if (payload.error) {
-      return {
-        type: 'error',
-        code: String(payload.error.code ?? 'api_error'),
-        message: payload.error.message ?? 'Unknown API error',
-      };
-    }
+    if (payload.error) return describeApiError(payload.error);
 
     // A cut-off or blocked completion is never a valid answer or tool call.
     // Checked after usage accounting: the tokens were spent either way.
@@ -253,13 +260,18 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
   /**
    * POSTs the request, retrying transient failures (see RETRYABLE_STATUSES,
    * network errors and timeouts) with exponential backoff and jitter.
-   * Failed attempts carry no usage, so nothing is accumulated for them. Any
-   * other non-2xx status is returned immediately; a 2xx response is handed
-   * back for payload validation, which is never retried.
+   * A 2xx response whose body cannot be read, is empty or is not JSON is
+   * transient too (proxy error pages, connection resets mid-body, timeouts
+   * while streaming) and retried under the same policy. Failed attempts carry
+   * no usage, so nothing is accumulated for them. Any other non-2xx status is
+   * returned immediately; a parsed 2xx payload is handed back for semantic
+   * validation, which is never retried. The exception is a 2xx JSON payload
+   * whose `error.code` is a retryable status (or 408): that is a transient
+   * upstream failure and retried too.
    */
   private async fetchWithRetry(
     body: unknown,
-  ): Promise<{ type: 'response'; response: Response } | Extract<ModelResponse, { type: 'error' }>> {
+  ): Promise<{ type: 'payload'; payload: ChatCompletionResponse } | Extract<ModelResponse, { type: 'error' }>> {
     const serialized = JSON.stringify(body);
     for (let attempt = 1; ; attempt += 1) {
       let failure: Extract<ModelResponse, { type: 'error' }>;
@@ -277,12 +289,22 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
           body: serialized,
           signal: AbortSignal.timeout(this.timeoutMs),
         });
-        if (response.ok) return { type: 'response', response };
-
-        const text = await response.text().catch(() => '');
-        failure = { type: 'error', code: `http_${response.status}`, message: text.slice(0, 2000) };
-        if (!RETRYABLE_STATUSES.has(response.status)) return failure;
-        retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+        if (response.ok) {
+          const parsed = await this.readJsonBody(response);
+          if (parsed.type === 'payload') {
+            // A 200 wrapping a transient upstream error (e.g. OpenRouter) is retried like the HTTP status would be.
+            const apiError = parsed.payload.error;
+            if (!apiError || !isRetryableApiError(apiError)) return parsed;
+            failure = describeApiError(apiError);
+          } else {
+            failure = parsed;
+          }
+        } else {
+          const text = await response.text().catch(() => '');
+          failure = { type: 'error', code: `http_${response.status}`, message: text.slice(0, 2000) };
+          if (!RETRYABLE_STATUSES.has(response.status)) return failure;
+          retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+        }
       } catch (err) {
         // fetch only rejects on network failures and aborts (incl. timeout).
         failure = {
@@ -298,6 +320,52 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
 
       this.retries += 1;
       await this.sleep(retryAfterMs ?? this.backoffDelay(attempt));
+    }
+  }
+
+  /**
+   * Reads a 2xx body as text and parses it. Read failures (including an abort
+   * while streaming) and empty/non-JSON bodies come back as retryable errors
+   * whose message carries enough context to diagnose them afterwards: the
+   * underlying error, status, content-type, body length and a short snippet.
+   * Request headers (the API key) are never included.
+   */
+  private async readJsonBody(
+    response: Response,
+  ): Promise<{ type: 'payload'; payload: ChatCompletionResponse } | Extract<ModelResponse, { type: 'error' }>> {
+    const contentType = response.headers.get('content-type') ?? 'none';
+    // Single line, control chars collapsed: the parse error itself may quote the raw body.
+    // eslint-disable-next-line no-control-regex
+    const oneLine = (value: string): string => value.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim();
+    const describe = (reason: string, text?: string): string => {
+      const parts = [oneLine(reason), `status ${response.status}`, `content-type ${contentType}`];
+      if (text !== undefined) {
+        parts.push(`body length ${text.length}`);
+        parts.push(`body: ${oneLine(text).slice(0, MAX_BODY_SNIPPET_CHARS)}`);
+      }
+      return parts.join('; ');
+    };
+
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { type: 'error', code: 'body_read_error', message: describe(`Failed to read response body: ${reason}`) };
+    }
+
+    if (text.trim() === '') {
+      return { type: 'error', code: 'invalid_json', message: describe('The endpoint returned an empty body', text) };
+    }
+    try {
+      return { type: 'payload', payload: JSON.parse(text) as ChatCompletionResponse };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return {
+        type: 'error',
+        code: 'invalid_json',
+        message: describe(`The endpoint returned non-JSON content (${reason})`, text),
+      };
     }
   }
 

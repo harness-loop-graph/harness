@@ -1002,6 +1002,210 @@ describe('OpenAICompatibleModelAdapter', () => {
         modelsUsed: ['m-1'],
       });
     });
+
+    describe('response body failures', () => {
+      function textResponse(body: string, status = 200, contentType = 'text/html'): Response {
+        return new Response(body, { status, headers: { 'Content-Type': contentType } });
+      }
+
+      /** A 200 response whose body stream errors out while being read. */
+      function brokenBodyResponse(message: string): Response {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.error(new Error(message));
+          },
+        });
+        return new Response(stream, { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      it('retries a 200 whose body is not JSON, then succeeds', async () => {
+        const fetchImpl = vi
+          .fn()
+          .mockResolvedValueOnce(textResponse('<html>Bad gateway</html>'))
+          .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+        const { adapter, sleep } = retryAdapter(fetchImpl);
+
+        const result = await adapter.complete(request());
+
+        expect(result).toEqual({ type: 'finish', content: 'fine' });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(sleep).toHaveBeenCalledTimes(1);
+        expect(adapter.getUsage()).toMatchObject({ calls: 1, retries: 1 });
+      });
+
+      it('retries a 200 with an empty body, then succeeds', async () => {
+        const fetchImpl = vi
+          .fn()
+          .mockResolvedValueOnce(textResponse(''))
+          .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+        const { adapter } = retryAdapter(fetchImpl);
+
+        expect(await adapter.complete(request())).toEqual({ type: 'finish', content: 'fine' });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(adapter.getUsage().retries).toBe(1);
+      });
+
+      it('retries when reading the body rejects, then succeeds', async () => {
+        const fetchImpl = vi
+          .fn()
+          .mockResolvedValueOnce(brokenBodyResponse('socket hang up'))
+          .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+        const { adapter } = retryAdapter(fetchImpl);
+
+        expect(await adapter.complete(request())).toEqual({ type: 'finish', content: 'fine' });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(adapter.getUsage().retries).toBe(1);
+      });
+
+      it('returns a diagnosable invalid_json error once retries are exhausted', async () => {
+        const fetchImpl = vi
+          .fn()
+          .mockImplementation(async () => textResponse('<html>\n\t<body>Bad gateway</body>\n</html>'));
+        const { adapter, sleep } = retryAdapter(fetchImpl, { maxRetries: 2 });
+
+        const result = await adapter.complete(request());
+
+        expect(fetchImpl).toHaveBeenCalledTimes(3);
+        expect(sleep).toHaveBeenCalledTimes(2);
+        expect(result.type).toBe('error');
+        if (result.type === 'error') {
+          expect(result.code).toBe('invalid_json');
+          expect(result.message).toContain('<html> <body>Bad gateway</body> </html>');
+          expect(result.message).toContain('200');
+          expect(result.message).toContain('text/html');
+          expect(result.message).toContain('(after 3 attempts)');
+          expect(result.message).not.toContain('test-key');
+          expect(result.message).not.toMatch(/[\n\t]/);
+        }
+        expect(adapter.getUsage()).toMatchObject({ calls: 1, retries: 2 });
+      });
+
+      it('reports an empty body as invalid_json', async () => {
+        const fetchImpl = vi.fn().mockImplementation(async () => textResponse(''));
+        const { adapter } = retryAdapter(fetchImpl, { maxRetries: 1 });
+
+        const result = await adapter.complete(request());
+
+        expect(result).toMatchObject({ type: 'error', code: 'invalid_json' });
+        if (result.type === 'error') expect(result.message).toMatch(/length 0/);
+      });
+
+      it('truncates the body snippet to about 300 chars', async () => {
+        const fetchImpl = vi.fn().mockImplementation(async () => textResponse('x'.repeat(5000)));
+        const { adapter } = retryAdapter(fetchImpl, { maxRetries: 0 });
+
+        const result = await adapter.complete(request());
+
+        expect(result.type).toBe('error');
+        if (result.type === 'error') {
+          expect(result.message).toContain('5000');
+          expect(result.message.length).toBeLessThan(700);
+        }
+      });
+
+      it('returns body_read_error with the underlying message when every read fails', async () => {
+        const fetchImpl = vi.fn().mockImplementation(async () => brokenBodyResponse('socket hang up'));
+        const { adapter } = retryAdapter(fetchImpl, { maxRetries: 1 });
+
+        const result = await adapter.complete(request());
+
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(result.type).toBe('error');
+        if (result.type === 'error') {
+          expect(result.code).toBe('body_read_error');
+          expect(result.message).toContain('socket hang up');
+          expect(result.message).toContain('application/json');
+          expect(result.message).toContain('(after 2 attempts)');
+        }
+      });
+
+      it('does not retry a valid-JSON payload carrying a non-retryable error object, but surfaces its message', async () => {
+        const fetchImpl = vi
+          .fn()
+          .mockImplementation(async () =>
+            jsonResponse(200, { error: { message: 'Provider returned error', code: 402 } }),
+          );
+        const { adapter, sleep } = retryAdapter(fetchImpl);
+
+        const result = await adapter.complete(request());
+
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+        expect(sleep).not.toHaveBeenCalled();
+        expect(result.type).toBe('error');
+        if (result.type === 'error') {
+          expect(result.message).toContain('Provider returned error');
+          expect(result.message).toContain('402');
+        }
+      });
+
+      it.each([
+        [502, 'numeric 502'],
+        ['503', 'numeric-string 503'],
+        [408, 'request timeout 408'],
+        [429, 'rate limit 429'],
+      ])('retries a 200 carrying error code %s (%s), then succeeds', async (code) => {
+        const fetchImpl = vi
+          .fn()
+          .mockResolvedValueOnce(jsonResponse(200, { error: { message: 'Provider returned error', code } }))
+          .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+        const { adapter, sleep } = retryAdapter(fetchImpl);
+
+        expect(await adapter.complete(request())).toEqual({ type: 'finish', content: 'fine' });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(sleep).toHaveBeenCalledTimes(1);
+        expect(adapter.getUsage()).toMatchObject({ calls: 1, retries: 1 });
+      });
+
+      it('keeps the message and code, plus the attempts suffix, when a retryable error code never clears', async () => {
+        const fetchImpl = vi
+          .fn()
+          .mockImplementation(async () =>
+            jsonResponse(200, { error: { message: 'Provider returned error', code: 502 } }),
+          );
+        const { adapter } = retryAdapter(fetchImpl, { maxRetries: 2 });
+
+        const result = await adapter.complete(request());
+
+        expect(fetchImpl).toHaveBeenCalledTimes(3);
+        expect(result).toEqual({
+          type: 'error',
+          code: '502',
+          message: 'Provider returned error (code: 502) (after 3 attempts)',
+        });
+        expect(adapter.getUsage().retries).toBe(2);
+      });
+
+      it.each([400, 401, 402, 403])('does not retry a 200 carrying error code %i', async (code) => {
+        const fetchImpl = vi
+          .fn()
+          .mockImplementation(async () => jsonResponse(200, { error: { message: 'nope', code } }));
+        const { adapter, sleep } = retryAdapter(fetchImpl);
+
+        const result = await adapter.complete(request());
+
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+        expect(sleep).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ type: 'error', code: String(code) });
+      });
+
+      it('counts usage once after a retried body failure', async () => {
+        const fetchImpl = vi
+          .fn()
+          .mockResolvedValueOnce(textResponse('not json'))
+          .mockResolvedValueOnce(jsonResponse(200, OK_BODY));
+        const { adapter } = retryAdapter(fetchImpl);
+
+        await adapter.complete(request());
+
+        expect(adapter.getUsage()).toMatchObject({
+          promptTokens: 10,
+          completionTokens: 5,
+          calls: 1,
+          retries: 1,
+          cost: 0.001,
+        });
+      });
+    });
   });
 
   describe('sampling parameters', () => {
