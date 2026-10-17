@@ -88,9 +88,8 @@ agota el presupuesto, las llamadas siguientes reciben un error inmediato (sin
 red ni esperas) y los presupuestos de turnos/pasos del *loop* y del grafo
 acotan el resto de la corrida (en C3, un nodo fallido se reintenta como máximo
 una vez); la corrida queda `FAILED` con `failure` que empieza con
-`budget_exceeded:`. Ojo: cada turno fallido del *loop* sigue ejecutando el
-`--verify-cmd` / la verificación del nodo, que puede costar tiempo aunque ya no
-cueste dinero.
+`budget_exceeded:`. El *loop* corta en el primer turno que recibe
+`budget_exceeded`, sin ejecutar el `--verify-cmd` ni reintentar.
 
 Los flags de muestreo que no se pasan quedan sin definir: el campo se omite
 de la solicitud y rige el default del proveedor. Un valor inválido termina con

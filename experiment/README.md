@@ -26,6 +26,35 @@ trabajo.
 - `runner/` — runner del experimento: ejecuta C1/C2/C3 en espacios de trabajo
   aislados y registra métricas (ver `runner/README.md`).
 
+## Política de presupuestos
+
+Los presupuestos de cómputo **difieren entre configuraciones a propósito**:
+cada capa de ingeniería trae su propio costo, y medir ese costo es parte del
+experimento.
+
+| Config | Presupuesto de llamadas a herramienta |
+|---|---|
+| C1 | Una interacción con `--tool-rounds` (80 por defecto) |
+| C2 | Hasta `--max-turns` turnos × `--tool-rounds` por turno (30 por defecto) |
+| C3 | Hasta `--max-steps` pasos de grafo, cada nodo con su propio *loop* |
+
+Consecuencias para el análisis:
+
+- **La calidad se reporta junto con su costo.** Cada resultado de C1/C2/C3
+  se compara normalizado por tokens, costo (USD) y tiempo, tomados de
+  `run-report.json`. Una mejora de calidad sin su costo no es un resultado.
+- **Lo que debe ser idéntico entre configuraciones:** modelo, parámetros de
+  muestreo (`--temperature`, `--top-p`, `--seed`, `--max-tokens`), SPEC,
+  *skills*, servidores MCP y el tope de costo (`--max-cost`). El tope es una
+  red de seguridad, no un mecanismo de igualación.
+- **Repeticiones.** Una corrida por configuración es una anécdota; los
+  modelos no son deterministas aunque se fije `seed`. Correr cada
+  configuración varias veces (N ≥ 3) con los mismos flags y reportar la
+  variación.
+- **Reproducibilidad.** Cada `run-report.json` registra `sampling`,
+  `budget`, `harnessGitSha` y `harnessGitDirty`; las corridas del experimento
+  deben salir de un árbol limpio (`harnessGitDirty: false`).
+
 ## Por qué el stack está fijo
 
 Si cada corrida eligiera su propio stack, las diferencias observadas entre
