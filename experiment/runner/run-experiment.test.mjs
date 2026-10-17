@@ -1067,6 +1067,72 @@ test('--max-turns/--tool-rounds accept positive integers and feed the dry-run pl
   assert.equal(plan.wiring.toolRoundsPerTurn, 7);
 });
 
+test('parseArgs() --model-timeout defaults to 600 seconds and parses a valid value', () => {
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).modelTimeoutSeconds, 600);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--model-timeout', '900']).modelTimeoutSeconds, 900);
+});
+
+test('--model-timeout rejects missing, zero, negative, fractional and non-numeric values with a usage error', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const cases = [[], ['0'], ['-5'], ['1.5'], ['abc']];
+  for (const value of cases) {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', '--model-timeout', ...value],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.notEqual(res.status, 0, `--model-timeout ${value} should be rejected`);
+    assert.match(res.stderr, /Usage: --model-timeout/, `--model-timeout ${value}: ${res.stderr}`);
+    assert.equal(res.stdout, '');
+  }
+});
+
+test('--dry-run plan records modelTimeoutMs (default 600000, overridable with --model-timeout)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const run = (extra) => spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', ...extra],
+    { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+  );
+  const def = run([]);
+  assert.equal(def.status, 0, def.stderr);
+  assert.equal(JSON.parse(def.stdout).modelTimeoutMs, 600_000);
+  const custom = run(['--model-timeout', '45']);
+  assert.equal(custom.status, 0, custom.stderr);
+  assert.equal(JSON.parse(custom.stdout).modelTimeoutMs, 45_000);
+});
+
+test('createModel() passes timeoutMs to the default adapter and every route adapter', async () => {
+  const created = [];
+  const makeAdapter = (cfg) => {
+    created.push(cfg);
+    return { async complete() { return { type: 'finish', content: 'stub' }; } };
+  };
+  const previous = { MODEL_API_KEY: process.env.MODEL_API_KEY, MODEL_BASE_URL: process.env.MODEL_BASE_URL };
+  process.env.MODEL_API_KEY = 'env-key';
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  try {
+    const harnessExtras = { router: { routes: { retry: { model: 'retry-model' } } } };
+    await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, makeAdapter, timeoutMs: 600_000 });
+    assert.deepEqual(created, [
+      { apiKey: 'env-key', model: 'retry-model', baseUrl: 'https://test.example/v1', timeoutMs: 600_000 },
+    ]);
+
+    // Default adapter (plain, no router) receives it too.
+    const plain = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null, timeoutMs: 600_000 });
+    assert.equal(plain.timeoutMs, 600_000);
+
+    // Without a timeout the adapter keeps its own library default.
+    const unset = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null });
+    assert.equal(unset.timeoutMs, 120_000);
+  } finally {
+    for (const [k, v] of Object.entries(previous)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test('an invalid --task-file (missing or empty) never creates a workspace under --runs-dir (validated before createWorkspace)', async () => {
   const { spawnSync } = await import('node:child_process');
   const runsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runsdir-taskfile-'));

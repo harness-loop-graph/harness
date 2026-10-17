@@ -69,6 +69,7 @@ Router:
 | `--top-p <n>` | sin valor | `top_p`, número en (0, 1]. Mismo alcance que `--temperature` |
 | `--seed <n>` | sin valor | `seed` de muestreo, entero. Mismo alcance que `--temperature` |
 | `--max-tokens <n>` | sin valor | `max_tokens` por llamada, entero positivo. Mismo alcance que `--temperature` |
+| `--model-timeout <s>` | 600 | Timeout por solicitud al modelo, en segundos (entero positivo). Cubre la respuesta completa, cuerpo incluido: OpenRouter responde 200 de inmediato y envía el cuerpo no *streaming* recién al terminar la generación, así que con contextos de 20-35k tokens el default del adaptador (120 s) agota el tiempo en cada reintento (`body_read_error ... aborted due to timeout`). Se pasa como `timeoutMs` a **todos** los adaptadores que crea el runner (el predeterminado y los de cada ruta del *router*; un `timeoutMs` explícito en la configuración de una ruta tiene prioridad). No cambia el default de la biblioteca. Un valor inválido termina con un error de uso |
 | `--max-cost <usd>` | sin valor (sin tope) | Tope de gasto en USD, número positivo. Envuelve el modelo de **todas** las configuraciones (c1/c2/c3, plano o con *router*) en un `BudgetedModelAdapter`: antes de cada llamada, si el costo acumulado (`usage.cost` que reporta el proveedor, p. ej. OpenRouter) ya alcanzó el tope, no se llama al modelo y se devuelve un error `budget_exceeded`. El tope se comprueba *antes* de la llamada, así que la última puede sobrepasarlo por su propio costo. Sin este flag la corrida no tiene tope y, si no es `--dry-run`, imprime una advertencia en stderr. Un valor inválido termina con un error de uso |
 | `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf http://localhost:3000/health` | Comando de verificación de C2 |
 | `--with-batteries` | desactivado | Después de la generación, levanta el stack y corre las baterías de aceptación |
@@ -289,6 +290,10 @@ del repositorio del *harness*) y `harnessGitDirty` (`git status --porcelain`
 no vacío) están presentes en toda corrida, también las fallidas y el plan de
 `--dry-run`; los dos últimos valen `null` si git no está disponible:
 
+`modelTimeoutMs` (timeout por solicitud al modelo en milisegundos, derivado de
+`--model-timeout`; 600000 por defecto) también está presente en toda corrida,
+incluidas las fallidas y el plan de `--dry-run`.
+
 `budget` (también presente en toda corrida, incluidas las fallidas y el plan de
 `--dry-run`) vale `{ maxCostUsd, exhausted, costReported }`: `maxCostUsd` es
 `null` sin `--max-cost`; `exhausted` es `true` cuando el costo acumulado
@@ -303,6 +308,7 @@ false` y un tope definido se agrega `budget.warning`.
   "config": "c1|c2|c3",
   "model": "gpt-4o-mini",
   "sampling": { "temperature": null, "topP": null, "seed": null, "maxTokens": null },
+  "modelTimeoutMs": 600000,
   "harnessGitSha": "<git rev-parse HEAD del repo, o null>",
   "harnessGitDirty": false,
   "startedAt": "...",
