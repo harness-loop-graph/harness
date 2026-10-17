@@ -7,7 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { McpToolProvider, OpenAICompatibleModelAdapter, RoutingModelAdapter } from '../../harness/dist/index.js';
+import { McpToolProvider, OpenAICompatibleModelAdapter, RoutingModelAdapter, BudgetedModelAdapter } from '../../harness/dist/index.js';
 import {
   parseArgs,
   buildNodes,
@@ -18,6 +18,7 @@ import {
   createWorkspace,
   summarizeRouting,
   attachUsageAndRouting,
+  applyBudgetToReport,
   compactTraceC3,
   slugifyModelId,
   timestampForWorkspace,
@@ -1113,4 +1114,112 @@ test('loadCredentials exports MODEL_* from the .env file without overriding the 
     }
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('parseArgs() --max-cost defaults to unset (null) and parses a positive number', () => {
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).maxCostUsd, null);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--max-cost', '2.5']).maxCostUsd, 2.5);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c3', '--max-cost', '0.01']).maxCostUsd, 0.01);
+});
+
+test('--max-cost rejects missing, zero, negative and non-numeric values with a usage error', async () => {
+  const { spawnSync } = await import('node:child_process');
+  for (const flags of [['--max-cost'], ['--max-cost', '0'], ['--max-cost', '-1'], ['--max-cost', 'abc'], ['--max-cost', 'Infinity']]) {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', ...flags],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.equal(res.status, 1, `${flags.join(' ')} should exit 1`);
+    assert.match(res.stderr, /Usage: --max-cost/);
+    assert.equal(res.stdout, '');
+  }
+});
+
+test('--dry-run plan includes the budget (null cap when --max-cost is unset)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const run = (extra) => {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c2', '--dry-run', ...extra],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.equal(res.status, 0, res.stderr);
+    return JSON.parse(res.stdout);
+  };
+  assert.deepEqual(run([]).budget, { maxCostUsd: null, exhausted: false, costReported: null });
+  assert.deepEqual(run(['--max-cost', '3']).budget, { maxCostUsd: 3, exhausted: false, costReported: null });
+});
+
+test('createModel() wraps the model in a BudgetedModelAdapter only when maxCostUsd is set (plain and routed)', async () => {
+  const previousBaseUrl = process.env.MODEL_BASE_URL;
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  try {
+    const plain = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null, maxCostUsd: 1.5 });
+    assert.ok(plain instanceof BudgetedModelAdapter);
+    assert.equal(plain.maxCostUsd, 1.5);
+    assert.equal(typeof plain.getUsage, 'function');
+    assert.equal(plain.getRouting, undefined, 'a plain model must not gain a routing field');
+
+    const harnessExtras = { router: { routes: { retry: { model: 'm-retry', apiKeyEnv: 'BUDGET_TEST_ROUTE_KEY' } } } };
+    process.env.BUDGET_TEST_ROUTE_KEY = 'route-key';
+    const routed = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, maxCostUsd: 1.5, makeAdapter: () => new OpenAICompatibleModelAdapter({ apiKey: 'k', model: 'x' }) });
+    assert.ok(routed instanceof BudgetedModelAdapter);
+    assert.equal(typeof routed.getRouting, 'function', 'router reporting must survive the budget wrapper');
+
+    const uncapped = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null });
+    assert.ok(uncapped instanceof OpenAICompatibleModelAdapter);
+  } finally {
+    delete process.env.BUDGET_TEST_ROUTE_KEY;
+    if (previousBaseUrl === undefined) delete process.env.MODEL_BASE_URL;
+    else process.env.MODEL_BASE_URL = previousBaseUrl;
+  }
+});
+
+test('the wrapped model blocks further calls once cost reaches the cap, and applyBudgetToReport() surfaces it as the failure', async () => {
+  let innerCalls = 0;
+  let cost = 0;
+  const inner = {
+    async complete() {
+      innerCalls += 1;
+      cost += 0.4;
+      return { type: 'finish', content: 'ok' };
+    },
+    getUsage: () => ({ calls: innerCalls, cost, promptTokens: 0, completionTokens: 0, totalTokens: 0, retries: 0, modelsUsed: [] }),
+  };
+  const model = new BudgetedModelAdapter(inner, { maxCostUsd: 0.5 });
+  const req = { task: 't', context: { projectRoot: '/tmp', files: [], language: 'typescript' }, availTools: [] };
+  await model.complete(req);
+  await model.complete(req);
+  const blocked = await model.complete(req);
+  assert.equal(blocked.type, 'error');
+  assert.equal(blocked.code, 'budget_exceeded');
+  assert.equal(innerCalls, 2);
+
+  const report = { status: 'FAILED', failure: 'error: Model returned error (budget_exceeded) and no turns are left' };
+  applyBudgetToReport(report, model, 0.5);
+  assert.deepEqual(report.budget, { maxCostUsd: 0.5, exhausted: true, costReported: true });
+  assert.match(report.failure, /^budget_exceeded: /);
+  assert.match(report.failure, /0\.8000/);
+  assert.equal(report.status, 'FAILED');
+});
+
+test('applyBudgetToReport() leaves a successful run untouched and reports a null cap when unset', () => {
+  const report = { status: 'SUCCESS' };
+  applyBudgetToReport(report, { getUsage: () => ({ calls: 1, cost: 0.2 }) }, null);
+  assert.deepEqual(report.budget, { maxCostUsd: null, exhausted: false, costReported: true });
+  assert.equal(report.failure, undefined);
+  assert.equal(report.status, 'SUCCESS');
+
+  const nullModel = {};
+  applyBudgetToReport(nullModel, null, 1);
+  assert.deepEqual(nullModel.budget, { maxCostUsd: 1, exhausted: false, costReported: null });
+});
+
+test('applyBudgetToReport() flags costReported=false when calls happened at zero cost', () => {
+  const report = { status: 'SUCCESS' };
+  applyBudgetToReport(report, new BudgetedModelAdapter({ complete: async () => ({ type: 'finish', content: '' }), getUsage: () => ({ calls: 3, cost: 0 }) }, { maxCostUsd: 1 }), 1);
+  assert.equal(report.budget.costReported, false);
+  assert.equal(report.budget.exhausted, false);
+  assert.equal(report.failure, undefined, 'an unknown cost warns but never fails the run');
 });

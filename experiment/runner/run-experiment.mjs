@@ -13,6 +13,7 @@ import {
   AgentLoop,
   GraphEngine,
   OpenAICompatibleModelAdapter,
+  BudgetedModelAdapter,
   FsContextManager,
   LocalExecutionManager,
   PolicyGuardrails,
@@ -84,6 +85,8 @@ function parseArgs(argv) {
     keep: false,
     dryRun: false,
     harnessConfig: null,
+    // null = no cost ceiling (a stderr warning is printed on non-dry runs).
+    maxCostUsd: null,
     publish: false,
     publishOrg: 'harness-loop-graph',
     // null = unset: the provider default applies and the field is omitted from requests.
@@ -114,7 +117,12 @@ function parseArgs(argv) {
         valid: Number.isInteger,
       });
     } else if (a === '--max-tokens') parsed.sampling.maxTokens = parsePositiveIntFlag('--max-tokens', args[++i]);
-    else if (a === '--verify-cmd') parsed.verifyCmd = args[++i];
+    else if (a === '--max-cost') {
+      parsed.maxCostUsd = parseNumberFlag('--max-cost', args[++i], {
+        describe: 'a positive number of USD',
+        valid: (n) => n > 0,
+      });
+    } else if (a === '--verify-cmd') parsed.verifyCmd = args[++i];
     else if (a === '--with-batteries') parsed.withBatteries = true;
     else if (a === '--keep') parsed.keep = true;
     else if (a === '--dry-run') parsed.dryRun = true;
@@ -580,9 +588,17 @@ async function loadHarnessExtras(configPath) {
  * OpenAICompatibleModelAdapter (the 'default' route) with a
  * RoutingModelAdapter; without one, returns the plain adapter unchanged, so
  * output without --harness-config (or without a router section) is
- * unaffected.
+ * unaffected. With `maxCostUsd`, the result is wrapped in a
+ * BudgetedModelAdapter (cost ceiling; getUsage()/getRouting() still forwarded).
  */
-async function createModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling }) {
+async function createModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling, maxCostUsd = null }) {
+  const model = await createBaseModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling });
+  // Same wrapper for c1/c2/c3 and for plain or routed models; without a cap
+  // the model is returned unchanged.
+  return maxCostUsd == null ? model : new BudgetedModelAdapter(model, { maxCostUsd });
+}
+
+async function createBaseModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling }) {
   const defaultAdapter = new OpenAICompatibleModelAdapter({ apiKey, model: modelId, ...samplingToAdapterConfig(sampling) });
   if (!harnessExtras?.router) return defaultAdapter;
   // Route adapters get the same sampling as the default one: equal sampling across c1/c2/c3 is the point.
@@ -645,6 +661,29 @@ function attachUsageAndRouting(report, model) {
   report.usage = model.getUsage();
   if (typeof model.getRouting === 'function') {
     report.routing = summarizeRouting(model.getRouting());
+  }
+}
+
+/**
+ * Sets `report.budget` ({ maxCostUsd, exhausted, costReported }) from the
+ * run's model, and — when the cap actually refused a call — makes that the
+ * run's failure: status FAILED and `failure` prefixed with `budget_exceeded`
+ * (the downstream loop/graph failure text is kept in parentheses). `model` may
+ * be null (run failed before one existed) or an uncapped plain model.
+ */
+function applyBudgetToReport(report, model, maxCostUsd) {
+  const capped = model instanceof BudgetedModelAdapter;
+  let costReported = null;
+  if (model && typeof model.getUsage === 'function') {
+    const { calls, cost } = model.getUsage();
+    costReported = cost > 0 ? true : calls > 0 ? false : null;
+  }
+  report.budget = { maxCostUsd: maxCostUsd ?? null, exhausted: capped ? model.isExhausted() : false, costReported };
+  if (capped && model.blockedCalls > 0) {
+    const spent = model.getUsage().cost;
+    const reason = `budget_exceeded: spent $${spent.toFixed(4)} of $${model.maxCostUsd.toFixed(4)} limit; ${model.blockedCalls} model call(s) refused`;
+    report.status = 'FAILED';
+    report.failure = report.failure ? `${reason} (${report.failure})` : reason;
   }
 }
 
@@ -890,6 +929,7 @@ async function main() {
         toolRoundsPerTurn: parsed.toolRounds,
       },
       sampling: parsed.sampling,
+      budget: { maxCostUsd: parsed.maxCostUsd, exhausted: false, costReported: null },
       ...gitMetadata,
       batteryPhase: parsed.withBatteries,
       harnessConfig: parsed.harnessConfig ?? undefined,
@@ -924,8 +964,13 @@ async function main() {
     durationMs: 0,
     status: 'FAILED',
     usage: null,
+    budget: { maxCostUsd: parsed.maxCostUsd, exhausted: false, costReported: null },
     turns: 0,
   };
+
+  if (parsed.maxCostUsd == null) {
+    console.error('Warning: no --max-cost set; this run has no cost ceiling.');
+  }
 
   let harnessExtras = null;
   let configFailure = null;
@@ -942,9 +987,11 @@ async function main() {
   }
 
   let runException = null;
+  let runModel = null;
   if (!configFailure) try {
     if (parsed.config === 'c1') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, maxCostUsd: parsed.maxCostUsd });
+      runModel = model;
       const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
       report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
@@ -957,7 +1004,8 @@ async function main() {
         report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
       }
     } else if (parsed.config === 'c2') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, maxCostUsd: parsed.maxCostUsd });
+      runModel = model;
       const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
       const loopResult = await loop.run({
@@ -976,7 +1024,8 @@ async function main() {
         report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
       }
     } else if (parsed.config === 'c3') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, maxCostUsd: parsed.maxCostUsd });
+      runModel = model;
       const factory = (node) => {
         if (node.id === 'reviewer') clearStaleReviewVerdict(ws);
         const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`), harnessExtras);
@@ -1044,6 +1093,14 @@ async function main() {
     }
   }
 
+  // Also reached after a thrown exception or config failure (runModel may be
+  // null), so budget is present in every report.
+  applyBudgetToReport(report, runModel, parsed.maxCostUsd);
+  if (report.budget.maxCostUsd != null && report.budget.costReported === false) {
+    report.budget.warning = 'The provider reported no cost (usage.cost), so --max-cost cannot be enforced';
+    console.error(`Warning: ${report.budget.warning}.`);
+  }
+
   const finishedAt = new Date().toISOString();
   report.finishedAt = finishedAt;
   report.durationMs = Date.now() - t0;
@@ -1085,6 +1142,9 @@ async function main() {
   if (report.steps != null) console.error(`  Steps:      ${report.steps}`);
   if (report.totalLoopTurns != null) console.error(`  Loop turns: ${report.totalLoopTurns}`);
   if (report.usage) console.error(`  Usage:      ${report.usage.totalTokens} tokens (${report.usage.calls} calls)`);
+  if (report.budget.maxCostUsd != null) {
+    console.error(`  Budget:     $${report.budget.maxCostUsd} cap${report.budget.exhausted ? ' (EXHAUSTED)' : ''}`);
+  }
   if (parsed.withBatteries) {
     const bp = report.batteryPhase;
     console.error(`  Batteries:  ${bp.passed ? 'passed' : bp.error ? `failed (${bp.error})` : 'failed'}`);
@@ -1115,6 +1175,7 @@ export {
   readGitMetadata,
   summarizeRouting,
   attachUsageAndRouting,
+  applyBudgetToReport,
   compactTraceC3,
   slugifyModelId,
   timestampForWorkspace,

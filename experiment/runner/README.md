@@ -69,6 +69,7 @@ Router:
 | `--top-p <n>` | sin valor | `top_p`, número en (0, 1]. Mismo alcance que `--temperature` |
 | `--seed <n>` | sin valor | `seed` de muestreo, entero. Mismo alcance que `--temperature` |
 | `--max-tokens <n>` | sin valor | `max_tokens` por llamada, entero positivo. Mismo alcance que `--temperature` |
+| `--max-cost <usd>` | sin valor (sin tope) | Tope de gasto en USD, número positivo. Envuelve el modelo de **todas** las configuraciones (c1/c2/c3, plano o con *router*) en un `BudgetedModelAdapter`: antes de cada llamada, si el costo acumulado (`usage.cost` que reporta el proveedor, p. ej. OpenRouter) ya alcanzó el tope, no se llama al modelo y se devuelve un error `budget_exceeded`. El tope se comprueba *antes* de la llamada, así que la última puede sobrepasarlo por su propio costo. Sin este flag la corrida no tiene tope y, si no es `--dry-run`, imprime una advertencia en stderr. Un valor inválido termina con un error de uso |
 | `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf http://localhost:3000/health` | Comando de verificación de C2 |
 | `--with-batteries` | desactivado | Después de la generación, levanta el stack y corre las baterías de aceptación |
 | `--keep` | desactivado | Con `--with-batteries`, **no** desmonta el stack al final |
@@ -76,6 +77,20 @@ Router:
 | `--harness-config <path>` | — | JSON `{ mcpServers, skillsDirs }`; conecta herramientas MCP + *skills* a cada *harness* que construye la corrida |
 | `--publish` | desactivado | Después de la corrida (y su commit local de git), crea un repositorio **público** de GitHub para el espacio de trabajo vía `gh` y lo empuja (ver abajo) |
 | `--publish-org <org>` | `harness-loop-graph` | Organización/usuario de GitHub bajo el que se crea el repositorio de `--publish` |
+
+### Tope de costo (`--max-cost`)
+
+El tope solo funciona si el proveedor informa el costo (`usage.cost`). Si hubo
+llamadas pero el costo acumulado sigue en 0, el tope no puede aplicarse: el
+runner **no bloquea** la corrida, pero registra `budget.costReported: false`
+(más `budget.warning`) en el reporte y lo avisa por stderr. Cuando el tope
+agota el presupuesto, las llamadas siguientes reciben un error inmediato (sin
+red ni esperas) y los presupuestos de turnos/pasos del *loop* y del grafo
+acotan el resto de la corrida (en C3, un nodo fallido se reintenta como máximo
+una vez); la corrida queda `FAILED` con `failure` que empieza con
+`budget_exceeded:`. Ojo: cada turno fallido del *loop* sigue ejecutando el
+`--verify-cmd` / la verificación del nodo, que puede costar tiempo aunque ya no
+cueste dinero.
 
 Los flags de muestreo que no se pasan quedan sin definir: el campo se omite
 de la solicitud y rige el default del proveedor. Un valor inválido termina con
@@ -275,6 +290,15 @@ del repositorio del *harness*) y `harnessGitDirty` (`git status --porcelain`
 no vacío) están presentes en toda corrida, también las fallidas y el plan de
 `--dry-run`; los dos últimos valen `null` si git no está disponible:
 
+`budget` (también presente en toda corrida, incluidas las fallidas y el plan de
+`--dry-run`) vale `{ maxCostUsd, exhausted, costReported }`: `maxCostUsd` es
+`null` sin `--max-cost`; `exhausted` es `true` cuando el costo acumulado
+alcanzó el tope; `costReported` es `true`/`false` según el proveedor haya
+informado costo (`null` si aún no hubo llamadas). Si el tope rechazó alguna
+llamada, `status` es `FAILED` y `failure` empieza con `budget_exceeded:` (el
+motivo original del *loop*/grafo queda entre paréntesis). Con `costReported:
+false` y un tope definido se agrega `budget.warning`.
+
 ```json
 {
   "config": "c1|c2|c3",
@@ -287,6 +311,7 @@ no vacío) están presentes en toda corrida, también las fallidas y el plan de
   "durationMs": 0,
   "status": "SUCCESS|FAILED",
   "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "calls": 0 },
+  "budget": { "maxCostUsd": null, "exhausted": false, "costReported": null },
   "turns": 0,
   "steps?": 0,
   "totalLoopTurns?": 0,

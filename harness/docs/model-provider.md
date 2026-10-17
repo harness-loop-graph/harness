@@ -170,6 +170,22 @@ Configuración en `OpenAICompatibleAdapterConfig` (todo opcional):
 | `sleep` | `setTimeout` | `(ms) => Promise<void>` inyectable para que los tests no esperen. |
 | `random` | `Math.random` | Fuente `[0, 1)` inyectable para el *jitter*. |
 
+## Opcional: tope de costo — `BudgetedModelAdapter`
+
+`BudgetedModelAdapter` envuelve cualquier `ModelAdapter` que exponga
+`getUsage()` (el adaptador OpenAI-compatible o el `RoutingModelAdapter`) con un
+tope `maxCostUsd`. Antes de cada `complete()`, si el `cost` acumulado
+(`usage.cost` del proveedor, p. ej. OpenRouter) ya alcanzó el tope, **no** llama
+al modelo interno y devuelve `{ type: 'error', code: 'budget_exceeded', message }`
+con lo gastado y el límite; no lanza excepciones ni espera. El tope se evalúa
+antes de la llamada, por lo que la última puede sobrepasarlo. Reenvía
+`getUsage()` y, si el adaptador interno los tiene, `getRouting()` y
+`getSamplingConfig()`. Expone `isExhausted()`, `blockedCalls` y
+`costReported` (`false` si hubo llamadas pero el costo sigue en 0: el tope no
+puede aplicarse; es informativo y nunca bloquea). El runner lo activa con
+`--max-cost` (ver `experiment/runner/README.md`). Pruebas:
+`tests/budgeted-model-adapter.spec.ts`.
+
 ## Dónde está conectado
 
 `OpenAICompatibleModelAdapter` se instancia directamente (sin indirección de

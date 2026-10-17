@@ -187,3 +187,10 @@ long context → retry → default), desactivado salvo que la sección `router` 
 una configuración del *harness* lo habilite. Se sitúa detrás de la interfaz
 `ModelAdapter`, de modo que nada más en este documento cambia. Ver
 [`model-router.md`](./model-router.md).
+
+## Opcional: tope de costo
+
+`BudgetedModelAdapter` es otro `ModelAdapter` opcional detrás de la misma
+interfaz: envuelve a un adaptador con `getUsage()` y, una vez que el costo
+acumulado alcanza `maxCostUsd`, devuelve un error `budget_exceeded` sin llamar
+al modelo. Ver [`model-provider.md`](./model-provider.md).
