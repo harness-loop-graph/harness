@@ -147,7 +147,7 @@ function parseArgs(argv) {
     process.exit(1);
   }
   if (parsed.toolRounds == null) {
-    parsed.toolRounds = parsed.config === 'c1' ? 80 : 30;
+    parsed.toolRounds = parsed.config === 'c1' ? 200 : 30;
   }
   return parsed;
 }

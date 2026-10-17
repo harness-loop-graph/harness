@@ -1362,3 +1362,9 @@ test('harness instructions pin the repository root to the workspace root', () =>
   assert.match(HARNESS_INSTRUCTIONS, /docker-compose\.yml/);
   assert.match(HARNESS_INSTRUCTIONS, /Stay inside the workspace/);
 });
+
+test('default tool-round budget lets c1 finish the SPEC and keeps c2/c3 per-turn budget', () => {
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).toolRounds, 200);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']).toolRounds, 30);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c3']).toolRounds, 30);
+});

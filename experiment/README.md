@@ -34,7 +34,7 @@ experimento.
 
 | Config | Presupuesto de llamadas a herramienta |
 |---|---|
-| C1 | Una interacción con `--tool-rounds` (80 por defecto) |
+| C1 | Una interacción con `--tool-rounds` (200 por defecto) |
 | C2 | Hasta `--max-turns` turnos × `--tool-rounds` por turno (30 por defecto) |
 | C3 | Hasta `--max-steps` pasos de grafo, cada nodo con su propio *loop* |
 
