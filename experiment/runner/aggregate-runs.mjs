@@ -134,7 +134,8 @@ function summarizeByConfig(rows) {
         .map((r) => r.batteries[name])
         .filter((c) => c.total !== null && c.total > 0)
         .map((c) => c.passed / c.total);
-      batteries[name] = { meanPassRatio: ratios.length ? meanAndStdDev(ratios).mean : null };
+      // n can be below the config's n when some runs have no battery data.
+      batteries[name] = { meanPassRatio: ratios.length ? meanAndStdDev(ratios).mean : null, n: ratios.length };
     }
     const summary = {
       config,
@@ -187,12 +188,12 @@ function runsToCsv(rows) {
 function summaryToCsv(summary) {
   const header = [
     'config', 'n', 'generationSuccess', 'batteriesPassed',
-    ...BATTERY_NAMES.map((b) => `${b}_meanPassRatio`),
+    ...BATTERY_NAMES.flatMap((b) => [`${b}_meanPassRatio`, `${b}_n`]),
     ...STAT_METRICS.flatMap((m) => [`${m}_mean`, `${m}_stddev`]),
   ];
   return toCsv(header, summary.map((s) => [
     s.config, s.n, s.generationSuccess, s.batteriesPassed,
-    ...BATTERY_NAMES.map((b) => s.batteries[b].meanPassRatio),
+    ...BATTERY_NAMES.flatMap((b) => [s.batteries[b].meanPassRatio, s.batteries[b].n]),
     ...STAT_METRICS.flatMap((m) => [s[m].mean, s[m].stdDev]),
   ]));
 }
@@ -223,7 +224,7 @@ function renderMarkdown({ rows, excluded, summary }) {
       'cost mean', 'cost sd', 'tokens mean', 'tokens sd', 'duration ms mean', 'duration ms sd'],
     summary.map((s) => [
       s.config, s.n, s.generationSuccess, s.batteriesPassed,
-      ...BATTERY_NAMES.map((b) => fmt(s.batteries[b].meanPassRatio)),
+      ...BATTERY_NAMES.map((b) => (s.batteries[b].n ? `${fmt(s.batteries[b].meanPassRatio)} (n=${s.batteries[b].n})` : '')),
       fmt(s.cost.mean), fmt(s.cost.stdDev), fmt(s.totalTokens.mean, 1), fmt(s.totalTokens.stdDev, 1),
       fmt(s.durationMs.mean, 0), fmt(s.durationMs.stdDev, 0),
     ]),

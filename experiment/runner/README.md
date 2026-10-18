@@ -428,7 +428,8 @@ node runner/aggregate-runs.mjs [--runs-dir <dir>] [--harness-sha <sha-o-prefijo>
   reintentos, tokens, costo, `budget.exhausted`, checks aprobados/total por
   batería, `batteriesPassed` y URL de publicación), `summary.csv` (una fila por
   config: `n`, éxitos de generación, baterías aprobadas, razón media de
-  aprobación por batería, y media y desviación estándar muestral de costo,
+  aprobación por batería junto con cuántas corridas tienen datos de esa batería
+  (`n`, que puede ser menor que el `n` de la config), y media y desviación estándar muestral de costo,
   tokens y duración; la desviación queda vacía con n < 2) y `summary.md`
   (resumen por config, corridas incluidas y excluidas con su motivo). También
   imprime `summary.md` por stdout. Las celdas de batería quedan vacías si falta

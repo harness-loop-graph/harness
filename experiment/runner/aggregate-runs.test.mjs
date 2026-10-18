@@ -284,3 +284,15 @@ test('runs without a SPEC hash are excluded, and mixed SPEC or harness versions 
   assert.deepEqual(agg.comparabilityWarnings(rows.slice(0, 1)), []);
   assert.match(agg.renderMarkdown({ rows, excluded: [], summary: agg.summarizeByConfig(rows) }), /SPEC/);
 });
+
+test('per-battery means report how many runs they cover, so missing battery data is visible', () => {
+  const rows = [
+    agg.buildRow({ workspace: 'a', report: reportFixture(), batteries: batteryFixture({ 'battery1-e2e': [4, 8] }) }),
+    agg.buildRow({ workspace: 'b', report: reportFixture(), batteries: null }),
+  ];
+  const [summary] = agg.summarizeByConfig(rows);
+  assert.equal(summary.n, 2);
+  assert.deepEqual(summary.batteries['battery1-e2e'], { meanPassRatio: 0.5, n: 1 });
+  assert.match(agg.renderMarkdown({ rows, excluded: [], summary: [summary] }), /0\.5\d* \(n=1\)/);
+  assert.match(agg.summaryToCsv([summary]), /battery1-e2e_n/);
+});
