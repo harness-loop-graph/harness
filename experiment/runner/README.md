@@ -338,14 +338,22 @@ publicado.
 
 ## Fase de baterías (`--with-batteries`)
 
-1. `docker compose up -d --build` en el espacio de trabajo.
-2. Sondea `GET http://localhost:3000/health` hasta 120 s.
+1. `docker compose up -d --build` en el espacio de trabajo. Si falla, se
+   registra en `batteryPhase.stack` y la fase **continúa** (no se sondea la
+   salud).
+2. Sondea `GET http://localhost:3000/health` hasta 120 s (solo si el paso 1
+   levantó el stack). Si nunca pasa, también se registra en
+   `batteryPhase.stack` y la fase continúa.
 3. Corre `node run-all.mjs` **con `experiment/acceptance/` como directorio de
    trabajo** (el banco oculto, nunca copiado al espacio de trabajo) contra la
    app generada, con `WORKSPACE` fijado a la ruta del espacio de trabajo más
-   `BACKEND_URL`/`FRONTEND_URL`/`DB_URL` para el stack en ejecución.
+   `BACKEND_URL`/`FRONTEND_URL`/`DB_URL` para el stack en ejecución. Se corre
+   siempre, aunque el stack no haya levantado: las baterías 1-3 registran sus
+   propios fallos de conexión y la batería 4 (coherencia) es estática. Así un
+   sistema que ni arranca no se ve mejor que uno que arranca y falla
+   chequeos (sin reporte, el agregador lo excluiría de las medias).
 4. Guarda el reporte agregado como `batteries-report.json` en el espacio de
-   trabajo.
+   trabajo (siempre que `run-all.mjs` haya producido salida).
 5. `docker compose down -v` (salvo `--keep`) — el mismo ayudante de cierre
    que usa el cierre de fin de corrida de c2 (ver "Salvaguardas" abajo).
 
@@ -416,7 +424,7 @@ false` y un tope definido se agrega `budget.warning`.
     "byRoute": { "default": { "calls": 0, "promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "cost": 0 } },
     "decisions": { "default:default": 0 }
   },
-  "batteryPhase?": { "ran": true, "passed": true, "error?": "..." },
+  "batteryPhase?": { "ran": true, "stack": { "up": true, "healthy": true, "error?": "..." }, "passed": true, "error?": "..." },
   "closeError?": "...",
   "teardownError?": "...",
   "repoError?": "...",
@@ -452,9 +460,12 @@ false` y un tope definido se agrega `budget.warning`.
 - `routing` — presente solo cuando hay una sección `router` configurada; ver
   "Métricas registradas — routing" arriba.
 - `batteryPhase` — presente solo con `--with-batteries`: `ran` siempre
-  `true` cuando la fase corrió, `passed` indica si las baterías de
-  aceptación pasaron, `error` solo está presente si la propia fase de
-  baterías falló (p. ej. el health check nunca pasó).
+  `true` cuando la fase corrió, `stack` (`{ up, healthy, error? }`) registra
+  por separado si `docker compose up` levantó el stack, si el health check
+  pasó y el motivo si no (las baterías corren igual y `batteries-report.json`
+  se escribe igual), `passed` indica si las baterías de aceptación pasaron
+  (es `false` si el stack no está sano) y `error` solo está presente si
+  falló `run-all.mjs` en sí (spawn, timeout) o el cierre del stack.
 - `failure` — también cubre una excepción lanzada en cualquier punto de la
   corrida (p. ej. `createModel()` rechazando porque `apiKeyEnv` de una ruta
   de *router* no está configurada, o cualquier error de harness/loop/graph):

@@ -729,7 +729,11 @@ function spawnCommand(cmd, args, opts = {}) {
     child.on('close', (code) => {
       clearTimeout(timeout);
       if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${cmd} ${args.join(' ')} exited ${code}. stderr: ${stderr.slice(0, 500)}`));
+      else {
+        const err = new Error(`${cmd} ${args.join(' ')} exited ${code}. stderr: ${stderr.slice(0, 500)}`);
+        err.stdout = stdout;
+        reject(err);
+      }
     });
     child.on('error', (err) => {
       clearTimeout(timeout);
@@ -786,51 +790,81 @@ function parseBatteryReport(stdout) {
   return { parseError: true, raw: stdout.slice(0, 5000) };
 }
 
-async function runBatteries(ws, keep, scrubNames = []) {
+// Always runs run-all.mjs and writes batteries-report.json, even when the stack never came up:
+// batteries 1-3 record their own connection failures and battery4 (coherence) is static. Without
+// the report the aggregator would drop the run from the battery means, making a system that does
+// not start look better than one that starts and fails checks. The stack outcome is returned
+// separately as `stack` ({ up, healthy, error? }); `batteryError` is reserved for failures of
+// run-all.mjs itself (or of the teardown). `run`, `fetchFn`, `sleep` and `acceptanceDir` are
+// injectable for tests.
+async function runBatteries(ws, keep, scrubNames = [], deps = {}) {
+  const {
+    run = spawnCommand,
+    fetchFn = globalThis.fetch,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    // The battery scripts live in experiment/acceptance/ (never copied into the workspace).
+    acceptanceDir = path.resolve(__dirname, '..', 'acceptance'),
+  } = deps;
   let batteryReport = null;
   let batteryError = null;
+  const stack = { up: false, healthy: false };
   // SEED_PASSWORD matches the secret filter but is an operator-set seed value the app and batteries share.
   const seedEnv = process.env.SEED_PASSWORD ? { SEED_PASSWORD: process.env.SEED_PASSWORD } : {};
   try {
-    await spawnCommand('docker', ['compose', 'up', '-d', '--build'], { cwd: ws, timeoutMs: 600_000, scrubEnv: true, scrubNames, env: seedEnv });
-    let healthy = false;
-    for (let i = 0; i < 120; i++) {
-      try {
-        const res = await fetch('http://localhost:3000/health');
-        if (res.ok) { healthy = true; break; }
-      } catch { /* ignore */ }
-      await new Promise((r) => setTimeout(r, 1000));
+    try {
+      await run('docker', ['compose', 'up', '-d', '--build'], { cwd: ws, timeoutMs: 600_000, scrubEnv: true, scrubNames, env: seedEnv });
+      stack.up = true;
+    } catch (err) {
+      stack.error = err instanceof Error ? err.message : String(err);
     }
-    if (!healthy) throw new Error('Health check did not pass within 120s');
 
-    // Run against the workspace from the bench's own directory: the battery
-    // scripts live in experiment/acceptance/ (never copied into the
-    // workspace), and WORKSPACE tells them which generated app to exercise.
-    const acceptanceDir = path.resolve(__dirname, '..', 'acceptance');
-    const result = await spawnCommand('node', ['run-all.mjs'], {
-      cwd: acceptanceDir,
-      scrubEnv: true,
-      scrubNames,
-      env: {
-        ...seedEnv,
-        BACKEND_URL: 'http://localhost:3000',
-        FRONTEND_URL: 'http://localhost:8080',
-        DB_URL: 'postgres://medapp:medapp@localhost:5432/medapp',
-        WORKSPACE: ws,
-      },
-      timeoutMs: 600_000,
-    });
-    batteryReport = parseBatteryReport(result.stdout);
-    await fs.writeFile(path.join(ws, 'batteries-report.json'), JSON.stringify(batteryReport, null, 2));
+    // No point waiting for health when compose up already failed.
+    if (stack.up) {
+      for (let i = 0; i < 120; i++) {
+        try {
+          const res = await fetchFn('http://localhost:3000/health');
+          if (res.ok) { stack.healthy = true; break; }
+        } catch { /* ignore */ }
+        await sleep(1000);
+      }
+      if (!stack.healthy) stack.error = 'Health check did not pass within 120s';
+    }
+
+    // Run against the workspace from the bench's own directory; WORKSPACE tells the
+    // batteries which generated app to exercise.
+    try {
+      const result = await run('node', ['run-all.mjs'], {
+        cwd: acceptanceDir,
+        scrubEnv: true,
+        scrubNames,
+        env: {
+          ...seedEnv,
+          BACKEND_URL: 'http://localhost:3000',
+          FRONTEND_URL: 'http://localhost:8080',
+          DB_URL: 'postgres://medapp:medapp@localhost:5432/medapp',
+          WORKSPACE: ws,
+        },
+        timeoutMs: 600_000,
+      });
+      batteryReport = parseBatteryReport(result.stdout);
+    } catch (err) {
+      // run-all.mjs exits 1 whenever a battery fails, after printing its
+      // report: that is a battery result, not a phase error.
+      if (typeof err?.stdout === 'string' && err.stdout.trim()) batteryReport = parseBatteryReport(err.stdout);
+      if (!batteryReport || batteryReport.parseError) batteryError = err instanceof Error ? err.message : String(err);
+    }
+    if (batteryReport) {
+      await fs.writeFile(path.join(ws, 'batteries-report.json'), JSON.stringify(batteryReport, null, 2));
+    }
   } catch (err) {
-    batteryError = err.message;
+    batteryError = err instanceof Error ? err.message : String(err);
   } finally {
     if (!keep) {
-      const downErr = await teardownDockerCompose(ws);
+      const downErr = await teardownDockerCompose(ws, run);
       if (downErr && !batteryError) batteryError = downErr;
     }
   }
-  return { batteryReport, batteryError };
+  return { batteryReport, batteryError, stack };
 }
 
 /**
@@ -1399,7 +1433,8 @@ async function main() {
       const batteryInfo = await runBatteries(ws, parsed.keep, routeApiKeyEnvNames(harnessExtras));
       report.batteryPhase = {
         ran: true,
-        passed: !batteryInfo.batteryError && (batteryInfo.batteryReport?.passed ?? false),
+        stack: batteryInfo.stack,
+        passed: !batteryInfo.batteryError && batteryInfo.stack.healthy && (batteryInfo.batteryReport?.passed ?? false),
         error: batteryInfo.batteryError || undefined,
       };
     }
@@ -1493,7 +1528,8 @@ async function main() {
   }
   if (parsed.withBatteries) {
     const bp = report.batteryPhase;
-    console.error(`  Batteries:  ${bp.passed ? 'passed' : bp.error ? `failed (${bp.error})` : 'failed'}`);
+    const bpReason = bp.error ?? (bp.stack?.error ? `stack: ${bp.stack.error}` : null);
+    console.error(`  Batteries:  ${bp.passed ? 'passed' : bpReason ? `failed (${bpReason})` : 'failed'}`);
   }
   console.log(reportPath);
 
@@ -1545,6 +1581,7 @@ export {
   STATIC_ANALYSIS_WORKFLOW,
   SEMGREP_CONFIGS,
   teardownDockerCompose,
+  runBatteries,
   routeApiKeyEnvNames,
   spawnCommand,
   workspaceMayHaveDockerStack,

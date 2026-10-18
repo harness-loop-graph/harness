@@ -32,6 +32,7 @@ import {
   checkGhAuthenticated,
   publishWorkspace,
   teardownDockerCompose,
+  runBatteries,
   workspaceMayHaveDockerStack,
   clearStaleReviewVerdict,
   buildRouter,
@@ -1031,6 +1032,100 @@ test('teardownDockerCompose() never throws: returns a message naming the failure
   assert.match(err, /docker compose down failed: boom/);
 });
 
+// runBatteries() fixtures: no real docker/node/network. `run` records every spawn, `fetchFn` counts
+// health polls and `sleep` is instant.
+async function batteriesFixture({ composeUp = 'ok', runAll = 'ok', healthy = true } = {}) {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-batteries-'));
+  const calls = [];
+  const run = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    if (cmd === 'docker' && args[1] === 'up' && composeUp === 'fail') throw new Error('compose up exploded');
+    if (cmd === 'node') {
+      if (runAll === 'fail') throw new Error('node run-all.mjs timed out');
+      if (runAll === 'exit1') {
+        // run-all.mjs exits 1 whenever a battery fails, after printing its report.
+        const err = new Error('node run-all.mjs exited with code 1');
+        err.stdout = JSON.stringify({ passed: false, batteries: [{ battery: 'battery4-coherence', passed: true, checks: [] }] }, null, 2);
+        throw err;
+      }
+      return { stdout: JSON.stringify({ passed: false, batteries: [] }), stderr: '' };
+    }
+    return { stdout: '', stderr: '' };
+  };
+  let polls = 0;
+  const fetchFn = async () => { polls++; return { ok: healthy }; };
+  const sleep = async () => {};
+  return { ws, calls, run, fetchFn, sleep, polls: () => polls, deps: { run, fetchFn, sleep, acceptanceDir: '/fake/acceptance' } };
+}
+
+test('runBatteries() still runs run-all and writes batteries-report.json when compose up fails, without polling health', async () => {
+  const fx = await batteriesFixture({ composeUp: 'fail' });
+  try {
+    const out = await runBatteries(fx.ws, false, [], fx.deps);
+    assert.equal(fx.polls(), 0);
+    const runAll = fx.calls.find((c) => c.cmd === 'node');
+    assert.deepEqual(runAll.args, ['run-all.mjs']);
+    assert.equal(runAll.opts.cwd, '/fake/acceptance');
+    const written = JSON.parse(await fs.readFile(path.join(fx.ws, 'batteries-report.json'), 'utf-8'));
+    assert.deepEqual(written, out.batteryReport);
+    assert.equal(out.stack.up, false);
+    assert.equal(out.stack.healthy, false);
+    assert.match(out.stack.error, /compose up exploded/);
+    assert.equal(out.batteryError, null);
+  } finally {
+    await fs.rm(fx.ws, { recursive: true, force: true });
+  }
+});
+
+test('runBatteries() still runs run-all when health never passes (stack.up true, healthy false)', async () => {
+  const fx = await batteriesFixture({ healthy: false });
+  try {
+    const out = await runBatteries(fx.ws, false, [], fx.deps);
+    assert.equal(fx.polls(), 120);
+    assert.ok(fx.calls.some((c) => c.cmd === 'node'));
+    await fs.access(path.join(fx.ws, 'batteries-report.json'));
+    assert.equal(out.stack.up, true);
+    assert.equal(out.stack.healthy, false);
+    assert.match(out.stack.error, /120s/);
+    assert.equal(out.batteryError, null);
+  } finally {
+    await fs.rm(fx.ws, { recursive: true, force: true });
+  }
+});
+
+test('runBatteries() happy path: stack up and healthy, report written, teardown still runs unless keep', async () => {
+  const fx = await batteriesFixture();
+  try {
+    const out = await runBatteries(fx.ws, false, [], fx.deps);
+    assert.deepEqual(out.stack, { up: true, healthy: true });
+    assert.equal(out.batteryError, null);
+    await fs.access(path.join(fx.ws, 'batteries-report.json'));
+    assert.deepEqual(fx.calls.at(-1).args, ['compose', 'down', '-v']);
+  } finally {
+    await fs.rm(fx.ws, { recursive: true, force: true });
+  }
+  const kept = await batteriesFixture();
+  try {
+    await runBatteries(kept.ws, true, [], kept.deps);
+    assert.ok(!kept.calls.some((c) => c.args[1] === 'down'));
+  } finally {
+    await fs.rm(kept.ws, { recursive: true, force: true });
+  }
+});
+
+test('runBatteries() records batteryError when run-all itself fails, and still tears down', async () => {
+  const fx = await batteriesFixture({ runAll: 'fail' });
+  try {
+    const out = await runBatteries(fx.ws, false, [], fx.deps);
+    assert.match(out.batteryError, /run-all\.mjs timed out/);
+    assert.equal(out.batteryReport, null);
+    assert.deepEqual(out.stack, { up: true, healthy: true });
+    assert.deepEqual(fx.calls.at(-1).args, ['compose', 'down', '-v']);
+  } finally {
+    await fs.rm(fx.ws, { recursive: true, force: true });
+  }
+});
+
 test('workspaceMayHaveDockerStack() is true when --verify-cmd invokes docker compose, false for an unrelated command', async () => {
   const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-compose-cmd-'));
   try {
@@ -1915,5 +2010,18 @@ test('publishWorkspace() never writes or deletes outside the workspace through m
     assert.equal(await fs.readFile(victim, 'utf8'), 'original');
   } finally {
     for (const dir of cleanup) await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('runBatteries() treats run-all exiting 1 with a valid report as failed batteries, not a phase error', async () => {
+  const fx = await batteriesFixture({ runAll: 'exit1' });
+  try {
+    const out = await runBatteries(fx.ws, false, [], fx.deps);
+    assert.equal(out.batteryError, null);
+    assert.equal(out.batteryReport.passed, false);
+    assert.equal(out.batteryReport.batteries[0].battery, 'battery4-coherence');
+    await fs.access(path.join(fx.ws, 'batteries-report.json'));
+  } finally {
+    await fs.rm(fx.ws, { recursive: true, force: true });
   }
 });
