@@ -1072,6 +1072,11 @@ test('runBatteries() still runs run-all and writes batteries-report.json when co
     assert.equal(out.stack.healthy, false);
     assert.match(out.stack.error, /compose up exploded/);
     assert.equal(out.batteryError, null);
+    // Our stack never started: whatever listens on the fixed ports is foreign
+    // and must not be scored for this run.
+    for (const key of ['BACKEND_URL', 'FRONTEND_URL', 'DB_URL']) {
+      assert.doesNotMatch(runAll.opts.env[key], /localhost:(3000|8080|5432)/, key);
+    }
   } finally {
     await fs.rm(fx.ws, { recursive: true, force: true });
   }

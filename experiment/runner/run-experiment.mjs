@@ -831,7 +831,11 @@ async function runBatteries(ws, keep, scrubNames = [], deps = {}) {
     }
 
     // Run against the workspace from the bench's own directory; WORKSPACE tells the
-    // batteries which generated app to exercise.
+    // batteries which generated app to exercise. When this run's stack never
+    // started, anything on the fixed ports belongs to another run, so the
+    // runtime batteries target a closed port and fail instead of scoring it.
+    const host = stack.up ? 'localhost' : '127.0.0.1';
+    const [backendPort, frontendPort, dbPort] = stack.up ? [3000, 8080, 5432] : [9, 9, 9];
     try {
       const result = await run('node', ['run-all.mjs'], {
         cwd: acceptanceDir,
@@ -839,9 +843,9 @@ async function runBatteries(ws, keep, scrubNames = [], deps = {}) {
         scrubNames,
         env: {
           ...seedEnv,
-          BACKEND_URL: 'http://localhost:3000',
-          FRONTEND_URL: 'http://localhost:8080',
-          DB_URL: 'postgres://medapp:medapp@localhost:5432/medapp',
+          BACKEND_URL: `http://${host}:${backendPort}`,
+          FRONTEND_URL: `http://${host}:${frontendPort}`,
+          DB_URL: `postgres://medapp:medapp@${host}:${dbPort}/medapp`,
           WORKSPACE: ws,
         },
         timeoutMs: 600_000,
