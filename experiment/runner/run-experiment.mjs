@@ -1211,6 +1211,8 @@ function compactTraceC2(loopResult) {
     phases: t.phases,
     decision: t.decision.action,
     responseType: t.response.type,
+    ...(t.responseCode !== undefined ? { responseCode: t.responseCode } : {}),
+    ...(t.responseMessage !== undefined ? { responseMessage: t.responseMessage } : {}),
     verificationPassed: t.verification?.passed,
   }));
 }
@@ -1580,6 +1582,7 @@ export {
   summarizeRouting,
   attachUsageAndRouting,
   applyBudgetToReport,
+  compactTraceC2,
   compactTraceC3,
   slugifyModelId,
   timestampForWorkspace,

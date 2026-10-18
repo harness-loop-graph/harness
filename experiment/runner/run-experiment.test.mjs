@@ -21,6 +21,7 @@ import {
   summarizeRouting,
   attachUsageAndRouting,
   applyBudgetToReport,
+  compactTraceC2,
   compactTraceC3,
   slugifyModelId,
   timestampForWorkspace,
@@ -404,6 +405,36 @@ test('--task-file rejects an empty/whitespace-only file with a usage error and n
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('compactTraceC2() keeps responseCode/responseMessage for errored turns and omits them otherwise', () => {
+  const loopResult = {
+    trace: [
+      {
+        turn: 1,
+        phases: ['generating', 'observing', 'verifying', 'deciding'],
+        decision: { action: 'RETRY', reason: 'x' },
+        response: { type: 'error', code: 'max_tool_rounds', message: 'ran out' },
+        responseCode: 'max_tool_rounds',
+        responseMessage: 'ran out',
+        verification: { passed: false },
+      },
+      {
+        turn: 2,
+        phases: ['generating', 'observing', 'deciding'],
+        decision: { action: 'FINISH', reason: 'done' },
+        response: { type: 'finish', content: 'ok' },
+      },
+    ],
+  };
+
+  const compact = compactTraceC2(loopResult);
+
+  assert.equal(compact[0].responseType, 'error');
+  assert.equal(compact[0].responseCode, 'max_tool_rounds');
+  assert.equal(compact[0].responseMessage, 'ran out');
+  assert.equal('responseCode' in compact[1], false);
+  assert.equal('responseMessage' in compact[1], false);
 });
 
 test('compactTraceC3() copies loopFailure into a failed trace entry and omits it from a successful one', () => {

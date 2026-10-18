@@ -9,6 +9,10 @@ import type {
   LoopState,
   LoopTurnTrace,
 } from './contracts.js';
+import { summarizeTurn } from './turn-summary.js';
+
+/** Error messages recorded in the trace are truncated past this length. */
+const MAX_TRACE_MESSAGE_LENGTH = 300;
 
 export interface LoopDeps {
   harness: Harness;
@@ -78,6 +82,12 @@ export class AgentLoop {
         turn,
         phases: ['generating', 'observing', ...(verification ? (['verifying'] as const) : []), 'deciding'],
         response: finalResponse,
+        ...(finalResponse.type === 'error'
+          ? {
+              responseCode: finalResponse.code,
+              responseMessage: truncateMessage(finalResponse.message),
+            }
+          : {}),
         verification,
         decision,
         ...(decision.action === 'RETRY' ? { feedback } : {}),
@@ -86,7 +96,12 @@ export class AgentLoop {
       if (decision.action === 'FINISH') break;
 
       if (decision.action === 'RETRY') {
-        feedback = this.buildFeedback(finalResponse, verification);
+        // The next turn is a fresh conversation: verification first, then a
+        // harness-built record of what this turn did so it need not re-explore.
+        const summary = summarizeTurn(run);
+        feedback = [this.buildFeedback(finalResponse, verification), summary]
+          .filter((part): part is string => !!part)
+          .join('\n\n');
         continue;
       }
 
@@ -156,4 +171,8 @@ export class AgentLoop {
     }
     return parts.join(' ');
   }
+}
+
+function truncateMessage(message: string): string {
+  return message.length <= MAX_TRACE_MESSAGE_LENGTH ? message : message.slice(0, MAX_TRACE_MESSAGE_LENGTH) + '…';
 }
