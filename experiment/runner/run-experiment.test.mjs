@@ -38,6 +38,13 @@ import {
   loadCredentials,
   routeApiKeyEnvNames,
   spawnCommand,
+  STATIC_ANALYSIS_WORKFLOW,
+  SEMGREP_CONFIGS,
+  buildSonarProjectProperties,
+  createSonarProject,
+  loadSonarToken,
+  loadPublishableWorkspace,
+  publishExistingWorkspace,
 } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -773,6 +780,48 @@ test('checkGhAuthenticated() reflects whether the injected run resolves or rejec
   );
 });
 
+// Sonar settings + a recording fetch that accepts project creation, so publish tests stay offline.
+function makeFetch(responses = [{ status: 200, body: '{}' }]) {
+  const calls = [];
+  const fetchFn = async (url, init) => {
+    calls.push({ url, init });
+    const r = responses[Math.min(calls.length - 1, responses.length - 1)];
+    return { ok: r.status >= 200 && r.status < 300, status: r.status, text: async () => r.body };
+  };
+  fetchFn.calls = calls;
+  return fetchFn;
+}
+const SONAR_OK = () => ({ sonarOrg: 'harness-loop-graph', sonarToken: 'sonar-secret-token', fetchFn: makeFetch() });
+
+// Records every call; git runs for real (temp repos), gh and push are stubbed.
+function makeRecordingRun(url = 'https://github.com/harness-loop-graph/run-x') {
+  const calls = [];
+  const run = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    if (cmd === 'gh') return { stdout: `${url}\n`, stderr: '' };
+    if (cmd === 'git' && args.includes('push')) return { stdout: '', stderr: '' };
+    return spawnCommand(cmd, args, opts);
+  };
+  run.calls = calls;
+  return run;
+}
+
+async function gitOut(ws, ...args) {
+  const { execFileSync } = await import('node:child_process');
+  return execFileSync('git', ['-C', ws, ...args], { encoding: 'utf8' });
+}
+
+async function seedWorkspace(prefix, files = {}) {
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  await fs.writeFile(path.join(ws, 'run-report.json'), '{"model":"m","config":"c1"}');
+  for (const [rel, content] of Object.entries(files)) {
+    await fs.mkdir(path.dirname(path.join(ws, rel)), { recursive: true });
+    await fs.writeFile(path.join(ws, rel), content);
+  }
+  await initWorkspaceRepo(ws, 'test: seed');
+  return ws;
+}
+
 test('publishWorkspace() builds the gh repo create command and records repository in run-report.json', async () => {
   const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-'));
   const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
@@ -792,7 +841,7 @@ test('publishWorkspace() builds the gh repo create command and records repositor
     };
     const report = { status: 'SUCCESS' };
 
-    await publishWorkspace({ ws, report, modelId: 'test-model-5.2', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir });
+    await publishWorkspace({ ws, report, modelId: 'test-model-5.2', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir, ...SONAR_OK() });
 
     assert.equal(report.publishError, undefined);
     assert.deepEqual(report.repository, { name: `harness-loop-graph/run-${wsName}`, url: expectedUrl });
@@ -855,7 +904,7 @@ test('publishWorkspace() never flags a secret planted only in a gitignored .env 
     await publishWorkspace({
       ws, report, modelId: 'test-model-5.2', config: 'c1', org: 'harness-loop-graph',
       secrets: [{ label: 'MODEL_API_KEY', value: 'leaked-key-abc' }],
-      run, benchDir,
+      run, benchDir, ...SONAR_OK(),
     });
 
     assert.equal(report.publishError, undefined);
@@ -904,7 +953,7 @@ test("publishWorkspace() does not refuse for a generated app's own acceptance/ f
     };
     const report = {};
 
-    await publishWorkspace({ ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir });
+    await publishWorkspace({ ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir, ...SONAR_OK() });
 
     assert.equal(report.publishError, undefined);
     assert.ok(calls.some((c) => c.cmd === 'gh'), 'gh must be called: a same-named but different-content acceptance/ folder is not the bench');
@@ -1467,4 +1516,360 @@ test('default c2 verify command waits for the backend health check instead of pr
   const { verifyCmd } = parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']);
   assert.match(verifyCmd, /^docker compose up -d --build && /);
   assert.match(verifyCmd, /curl -sf --retry 60 --retry-delay 2 --retry-all-errors http:\/\/localhost:3000\/health$/);
+});
+
+// ---- static analysis on publish -------------------------------------------------------------
+
+const publishArgs = (ws, report, extra = {}) => ({
+  ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], ...extra,
+});
+
+test('publishWorkspace() removes tracked model-authored workflows in a dedicated commit and records the paths', async () => {
+  const ws = await seedWorkspace('runner-sa-rm-', {
+    '.github/workflows/ci.yml': 'name: model ci\n',
+    '.github/workflows/deploy.yaml': 'name: model deploy\n',
+    'src/app.js': 'x\n',
+  });
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const run = makeRecordingRun();
+    const report = {};
+    await publishWorkspace(publishArgs(ws, report, { run, benchDir, ...SONAR_OK() }));
+
+    assert.equal(report.publishError, undefined);
+    assert.deepEqual([...report.staticAnalysis.removedWorkflows].sort(), ['.github/workflows/ci.yml', '.github/workflows/deploy.yaml']);
+    const tracked = (await gitOut(ws, 'ls-files')).split('\n');
+    assert.ok(!tracked.includes('.github/workflows/ci.yml'));
+    assert.ok(!tracked.includes('.github/workflows/deploy.yaml'));
+    assert.ok(tracked.includes('.github/workflows/static-analysis.yml'));
+    assert.ok(tracked.includes('sonar-project.properties'));
+    const subjects = (await gitOut(ws, 'log', '--format=%s')).trim().split('\n');
+    assert.deepEqual(subjects.slice(1, 3).reverse(), ['harness: remove model-authored workflows', 'harness: add static analysis workflow']);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('publishWorkspace() makes no removal commit when the model wrote no workflows', async () => {
+  const ws = await seedWorkspace('runner-sa-norm-', { 'src/app.js': 'x\n' });
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const report = {};
+    await publishWorkspace(publishArgs(ws, report, { run: makeRecordingRun(), benchDir, ...SONAR_OK() }));
+    assert.equal(report.publishError, undefined);
+    assert.deepEqual(report.staticAnalysis.removedWorkflows, []);
+    const log = await gitOut(ws, 'log', '--format=%s');
+    assert.doesNotMatch(log, /remove model-authored workflows/);
+    assert.match(log, /harness: add static analysis workflow/);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('publishWorkspace() injects the runner-owned workflow and sonar-project.properties and records report.staticAnalysis', async () => {
+  const ws = await seedWorkspace('runner-sa-inject-', {
+    'sonar-project.properties': 'sonar.exclusions=**/*\n', // model tampering attempt
+  });
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const report = {};
+    await publishWorkspace(publishArgs(ws, report, { run: makeRecordingRun(), benchDir, ...SONAR_OK() }));
+    assert.equal(report.publishError, undefined);
+
+    const wf = await fs.readFile(path.join(ws, '.github/workflows/static-analysis.yml'), 'utf-8');
+    assert.equal(wf, STATIC_ANALYSIS_WORKFLOW);
+    assert.match(wf, /permissions:\n {2}contents: read\n {2}security-events: write\n {2}actions: read/);
+    assert.match(wf, /semgrep scan --config p\/default --config p\/typescript --sarif --output semgrep\.sarif \|\| true/);
+    assert.match(wf, /image: semgrep\/semgrep/);
+    assert.match(wf, /github\/codeql-action\/upload-sarif@v3/);
+    assert.match(wf, /category: semgrep/);
+    assert.match(wf, /fetch-depth: 0/);
+    assert.match(wf, /SonarSource\/sonarqube-scan-action@v5/);
+    assert.match(wf, /SONAR_TOKEN: \$\{\{ secrets\.SONAR_TOKEN \}\}/);
+    assert.match(wf, /SONAR_HOST_URL: https:\/\/sonarcloud\.io/);
+    assert.match(wf, /workflow_dispatch/);
+
+    const wsName = path.basename(ws);
+    const props = await fs.readFile(path.join(ws, 'sonar-project.properties'), 'utf-8');
+    assert.equal(props, buildSonarProjectProperties({ sonarOrg: 'harness-loop-graph', workspaceName: wsName }));
+    assert.match(props, /^sonar\.organization=harness-loop-graph$/m);
+    assert.match(props, new RegExp(`^sonar\\.projectKey=harness-loop-graph_run-${wsName}$`, 'm'));
+    assert.match(props, new RegExp(`^sonar\\.projectName=run-${wsName}$`, 'm'));
+    assert.match(props, /^sonar\.sources=\.$/m);
+    assert.match(
+      props,
+      /^sonar\.exclusions=\*\*\/node_modules\/\*\*,\*\*\/dist\/\*\*,\*\*\/build\/\*\*,\*\*\/coverage\/\*\*,run-report\.json,batteries-report\.json,audit\*\.jsonl,SPEC\.md,\.github\/\*\*$/m,
+    );
+
+    const { createHash } = await import('node:crypto');
+    assert.deepEqual(report.staticAnalysis, {
+      sonarOrganization: 'harness-loop-graph',
+      sonarProjectKey: `harness-loop-graph_run-${wsName}`,
+      semgrepConfig: ['p/default', 'p/typescript'],
+      workflowSha256: createHash('sha256').update(STATIC_ANALYSIS_WORKFLOW).digest('hex'),
+      removedWorkflows: [],
+    });
+    assert.deepEqual(SEMGREP_CONFIGS, ['p/default', 'p/typescript']);
+    assert.equal(await gitOut(ws, 'status', '--porcelain', '--', '.github', 'sonar-project.properties'), '');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('publishWorkspace() creates the SonarCloud project (form params + Bearer token) before gh repo create', async () => {
+  const ws = await seedWorkspace('runner-sa-sonar-');
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const order = [];
+    const fetchFn = makeFetch();
+    const base = makeRecordingRun();
+    const run = async (cmd, args, opts) => { if (cmd === 'gh') order.push('gh'); return base(cmd, args, opts); };
+    const tracked = async (url, init) => { order.push('sonar'); return fetchFn(url, init); };
+    tracked.calls = fetchFn.calls;
+    await publishWorkspace(publishArgs(ws, {}, { run, benchDir, sonarOrg: 'my-org', sonarToken: 'tok-123', fetchFn: tracked }));
+
+    assert.deepEqual(order, ['sonar', 'gh']);
+    assert.equal(fetchFn.calls.length, 1);
+    const { url, init } = fetchFn.calls[0];
+    assert.equal(url, 'https://sonarcloud.io/api/projects/create');
+    assert.equal(init.method, 'POST');
+    assert.equal(init.headers.Authorization, 'Bearer tok-123');
+    const form = new URLSearchParams(String(init.body));
+    assert.equal(form.get('organization'), 'my-org');
+    assert.equal(form.get('project'), `my-org_run-${path.basename(ws)}`);
+    assert.equal(form.get('name'), `run-${path.basename(ws)}`);
+    assert.equal(form.get('visibility'), 'public');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('createSonarProject() tolerates HTTP 400 "key already exists" but rejects any other failure', async () => {
+  const args = { sonarOrg: 'o', projectKey: 'o_run-x', projectName: 'run-x', sonarToken: 't' };
+  await createSonarProject({ ...args, fetchFn: makeFetch([{ status: 400, body: '{"errors":[{"msg":"Could not create Project, key already exists: o_run-x"}]}' }]) });
+  await assert.rejects(
+    createSonarProject({ ...args, fetchFn: makeFetch([{ status: 400, body: '{"errors":[{"msg":"Organization not found"}]}' }]) }),
+    /400/,
+  );
+  await assert.rejects(createSonarProject({ ...args, fetchFn: makeFetch([{ status: 401, body: 'Unauthorized' }]) }), /401/);
+  await assert.rejects(createSonarProject({ ...args, fetchFn: async () => { throw new Error('network down'); } }), /network down/);
+});
+
+test('publishWorkspace() sets publishError and never calls gh when SonarCloud project creation fails', async () => {
+  const ws = await seedWorkspace('runner-sa-sonarfail-');
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const run = makeRecordingRun();
+    const report = {};
+    await publishWorkspace(publishArgs(ws, report, {
+      run, benchDir, sonarOrg: 'o', sonarToken: 't', fetchFn: makeFetch([{ status: 403, body: 'forbidden' }]),
+    }));
+    assert.match(report.publishError, /SonarCloud/);
+    assert.match(report.publishError, /403/);
+    assert.equal(report.repository, undefined);
+    assert.equal(report.staticAnalysis, undefined);
+    assert.ok(!run.calls.some((c) => c.cmd === 'gh'), 'gh must not run');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('publishWorkspace() fails closed with a clear publishError when SONAR_TOKEN is missing (no fetch, no gh)', async () => {
+  const ws = await seedWorkspace('runner-sa-notoken-');
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const run = makeRecordingRun();
+    const fetchFn = makeFetch();
+    const report = {};
+    await publishWorkspace(publishArgs(ws, report, { run, benchDir, sonarOrg: 'o', sonarToken: undefined, fetchFn }));
+    assert.match(report.publishError, /SONAR_TOKEN/);
+    assert.equal(fetchFn.calls.length, 0);
+    assert.ok(!run.calls.some((c) => c.cmd === 'gh'), 'gh must not run');
+    assert.equal(report.repository, undefined);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('collectSecretValues() includes SONAR_TOKEN and the publish scan catches it planted in a workspace file', async () => {
+  const saved = process.env.SONAR_TOKEN;
+  process.env.SONAR_TOKEN = 'sonar-planted-token-value';
+  const ws = await seedWorkspace('runner-sa-leak-', { 'src/config.js': "const t = 'sonar-planted-token-value';\n" });
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const secrets = collectSecretValues({ apiKey: 'k', harnessExtras: null });
+    assert.ok(secrets.some((s) => s.label === 'SONAR_TOKEN' && s.value === 'sonar-planted-token-value'));
+    const run = makeRecordingRun();
+    const report = {};
+    await publishWorkspace(publishArgs(ws, report, { run, benchDir, secrets, ...SONAR_OK() }));
+    assert.equal(report.publishError, 'secret detected in src/config.js');
+    assert.equal(run.calls.length, 0);
+  } finally {
+    if (saved === undefined) delete process.env.SONAR_TOKEN;
+    else process.env.SONAR_TOKEN = saved;
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('scrubEnv drops SONAR_TOKEN from model-issued commands', async () => {
+  const saved = process.env.SONAR_TOKEN;
+  process.env.SONAR_TOKEN = 'sonar-leak';
+  try {
+    const out = await spawnCommand('node', ['-e', 'console.log(JSON.stringify(process.env))'], { scrubEnv: true });
+    assert.equal(JSON.parse(out.stdout).SONAR_TOKEN, undefined);
+  } finally {
+    if (saved === undefined) delete process.env.SONAR_TOKEN;
+    else process.env.SONAR_TOKEN = saved;
+  }
+});
+
+test('loadSonarToken() prefers the environment, falls back to .env, and never exits when unset', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-sonar-env-'));
+  const saved = process.env.SONAR_TOKEN;
+  try {
+    const envFile = path.join(dir, '.env');
+    await fs.writeFile(envFile, 'MODEL_API_KEY=x\nSONAR_TOKEN=file-token\n');
+    delete process.env.SONAR_TOKEN;
+    assert.equal(await loadSonarToken(envFile), 'file-token');
+    assert.equal(process.env.SONAR_TOKEN, 'file-token');
+    process.env.SONAR_TOKEN = 'env-token';
+    assert.equal(await loadSonarToken(envFile), 'env-token');
+    delete process.env.SONAR_TOKEN;
+    assert.equal(await loadSonarToken(path.join(dir, 'missing.env')), undefined);
+  } finally {
+    if (saved === undefined) delete process.env.SONAR_TOKEN;
+    else process.env.SONAR_TOKEN = saved;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('parseArgs() --sonar-org defaults to harness-loop-graph and can be overridden', () => {
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).sonarOrg, 'harness-loop-graph');
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--sonar-org', 'other']).sonarOrg, 'other');
+});
+
+test('parseArgs() --publish-only takes a workspace dir and does not need --config', () => {
+  const parsed = parseArgs(['node', 'run-experiment.mjs', '--publish-only', 'some/ws', '--sonar-org', 'o']);
+  assert.equal(parsed.publishOnly, path.resolve('some/ws'));
+  assert.equal(parsed.sonarOrg, 'o');
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).publishOnly, null);
+});
+
+test('loadPublishableWorkspace() refuses a report that already has a repository, and a dir that is not a git repo', async () => {
+  const published = await seedWorkspace('runner-po-done-');
+  const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-po-nogit-'));
+  const noReport = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-po-noreport-'));
+  try {
+    await fs.writeFile(path.join(published, 'run-report.json'), JSON.stringify({ repository: { name: 'o/r', url: 'https://github.com/o/r' } }));
+    await assert.rejects(loadPublishableWorkspace(published), /already published/);
+
+    await fs.writeFile(path.join(plain, 'run-report.json'), '{}');
+    await assert.rejects(loadPublishableWorkspace(plain), /not a git repository/);
+
+    await assert.rejects(loadPublishableWorkspace(noReport), /run-report\.json/);
+
+    const ok = await seedWorkspace('runner-po-ok-');
+    try {
+      const report = await loadPublishableWorkspace(ok);
+      assert.equal(report.model, 'm');
+    } finally {
+      await fs.rm(ok, { recursive: true, force: true });
+    }
+  } finally {
+    for (const d of [published, plain, noReport]) await fs.rm(d, { recursive: true, force: true });
+  }
+});
+
+test('publishExistingWorkspace() publishes without generating and rewrites run-report.json', async () => {
+  const ws = await seedWorkspace('runner-po-run-', { '.github/workflows/ci.yml': 'name: x\n' });
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const report = await publishExistingWorkspace({
+      wsDir: ws, org: 'harness-loop-graph', run: makeRecordingRun(), benchDir, secrets: [], ...SONAR_OK(),
+    });
+    assert.equal(report.publishError, undefined);
+    const persisted = JSON.parse(await fs.readFile(path.join(ws, 'run-report.json'), 'utf-8'));
+    assert.equal(persisted.repository.name, `harness-loop-graph/run-${path.basename(ws)}`);
+    assert.deepEqual(persisted.staticAnalysis.removedWorkflows, ['.github/workflows/ci.yml']);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('publishExistingWorkspace() persists publishError (and no repository) when publishing fails', async () => {
+  const ws = await seedWorkspace('runner-po-fail-');
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const run = makeRecordingRun();
+    const report = await publishExistingWorkspace({
+      wsDir: ws, org: 'harness-loop-graph', run, benchDir, secrets: [], sonarOrg: 'o', sonarToken: undefined, fetchFn: makeFetch(),
+    });
+    assert.match(report.publishError, /SONAR_TOKEN/);
+    const persisted = JSON.parse(await fs.readFile(path.join(ws, 'run-report.json'), 'utf-8'));
+    assert.match(persisted.publishError, /SONAR_TOKEN/);
+    assert.equal(persisted.repository, undefined);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
+test('--publish-only never demands MODEL_API_KEY/MODEL_ID and exits non-zero on an already-published report', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const ws = await seedWorkspace('runner-po-cli-');
+  try {
+    await fs.writeFile(path.join(ws, 'run-report.json'), JSON.stringify({ repository: { name: 'o/r', url: 'u' } }));
+    const env = { ...process.env };
+    for (const k of ['MODEL_API_KEY', 'MODEL_ID', 'MODEL_BASE_URL', 'SONAR_TOKEN']) delete env[k];
+    const res = spawnSync(process.execPath, [path.join(__dirname, 'run-experiment.mjs'), '--publish-only', ws], { encoding: 'utf8', env });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /Usage: --publish-only/);
+    assert.match(res.stderr, /already published/);
+    assert.doesNotMatch(res.stderr, /MODEL_API_KEY/);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('publishWorkspace() neutralizes model-planted git hooks and config before any publish git command', async () => {
+  const ws = await seedWorkspace('runner-publish-hooks-');
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  const marker = path.join(ws, '..', `${path.basename(ws)}-hook-ran`);
+  try {
+    const hook = path.join(ws, '.git', 'hooks', 'pre-commit');
+    await fs.writeFile(hook, `#!/bin/sh\ntouch '${marker}'\n`);
+    await fs.chmod(hook, 0o755);
+    const evilHooks = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-evil-hooks-'));
+    await fs.writeFile(path.join(evilHooks, 'pre-commit'), `#!/bin/sh\ntouch '${marker}'\n`);
+    await fs.chmod(path.join(evilHooks, 'pre-commit'), 0o755);
+    await gitOut(ws, 'config', 'core.hooksPath', evilHooks);
+    await gitOut(ws, 'config', 'url.https://evil.example/.insteadOf', 'https://github.com/');
+    await fs.writeFile(path.join(ws, '.github-placeholder'), 'x');
+
+    const report = {};
+    const run = makeRecordingRun();
+    await publishWorkspace({ ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir, ...SONAR_OK() });
+
+    assert.equal(report.publishError, undefined, report.publishError);
+    await assert.rejects(fs.access(marker), 'a model-planted hook ran during publish');
+    const config = await fs.readFile(path.join(ws, '.git', 'config'), 'utf8');
+    assert.doesNotMatch(config, /hooksPath|insteadOf|evil/);
+    assert.deepEqual(await fs.readdir(path.join(ws, '.git', 'hooks')), []);
+    for (const call of run.calls.filter((c) => c.cmd === 'git' || c.cmd === 'gh')) {
+      assert.equal(call.opts?.env?.GIT_CONFIG_KEY_0, 'core.hooksPath', `${call.cmd} ${call.args.join(' ')}`);
+      assert.equal(call.opts?.env?.GIT_CONFIG_VALUE_0, '/dev/null');
+    }
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+    await fs.rm(marker, { force: true });
+  }
 });

@@ -109,6 +109,9 @@ function parseArgs(argv) {
     maxCostUsd: null,
     publish: false,
     publishOrg: 'harness-loop-graph',
+    sonarOrg: 'harness-loop-graph',
+    // Workspace dir of an already generated run to publish without generating anything.
+    publishOnly: null,
     // null = unset: the provider default applies and the field is omitted from requests.
     sampling: { temperature: null, topP: null, seed: null, maxTokens: null },
     // Per-request model timeout (whole response body, incl. slow non-streamed
@@ -152,6 +155,15 @@ function parseArgs(argv) {
     else if (a === '--dry-run') parsed.dryRun = true;
     else if (a === '--publish') parsed.publish = true;
     else if (a === '--publish-org') parsed.publishOrg = args[++i];
+    else if (a === '--sonar-org') parsed.sonarOrg = args[++i];
+    else if (a === '--publish-only') {
+      const value = args[++i];
+      if (value === undefined) {
+        console.error('Usage: --publish-only <workspace-dir> requires a value');
+        process.exit(1);
+      }
+      parsed.publishOnly = path.resolve(value);
+    }
     else if (a === '--harness-config') {
       const value = args[++i];
       if (value === undefined) {
@@ -161,7 +173,7 @@ function parseArgs(argv) {
       parsed.harnessConfig = path.resolve(value);
     }
   }
-  if (!parsed.config || !['c1', 'c2', 'c3'].includes(parsed.config)) {
+  if (!parsed.publishOnly && (!parsed.config || !['c1', 'c2', 'c3'].includes(parsed.config))) {
     console.error('Usage: node run-experiment.mjs --config c1|c2|c3 [options]');
     process.exit(1);
   }
@@ -181,22 +193,26 @@ const HARNESS_INSTRUCTIONS =
   'Finish with a final answer once your task is complete.';
 
 const ENV_FILE_KEYS = ['MODEL_API_KEY', 'MODEL_ID', 'MODEL_BASE_URL'];
+const DEFAULT_ENV_FILE = path.resolve(__dirname, '..', '..', '.env');
+
+// Exports `keys` found in the .env file to process.env, never overriding values already set.
+async function exportFromEnvFile(keys, envPath) {
+  try {
+    const text = await fs.readFile(envPath, 'utf-8');
+    for (const line of text.split('\n')) {
+      const idx = line.indexOf('=');
+      if (idx === -1) continue;
+      const key = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (keys.includes(key) && !process.env[key] && value) process.env[key] = value;
+    }
+  } catch { /* ignore */ }
+}
 
 // Values from the root .env are exported to process.env (never overriding it) so the adapter and
 // every router route resolve MODEL_* the same way.
-async function loadCredentials(envPath = path.resolve(__dirname, '..', '..', '.env')) {
-  if (ENV_FILE_KEYS.some((key) => !process.env[key])) {
-    try {
-      const text = await fs.readFile(envPath, 'utf-8');
-      for (const line of text.split('\n')) {
-        const idx = line.indexOf('=');
-        if (idx === -1) continue;
-        const key = line.slice(0, idx).trim();
-        const value = line.slice(idx + 1).trim();
-        if (ENV_FILE_KEYS.includes(key) && !process.env[key] && value) process.env[key] = value;
-      }
-    } catch { /* ignore */ }
-  }
+async function loadCredentials(envPath = DEFAULT_ENV_FILE) {
+  if (ENV_FILE_KEYS.some((key) => !process.env[key])) await exportFromEnvFile(ENV_FILE_KEYS, envPath);
   const apiKey = process.env.MODEL_API_KEY;
   const modelId = process.env.MODEL_ID;
   if (!apiKey || !modelId) {
@@ -204,6 +220,13 @@ async function loadCredentials(envPath = path.resolve(__dirname, '..', '..', '.e
     process.exit(1);
   }
   return { apiKey, modelId };
+}
+
+// SONAR_TOKEN is only needed to publish, so unlike loadCredentials() an unset value is not an
+// error here: publishWorkspace() fails closed with a publishError instead.
+async function loadSonarToken(envPath = DEFAULT_ENV_FILE) {
+  if (!process.env.SONAR_TOKEN) await exportFromEnvFile(['SONAR_TOKEN'], envPath);
+  return process.env.SONAR_TOKEN || undefined;
 }
 
 // Lowercases a model id and collapses anything that is not [a-z0-9] into a
@@ -254,18 +277,35 @@ async function ensureRunGitignore(ws) {
   await fs.appendFile(gitignorePath, `${prefix}${missing.join('\n')}\n`);
 }
 
+// The workspace (including any .git the model created or touched) is
+// model-writable. Every git/gh call the runner makes on it disables hooks via
+// environment config, and the repo's hooks and config are reset to a minimal
+// runner-owned state so planted hooks, fsmonitor commands or url rewrites
+// (e.g. a push redirected with insteadOf) never run with runner secrets.
+const GIT_HOOKS_OFF_ENV = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null' };
+const MINIMAL_GIT_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n';
+
+async function sanitizeWorkspaceGit(ws) {
+  const gitDir = path.join(ws, '.git');
+  await fs.rm(path.join(gitDir, 'hooks'), { recursive: true, force: true });
+  await fs.mkdir(path.join(gitDir, 'hooks'), { recursive: true });
+  await fs.writeFile(path.join(gitDir, 'config'), MINIMAL_GIT_CONFIG);
+}
+
 // Turns a finished run workspace into its own git repo with one commit, using
 // a fixed local identity so the operator's own git identity is never
 // required. Real `git`: callers decide what to do if this throws (the run
 // itself must never be lost because of a git failure).
 async function initWorkspaceRepo(ws, message) {
-  await spawnCommand('git', ['init', '-b', 'main'], { cwd: ws });
+  // A model-run `git init` may have left hooks/config behind; reset them first.
+  await spawnCommand('git', ['init', '-b', 'main'], { cwd: ws, env: GIT_HOOKS_OFF_ENV });
+  await sanitizeWorkspaceGit(ws);
   await ensureRunGitignore(ws);
-  await spawnCommand('git', ['add', '-A'], { cwd: ws });
+  await spawnCommand('git', ['add', '-A'], { cwd: ws, env: GIT_HOOKS_OFF_ENV });
   await spawnCommand(
     'git',
-    ['-c', 'user.name=pi-runner', '-c', 'user.email=pi-runner@users.noreply.github.com', 'commit', '-m', message],
-    { cwd: ws },
+    ['-c', 'user.name=pi-runner', '-c', 'user.email=pi-runner@users.noreply.github.com', 'commit', '--no-verify', '-m', message],
+    { cwd: ws, env: GIT_HOOKS_OFF_ENV },
   );
 }
 
@@ -357,7 +397,10 @@ async function findAcceptancePathInWorkspace(ws, benchDir = path.resolve(__dirna
 const MIN_MCP_ENV_SECRET_LENGTH = 8;
 
 function collectSecretValues({ apiKey, harnessExtras }) {
-  const secrets = [{ label: 'MODEL_API_KEY', value: apiKey }];
+  const secrets = [
+    { label: 'MODEL_API_KEY', value: apiKey },
+    { label: 'SONAR_TOKEN', value: process.env.SONAR_TOKEN },
+  ];
   const router = harnessExtras?.router;
   if (router?.routes) {
     for (const route of Object.values(router.routes)) {
@@ -410,14 +453,108 @@ async function checkGhAuthenticated(run = spawnCommand) {
   }
 }
 
+// Runner-owned static analysis, injected into every published run. The model can write anything
+// into its workspace (a real run wrote .github/workflows/*.yml), so its workflows are stripped and
+// replaced by this exact text; tests and docs reference this constant.
+const SEMGREP_CONFIGS = ['p/default', 'p/typescript'];
+
+const STATIC_ANALYSIS_WORKFLOW = `name: static-analysis
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep scan
+        run: semgrep scan ${SEMGREP_CONFIGS.map((c) => `--config ${c}`).join(' ')} --sarif --output semgrep.sarif || true
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  sonarcloud:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: SonarCloud scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: \${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+`;
+
+const SONAR_EXCLUSIONS = '**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,run-report.json,batteries-report.json,audit*.jsonl,SPEC.md,.github/**';
+const SONARCLOUD_CREATE_URL = 'https://sonarcloud.io/api/projects/create';
+const WORKFLOWS_DIR = '.github/workflows';
+const STATIC_ANALYSIS_WORKFLOW_PATH = `${WORKFLOWS_DIR}/static-analysis.yml`;
+const SONAR_PROPERTIES_PATH = 'sonar-project.properties';
+
+function sonarProjectKey(sonarOrg, workspaceName) {
+  return `${sonarOrg}_run-${workspaceName}`;
+}
+
+function buildSonarProjectProperties({ sonarOrg, workspaceName }) {
+  return [
+    `sonar.organization=${sonarOrg}`,
+    `sonar.projectKey=${sonarProjectKey(sonarOrg, workspaceName)}`,
+    `sonar.projectName=run-${workspaceName}`,
+    'sonar.sources=.',
+    `sonar.exclusions=${SONAR_EXCLUSIONS}`,
+    '',
+  ].join('\n');
+}
+
+// Creates the (public) SonarCloud project so the first workflow run has somewhere to report.
+// HTTP 400 "key already exists" is success (republishing the same workspace); anything else throws.
+async function createSonarProject({ sonarOrg, projectKey, projectName, sonarToken, fetchFn = globalThis.fetch }) {
+  const res = await fetchFn(SONARCLOUD_CREATE_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${sonarToken}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ organization: sonarOrg, project: projectKey, name: projectName, visibility: 'public' }).toString(),
+  });
+  if (res.ok) return;
+  const body = await res.text();
+  if (res.status === 400 && /already exist/i.test(body)) return;
+  throw new Error(`HTTP ${res.status}: ${body.slice(0, 300)}`);
+}
+
+const GIT_COMMIT_IDENTITY = ['-c', 'user.name=pi-runner', '-c', 'user.email=pi-runner@users.noreply.github.com'];
+
+// `--no-verify`: the workspace is model-writable, so its git hooks must never run in the runner.
+async function commitAll(run, ws, message) {
+  await run('git', [...GIT_COMMIT_IDENTITY, 'commit', '--no-verify', '-m', message], { cwd: ws });
+}
+
 // Publishes a finished, already-committed workspace as a public repo under
-// `org`, guarded by the acceptance-bench assertion and the secret scan.
+// `org`, guarded by the acceptance-bench assertion and the secret scan, and
+// with runner-owned static analysis (Semgrep + SonarCloud) injected first.
 // `run` is injectable so tests can stub `gh`/`git` without network or a real
-// GitHub call; `benchDir` is injectable so tests don't depend on this
-// checkout's real (gitignored) experiment/acceptance/ contents. Mutates
-// `report` in place (`repository` or `publishError`); never throws —
-// callers decide exit status from `report.publishError`.
-async function publishWorkspace({ ws, report, modelId, config, org, secrets, run = spawnCommand, benchDir }) {
+// GitHub call; `benchDir` and `fetchFn` are injectable so tests don't depend
+// on this checkout's real (gitignored) experiment/acceptance/ contents or
+// the network. Mutates `report` in place (`repository`/`staticAnalysis` or
+// `publishError`); never throws — callers decide exit status from
+// `report.publishError`.
+async function publishWorkspace({
+  ws, report, modelId, config, org, secrets, sonarOrg, sonarToken, run = spawnCommand, benchDir, fetchFn = globalThis.fetch,
+}) {
+  await sanitizeWorkspaceGit(ws);
+  const gitRun = (cmd, args, opts = {}) => run(cmd, args, { ...opts, env: { ...opts.env, ...GIT_HOOKS_OFF_ENV } });
   const acceptancePath = await findAcceptancePathInWorkspace(ws, benchDir);
   if (acceptancePath) {
     report.publishError = `workspace contains a copy of the hidden acceptance bench: ${acceptancePath}`;
@@ -430,10 +567,53 @@ async function publishWorkspace({ ws, report, modelId, config, org, secrets, run
     return;
   }
 
-  const repoName = `${org}/run-${path.basename(ws)}`;
+  // Fail closed before touching the workspace: an unanalyzed public run is useless.
+  if (!sonarToken) {
+    report.publishError = 'SONAR_TOKEN is not set (environment or .env at the repository root); refusing to publish a run without static analysis';
+    return;
+  }
+
+  const workspaceName = path.basename(ws);
+  const repoName = `${org}/run-${workspaceName}`;
   const description = `${modelId} ${config} run generated by the PI-I harness`;
+  const projectKey = sonarProjectKey(sonarOrg, workspaceName);
   try {
-    const result = await run(
+    const removedWorkflows = (await listTrackedFiles(ws)).filter((f) => f.startsWith(`${WORKFLOWS_DIR}/`));
+    if (removedWorkflows.length > 0) {
+      await gitRun('git', ['rm', '-q', '-f', '--', ...removedWorkflows], { cwd: ws });
+      await commitAll(gitRun, ws, 'harness: remove model-authored workflows');
+    }
+
+    await fs.mkdir(path.join(ws, WORKFLOWS_DIR), { recursive: true });
+    await fs.writeFile(path.join(ws, STATIC_ANALYSIS_WORKFLOW_PATH), STATIC_ANALYSIS_WORKFLOW);
+    await fs.writeFile(path.join(ws, SONAR_PROPERTIES_PATH), buildSonarProjectProperties({ sonarOrg, workspaceName }));
+    // -f: a model-written .gitignore must not be able to keep the injected files out of the push.
+    await gitRun('git', ['add', '-f', '--', STATIC_ANALYSIS_WORKFLOW_PATH, SONAR_PROPERTIES_PATH], { cwd: ws });
+    const pending = await gitRun('git', ['status', '--porcelain', '--', STATIC_ANALYSIS_WORKFLOW_PATH, SONAR_PROPERTIES_PATH], { cwd: ws });
+    if ((pending?.stdout ?? '').trim()) await commitAll(gitRun, ws, 'harness: add static analysis workflow');
+
+    // The injected files are published too, so they get the same secret scan.
+    const injectedHit = await scanWorkspaceForSecrets(ws, secrets);
+    if (injectedHit) {
+      report.publishError = `secret detected in ${injectedHit.file}`;
+      return;
+    }
+
+    try {
+      await createSonarProject({ sonarOrg, projectKey, projectName: `run-${workspaceName}`, sonarToken, fetchFn });
+    } catch (err) {
+      report.publishError = `SonarCloud project creation failed: ${err instanceof Error ? err.message : String(err)}`;
+      return;
+    }
+    report.staticAnalysis = {
+      sonarOrganization: sonarOrg,
+      sonarProjectKey: projectKey,
+      semgrepConfig: [...SEMGREP_CONFIGS],
+      workflowSha256: createHash('sha256').update(STATIC_ANALYSIS_WORKFLOW).digest('hex'),
+      removedWorkflows,
+    };
+
+    const result = await gitRun(
       'gh',
       ['repo', 'create', repoName, '--public', '--source', ws, '--push', '--description', description],
       {},
@@ -446,16 +626,49 @@ async function publishWorkspace({ ws, report, modelId, config, org, secrets, run
     // commit/push never depends on a repo name `gh repo create` hasn't
     // confirmed yet.
     await fs.writeFile(path.join(ws, 'run-report.json'), JSON.stringify(report, null, 2));
-    await run('git', ['add', 'run-report.json'], { cwd: ws });
-    await run(
+    await gitRun('git', ['add', 'run-report.json'], { cwd: ws });
+    await gitRun(
       'git',
-      ['-c', 'user.name=pi-runner', '-c', 'user.email=pi-runner@users.noreply.github.com', 'commit', '-m', 'run: record repository metadata'],
+      ['-c', 'user.name=pi-runner', '-c', 'user.email=pi-runner@users.noreply.github.com', 'commit', '--no-verify', '-m', 'run: record repository metadata'],
       { cwd: ws },
     );
-    await run('git', ['push'], { cwd: ws });
+    await gitRun('git', ['push'], { cwd: ws });
   } catch (err) {
     report.publishError = err instanceof Error ? err.message : String(err);
   }
+}
+
+// Loads the run-report.json of an already generated workspace for --publish-only. Throws a
+// usage-style error when it cannot (or must not) be published: no report, not a git repo, or a
+// repository is already recorded (no double publish).
+async function loadPublishableWorkspace(wsDir) {
+  let report;
+  try {
+    report = JSON.parse(await fs.readFile(path.join(wsDir, 'run-report.json'), 'utf-8'));
+  } catch (err) {
+    throw new Error(`cannot read run-report.json in ${wsDir}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    await spawnCommand('git', ['-C', wsDir, 'rev-parse', '--git-dir'], {});
+  } catch {
+    throw new Error(`${wsDir} is not a git repository`);
+  }
+  if (report.repository) {
+    throw new Error(`${wsDir} is already published (${report.repository.url ?? report.repository.name}); refusing to publish twice`);
+  }
+  return report;
+}
+
+// --publish-only: runs the same publish flow on an existing workspace and rewrites its
+// run-report.json (repository/staticAnalysis, or publishError). Returns the final report.
+async function publishExistingWorkspace({ wsDir, org, sonarOrg, sonarToken, secrets, run, benchDir, fetchFn }) {
+  const report = await loadPublishableWorkspace(wsDir);
+  delete report.publishError;
+  await publishWorkspace({
+    ws: wsDir, report, modelId: report.model, config: report.config, org, secrets, sonarOrg, sonarToken, run, benchDir, fetchFn,
+  });
+  await fs.writeFile(path.join(wsDir, 'run-report.json'), JSON.stringify(report, null, 2));
+  return report;
 }
 
 // Env var names of every router route's own API key (routes may point at keys other than
@@ -950,13 +1163,39 @@ function truncate(s, n) {
   return s.slice(0, n) + ' …';
 }
 
+async function mainPublishOnly(parsed) {
+  try {
+    await loadPublishableWorkspace(parsed.publishOnly);
+  } catch (err) {
+    console.error(`Usage: --publish-only ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  if (!(await checkGhAuthenticated())) {
+    console.error('Usage: --publish-only requires an authenticated gh CLI. Run `gh auth login` first.');
+    process.exit(1);
+  }
+  const sonarToken = await loadSonarToken();
+  // No model credentials here: collectSecretValues() just has no MODEL_API_KEY to look for.
+  const secrets = collectSecretValues({ apiKey: process.env.MODEL_API_KEY, harnessExtras: null });
+  const report = await publishExistingWorkspace({
+    wsDir: parsed.publishOnly, org: parsed.publishOrg, sonarOrg: parsed.sonarOrg, sonarToken, secrets,
+  });
+  if (report.publishError) console.error(`Publish failed: ${report.publishError}`);
+  else console.error(`Published ${report.repository.url}`);
+  console.log(path.join(parsed.publishOnly, 'run-report.json'));
+  if (report.publishError) process.exitCode = 1;
+}
+
 async function main() {
   const parsed = parseArgs(process.argv);
+  if (parsed.publishOnly) return mainPublishOnly(parsed);
 
   if (parsed.publish && !(await checkGhAuthenticated())) {
     console.error('Usage: --publish requires an authenticated gh CLI. Run `gh auth login` first.');
     process.exit(1);
   }
+  // Optional for non-publish runs; publishWorkspace() fails closed when it is missing.
+  const sonarToken = parsed.publish ? await loadSonarToken() : undefined;
 
   // Validated before createWorkspace() below so a bad --task-file never
   // leaves an orphan workspace directory on disk.
@@ -1198,7 +1437,9 @@ async function main() {
       report.publishError = 'workspace repo was not created; see repoError';
     } else {
       const secrets = collectSecretValues({ apiKey, harnessExtras });
-      await publishWorkspace({ ws, report, modelId, config: parsed.config, org: parsed.publishOrg, secrets });
+      await publishWorkspace({
+        ws, report, modelId, config: parsed.config, org: parsed.publishOrg, secrets, sonarOrg: parsed.sonarOrg, sonarToken,
+      });
     }
     if (report.publishError) console.error(`Publish failed: ${report.publishError}`);
   }
@@ -1245,6 +1486,7 @@ export {
   parseBatteryReport,
   parseArgs,
   loadCredentials,
+  loadSonarToken,
   loadHarnessExtras,
   buildHarness,
   buildNodes,
@@ -1266,6 +1508,12 @@ export {
   scanWorkspaceForSecrets,
   checkGhAuthenticated,
   publishWorkspace,
+  publishExistingWorkspace,
+  loadPublishableWorkspace,
+  createSonarProject,
+  buildSonarProjectProperties,
+  STATIC_ANALYSIS_WORKFLOW,
+  SEMGREP_CONFIGS,
   teardownDockerCompose,
   routeApiKeyEnvNames,
   spawnCommand,
