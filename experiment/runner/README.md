@@ -316,6 +316,39 @@ los archivos del modelo podrían manipular el análisis. Por eso, **antes** de
 - La organización de GitHub debe estar vinculada a la organización de
   SonarCloud indicada en `--sonar-org`.
 
+#### Recolección del análisis estático (`collect-static-analysis.mjs`)
+
+Los resultados de SonarCloud y Semgrep llegan **de forma asíncrona**, unos
+minutos después de publicar (el *workflow* tiene que correr en GitHub
+Actions). Ejecutá la recolección una vez que las corridas ya estén
+publicadas, y antes de agregar:
+
+```bash
+node runner/collect-static-analysis.mjs [--runs-dir <dir>] [--force]
+```
+
+- `--runs-dir` — por defecto el mismo directorio de corridas del runner.
+- Procesa cada corrida con `repository` y `staticAnalysis` en
+  `run-report.json`; las demás se ignoran.
+- SonarCloud: `GET https://sonarcloud.io/api/measures/component` (proyecto
+  público, sin autenticación; si `SONAR_TOKEN` está definido se envía como
+  `Authorization: Bearer`). Semgrep: `gh api --paginate
+  repos/<owner>/<repo>/code-scanning/alerts?state=open&per_page=100`,
+  filtrando las alertas cuyo nombre de herramienta empieza con "semgrep"
+  (sin distinguir mayúsculas). Requiere `gh` autenticado.
+- Escribe `<ws>/static-analysis.json` con `collectedAt`, `status`
+  (`complete` | `pending` | `error`), `sonar` (`status`, `projectKey`,
+  `measures`) y `semgrep` (`status`, `openAlerts`, `bySeverity`,
+  `bySecuritySeverity`). El estado global es `complete` solo si ambos lo son.
+- **`pending` es normal** los primeros minutos tras publicar (Sonar responde
+  404 / sin medidas; `gh` dice "no analysis found"). Volvé a ejecutar el
+  comando más tarde: las corridas ya `complete` se saltan; las `pending` y
+  `error` se recolectan de nuevo.
+- `--force` — recolecta también las corridas ya `complete` y sobrescribe su
+  archivo.
+- Imprime una línea por corrida; nunca falla por una sola corrida y sale con
+  código 0 salvo que **todas** las corridas publicadas hayan dado `error`.
+
 #### Publicar un espacio de trabajo existente (`--publish-only`)
 
 `node run-experiment.mjs --publish-only <workspace-dir> [--publish-org <org>]
@@ -519,6 +552,15 @@ node runner/aggregate-runs.mjs [--runs-dir <dir>] [--harness-sha <sha-o-prefijo>
   (resumen por config, corridas incluidas y excluidas con su motivo). También
   imprime `summary.md` por stdout. Las celdas de batería quedan vacías si falta
   `batteries-report.json` o tiene `parseError`.
+- **Columnas de análisis estático** (leídas de `<ws>/static-analysis.json`, ver
+  "Recolección del análisis estático"): `sonar_ncloc`, `sonar_bugs`,
+  `sonar_vulnerabilities`, `sonar_code_smells`, `sonar_duplicated_lines_density`,
+  `sonar_cognitive_complexity`, `sonar_sqale_index` y `semgrep_open_alerts`, en
+  `runs.csv` y en la tabla de corridas de `summary.md`. Quedan vacías si el
+  archivo falta, está malformado o su estado no es `complete`. `summary.csv`
+  agrega, para cada una, `<columna>_mean`, `<columna>_stddev` y `<columna>_n`
+  (corridas que sí tienen el valor, que puede ser menor que el `n` de la
+  config); `summary.md` muestra la media como `media (n=k)`.
 - Si las corridas incluidas usan más de una versión de `SPEC.md` o del
   *harness*, `summary.md` lo marca en una sección **Warnings**: no son
   comparables entre sí y conviene filtrar con `--harness-sha`.
@@ -570,7 +612,9 @@ node runner/aggregate-runs.mjs [--runs-dir <dir>] [--harness-sha <sha-o-prefijo>
 
 ## Tests
 
-`node --test runner/aggregate-runs.test.mjs` cubre el agregador (filtros y motivos de exclusión, celdas de batería vacías, media/desviación por config, escape CSV y la CLI) con fixtures en directorios temporales.
+`node --test runner/aggregate-runs.test.mjs` cubre el agregador (filtros y motivos de exclusión, celdas de batería vacías, media/desviación por config, escape CSV y la CLI) con fixtures en directorios temporales y las columnas de análisis estático.
+
+`node --test runner/collect-static-analysis.test.mjs` cubre la recolección con `fetch` y `gh` inyectados (sin red): caso completo, `pending`, `error`, salto de archivos `complete`, `--force` y corridas no publicadas.
 
 `node --test runner/run-experiment.test.mjs` (el test runner incorporado de
 Node; sin dependencia extra). Cubre la conexión de `--harness-config` contra

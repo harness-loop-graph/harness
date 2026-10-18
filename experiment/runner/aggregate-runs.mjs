@@ -13,6 +13,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RUNS_DIR = path.resolve(__dirname, '..', '..', '..', 'pi-runs');
 const BATTERY_NAMES = ['battery1-e2e', 'battery2-schema', 'battery3-abuse', 'battery4-coherence'];
 const STAT_METRICS = ['cost', 'totalTokens', 'durationMs'];
+// Row key, CSV name, Markdown label and reader per metric. Sonar measures come from
+// sonar.measures, Semgrep from semgrep.openAlerts; both only count when the file is `complete`.
+const STATIC_METRICS = [
+  { key: 'sonarNcloc', csv: 'sonar_ncloc', label: 'sonar ncloc', read: (a) => a.sonar?.measures?.ncloc },
+  { key: 'sonarBugs', csv: 'sonar_bugs', label: 'sonar bugs', read: (a) => a.sonar?.measures?.bugs },
+  { key: 'sonarVulnerabilities', csv: 'sonar_vulnerabilities', label: 'sonar vulns', read: (a) => a.sonar?.measures?.vulnerabilities },
+  { key: 'sonarCodeSmells', csv: 'sonar_code_smells', label: 'sonar smells', read: (a) => a.sonar?.measures?.code_smells },
+  { key: 'sonarDuplicatedLinesDensity', csv: 'sonar_duplicated_lines_density', label: 'sonar dup %', read: (a) => a.sonar?.measures?.duplicated_lines_density },
+  { key: 'sonarCognitiveComplexity', csv: 'sonar_cognitive_complexity', label: 'sonar cognitive', read: (a) => a.sonar?.measures?.cognitive_complexity },
+  { key: 'sonarSqaleIndex', csv: 'sonar_sqale_index', label: 'sonar debt min', read: (a) => a.sonar?.measures?.sqale_index },
+  { key: 'semgrepOpenAlerts', csv: 'semgrep_open_alerts', label: 'semgrep alerts', read: (a) => a.semgrep?.openAlerts },
+];
 
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -62,7 +74,13 @@ async function loadRuns(runsDir) {
     } catch {
       batteries = null; // missing or malformed: battery cells stay empty
     }
-    runs.push({ workspace: entry.name, report, batteries });
+    let staticAnalysis = null;
+    try {
+      staticAnalysis = await readJson(path.join(dir, 'static-analysis.json'));
+    } catch {
+      staticAnalysis = null; // missing or malformed: static-analysis cells stay empty
+    }
+    runs.push({ workspace: entry.name, report, batteries, staticAnalysis });
   }
   return { runs, excluded };
 }
@@ -94,8 +112,9 @@ function batteryCells(batteriesReport) {
 
 const numOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
-function buildRow({ workspace, report, batteries }) {
+function buildRow({ workspace, report, batteries, staticAnalysis = null }) {
   const { cells, overall } = batteryCells(batteries);
+  const staticDone = staticAnalysis && typeof staticAnalysis === 'object' && staticAnalysis.status === 'complete' ? staticAnalysis : null;
   return {
     workspace,
     config: report.config ?? null,
@@ -112,6 +131,7 @@ function buildRow({ workspace, report, batteries }) {
     batteries: cells,
     batteriesPassed: overall,
     publishUrl: report.repository?.url ?? null,
+    ...Object.fromEntries(STATIC_METRICS.map((m) => [m.key, staticDone ? numOrNull(m.read(staticDone)) : null])),
   };
 }
 
@@ -144,7 +164,7 @@ function summarizeByConfig(rows) {
       batteriesPassed: group.filter((r) => r.batteriesPassed === true).length,
       batteries,
     };
-    for (const metric of STAT_METRICS) summary[metric] = meanAndStdDev(group.map((r) => r[metric]));
+    for (const metric of [...STAT_METRICS, ...STATIC_METRICS.map((m) => m.key)]) summary[metric] = meanAndStdDev(group.map((r) => r[metric]));
     return summary;
   });
 }
@@ -177,11 +197,13 @@ function runsToCsv(rows) {
     'workspace', 'config', 'model', 'harnessGitSha', 'status', 'durationMs', 'calls', 'retries', 'totalTokens', 'cost', 'budgetExhausted',
     ...BATTERY_NAMES.flatMap((b) => [`${b}_passed`, `${b}_total`]),
     'batteriesPassed', 'publishUrl',
+    ...STATIC_METRICS.map((m) => m.csv),
   ];
   return toCsv(header, rows.map((r) => [
     r.workspace, r.config, r.model, r.harnessGitSha, r.status, r.durationMs, r.calls, r.retries, r.totalTokens, r.cost, r.budgetExhausted,
     ...BATTERY_NAMES.flatMap((b) => [r.batteries[b].passed, r.batteries[b].total]),
     r.batteriesPassed, r.publishUrl,
+    ...STATIC_METRICS.map((m) => r[m.key]),
   ]));
 }
 
@@ -190,11 +212,13 @@ function summaryToCsv(summary) {
     'config', 'n', 'generationSuccess', 'batteriesPassed',
     ...BATTERY_NAMES.flatMap((b) => [`${b}_meanPassRatio`, `${b}_n`]),
     ...STAT_METRICS.flatMap((m) => [`${m}_mean`, `${m}_stddev`]),
+    ...STATIC_METRICS.flatMap((m) => [`${m.csv}_mean`, `${m.csv}_stddev`, `${m.csv}_n`]),
   ];
   return toCsv(header, summary.map((s) => [
     s.config, s.n, s.generationSuccess, s.batteriesPassed,
     ...BATTERY_NAMES.flatMap((b) => [s.batteries[b].meanPassRatio, s.batteries[b].n]),
     ...STAT_METRICS.flatMap((m) => [s[m].mean, s[m].stdDev]),
+    ...STATIC_METRICS.flatMap((m) => [s[m.key].mean, s[m.key].stdDev, s[m.key].n]),
   ]));
 }
 
@@ -221,21 +245,24 @@ function renderMarkdown({ rows, excluded, summary }) {
   const warnings = comparabilityWarnings(rows);
   const summaryTable = mdTable(
     ['config', 'n', 'generation ok', 'batteries ok', ...BATTERY_NAMES.map((b) => `${b} mean ratio`),
-      'cost mean', 'cost sd', 'tokens mean', 'tokens sd', 'duration ms mean', 'duration ms sd'],
+      'cost mean', 'cost sd', 'tokens mean', 'tokens sd', 'duration ms mean', 'duration ms sd',
+      ...STATIC_METRICS.map((m) => `${m.label} mean`)],
     summary.map((s) => [
       s.config, s.n, s.generationSuccess, s.batteriesPassed,
       ...BATTERY_NAMES.map((b) => (s.batteries[b].n ? `${fmt(s.batteries[b].meanPassRatio)} (n=${s.batteries[b].n})` : '')),
       fmt(s.cost.mean), fmt(s.cost.stdDev), fmt(s.totalTokens.mean, 1), fmt(s.totalTokens.stdDev, 1),
       fmt(s.durationMs.mean, 0), fmt(s.durationMs.stdDev, 0),
+      ...STATIC_METRICS.map((m) => (s[m.key].n ? `${fmt(s[m.key].mean)} (n=${s[m.key].n})` : '')),
     ]),
   );
   const runsTable = mdTable(
     ['workspace', 'config', 'model', 'sha', 'status', 'duration ms', 'calls', 'retries', 'tokens', 'cost', 'budget exhausted',
-      ...BATTERY_NAMES, 'batteries ok', 'publish'],
+      ...BATTERY_NAMES, 'batteries ok', 'publish', ...STATIC_METRICS.map((m) => m.label)],
     rows.map((r) => [
       r.workspace, r.config, r.model, r.harnessGitSha, r.status, r.durationMs, r.calls, r.retries, r.totalTokens, fmt(r.cost), r.budgetExhausted,
       ...BATTERY_NAMES.map((b) => (r.batteries[b].total === null ? '' : `${r.batteries[b].passed}/${r.batteries[b].total}`)),
       r.batteriesPassed, r.publishUrl,
+      ...STATIC_METRICS.map((m) => r[m.key]),
     ]),
   );
   const excludedTable = mdTable(['workspace', 'reason'], excluded.map((e) => [e.workspace, e.reason]));
@@ -284,6 +311,7 @@ if (isEntryPoint) {
 export {
   DEFAULT_RUNS_DIR,
   BATTERY_NAMES,
+  STATIC_METRICS,
   parseArgs,
   loadRuns,
   exclusionReason,

@@ -54,13 +54,14 @@ async function withRunsDir(fn) {
   }
 }
 
-async function addRun(runsDir, name, { report, batteries, rawReport, rawBatteries } = {}) {
+async function addRun(runsDir, name, { report, batteries, rawReport, rawBatteries, staticAnalysis } = {}) {
   const dir = path.join(runsDir, name);
   await fs.mkdir(dir, { recursive: true });
   if (rawReport !== undefined) await fs.writeFile(path.join(dir, 'run-report.json'), rawReport);
   else if (report) await fs.writeFile(path.join(dir, 'run-report.json'), JSON.stringify(report));
   if (rawBatteries !== undefined) await fs.writeFile(path.join(dir, 'batteries-report.json'), rawBatteries);
   else if (batteries) await fs.writeFile(path.join(dir, 'batteries-report.json'), JSON.stringify(batteries));
+  if (staticAnalysis) await fs.writeFile(path.join(dir, 'static-analysis.json'), JSON.stringify(staticAnalysis));
 }
 
 const excludedReason = (result, name) => result.excluded.find((e) => e.workspace === name)?.reason;
@@ -295,4 +296,83 @@ test('per-battery means report how many runs they cover, so missing battery data
   assert.deepEqual(summary.batteries['battery1-e2e'], { meanPassRatio: 0.5, n: 1 });
   assert.match(agg.renderMarkdown({ rows, excluded: [], summary: [summary] }), /0\.5\d* \(n=1\)/);
   assert.match(agg.summaryToCsv([summary]), /battery1-e2e_n/);
+});
+
+function staticFixture({ status = 'complete', ncloc = 1000, bugs = 2, alerts = 5 } = {}) {
+  return {
+    collectedAt: '2026-01-01T00:00:00.000Z',
+    status,
+    sonar: {
+      status,
+      projectKey: 'org_run-x',
+      measures: { ncloc, bugs, vulnerabilities: 1, code_smells: 10, security_hotspots: 0, duplicated_lines_density: 2.5, cognitive_complexity: 30, sqale_index: 120 },
+    },
+    semgrep: { status, openAlerts: alerts, bySeverity: {}, bySecuritySeverity: {} },
+  };
+}
+
+test('static-analysis.json columns are read into the row; null when absent, pending or malformed', async () => {
+  await withRunsDir(async (runsDir) => {
+    await addRun(runsDir, 'done', { report: reportFixture(), staticAnalysis: staticFixture() });
+    await addRun(runsDir, 'absent', { report: reportFixture() });
+    await addRun(runsDir, 'pending', { report: reportFixture(), staticAnalysis: staticFixture({ status: 'pending' }) });
+    await fs.mkdir(path.join(runsDir, 'broken'));
+    await fs.writeFile(path.join(runsDir, 'broken', 'run-report.json'), JSON.stringify(reportFixture()));
+    await fs.writeFile(path.join(runsDir, 'broken', 'static-analysis.json'), '{{{');
+
+    const { rows } = await agg.aggregate({ runsDir });
+    const byName = Object.fromEntries(rows.map((r) => [r.workspace, r]));
+    assert.equal(byName.done.sonarNcloc, 1000);
+    assert.equal(byName.done.sonarBugs, 2);
+    assert.equal(byName.done.sonarVulnerabilities, 1);
+    assert.equal(byName.done.sonarCodeSmells, 10);
+    assert.equal(byName.done.sonarDuplicatedLinesDensity, 2.5);
+    assert.equal(byName.done.sonarCognitiveComplexity, 30);
+    assert.equal(byName.done.sonarSqaleIndex, 120);
+    assert.equal(byName.done.semgrepOpenAlerts, 5);
+    for (const name of ['absent', 'pending', 'broken']) {
+      for (const key of ['sonarNcloc', 'sonarBugs', 'sonarVulnerabilities', 'sonarCodeSmells', 'sonarDuplicatedLinesDensity', 'sonarCognitiveComplexity', 'sonarSqaleIndex', 'semgrepOpenAlerts']) {
+        assert.equal(byName[name][key], null, `${name} ${key}`);
+      }
+    }
+
+    const lines = agg.runsToCsv(rows).trim().split('\r\n');
+    const header = lines[0].split(',');
+    for (const col of ['sonar_ncloc', 'sonar_bugs', 'sonar_vulnerabilities', 'sonar_code_smells', 'sonar_duplicated_lines_density', 'sonar_cognitive_complexity', 'sonar_sqale_index', 'semgrep_open_alerts']) {
+      assert.ok(header.includes(col), col);
+    }
+    const doneLine = lines.find((l) => l.startsWith('done,')).split(',');
+    assert.equal(doneLine[header.indexOf('sonar_ncloc')], '1000');
+    assert.equal(doneLine[header.indexOf('semgrep_open_alerts')], '5');
+    const absentLine = lines.find((l) => l.startsWith('absent,')).split(',');
+    assert.equal(absentLine[header.indexOf('sonar_ncloc')], '');
+
+    const md = agg.renderMarkdown({ rows, excluded: [], summary: agg.summarizeByConfig(rows) });
+    assert.match(md, /sonar ncloc/);
+    assert.match(md, /semgrep alerts/);
+  });
+});
+
+test('per-config static means carry their own n (runs with the value)', async () => {
+  await withRunsDir(async (runsDir) => {
+    await addRun(runsDir, 'a', { report: reportFixture(), staticAnalysis: staticFixture({ ncloc: 1000, bugs: 2, alerts: 4 }) });
+    await addRun(runsDir, 'b', { report: reportFixture(), staticAnalysis: staticFixture({ ncloc: 3000, bugs: 4, alerts: 8 }) });
+    await addRun(runsDir, 'c', { report: reportFixture() });
+
+    const { summary } = await agg.aggregate({ runsDir });
+    const [c1] = summary;
+    assert.equal(c1.n, 3);
+    assert.equal(c1.sonarNcloc.n, 2);
+    assert.equal(c1.sonarNcloc.mean, 2000);
+    assert.ok(Math.abs(c1.sonarNcloc.stdDev - 1000 * Math.SQRT2) < 1e-9);
+    assert.equal(c1.sonarBugs.mean, 3);
+    assert.equal(c1.semgrepOpenAlerts.mean, 6);
+    assert.equal(c1.semgrepOpenAlerts.n, 2);
+
+    const csv = agg.summaryToCsv(summary).trim().split('\r\n');
+    const header = csv[0].split(',');
+    for (const col of ['sonar_ncloc_mean', 'sonar_ncloc_stddev', 'sonar_ncloc_n', 'semgrep_open_alerts_mean', 'semgrep_open_alerts_n']) assert.ok(header.includes(col), col);
+    assert.equal(csv[1].split(',')[header.indexOf('sonar_ncloc_n')], '2');
+    assert.match(agg.renderMarkdown({ rows: [], excluded: [], summary }), /2000 \(n=2\)/);
+  });
 });
