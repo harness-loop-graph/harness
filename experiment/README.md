@@ -54,6 +54,9 @@ Consecuencias para el análisis:
 - **Reproducibilidad.** Cada `run-report.json` registra `sampling`,
   `budget`, `harnessGitSha` y `harnessGitDirty`; las corridas del experimento
   deben salir de un árbol limpio (`harnessGitDirty: false`).
+- **Agregación.** `runner/aggregate-runs.mjs` consolida las corridas en
+  CSV/Markdown (media y desviación por config) y excluye con motivo las
+  corridas `--task-file`, *legacy* o de árbol sucio; ver `runner/README.md`.
 
 ## Por qué el stack está fijo
 

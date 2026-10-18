@@ -290,6 +290,16 @@ del repositorio del *harness*) y `harnessGitDirty` (`git status --porcelain`
 no vacío) están presentes en toda corrida, también las fallidas y el plan de
 `--dry-run`; los dos últimos valen `null` si git no está disponible:
 
+`task` (`{ source, path, sha256, specSha256 }`; también presente en toda corrida,
+incluidas las fallidas y el plan de `--dry-run`) identifica la tarea que
+recibió el modelo: `source` es `spec` (tarea por defecto, sobre
+`experiment/SPEC.md`) o `task-file` (corrida de validación barata con
+`--task-file`); `path` es relativo a la raíz del repositorio cuando el archivo
+está dentro de él (si no, absoluto); `sha256` es el hash del texto exacto de
+la tarea y `specSha256` el de los bytes de `SPEC.md` (que se copia a todo
+espacio de trabajo, así que también es entrada del modelo). Las corridas anteriores a este campo no lo tienen y se tratan como
+*legacy* al agregar.
+
 `modelTimeoutMs` (timeout por solicitud al modelo en milisegundos, derivado de
 `--model-timeout`; 600000 por defecto) también está presente en toda corrida,
 incluidas las fallidas y el plan de `--dry-run`.
@@ -395,6 +405,38 @@ false` y un tope definido se agrega `budget.warning`.
   rehusada o falló (ver "Publicación" arriba); nunca incluye un valor de
   secreto.
 
+## Agregación de corridas (`aggregate-runs.mjs`)
+
+El directorio de corridas mezcla corridas SPEC válidas con corridas de
+validación baratas (`--task-file`). `aggregate-runs.mjs` las separa y produce
+las tablas de comparación:
+
+```bash
+node runner/aggregate-runs.mjs [--runs-dir <dir>] [--harness-sha <sha-o-prefijo>] [--model <id>] [--out <dir>]
+```
+
+- `--runs-dir` — por defecto el mismo directorio de corridas del runner.
+- Se leen todos los subdirectorios inmediatos con `run-report.json` (los demás
+  se ignoran); un JSON malformado se reporta como excluido, nunca rompe.
+- **Se incluye** una corrida solo si `task.source === 'spec'`,
+  `harnessGitDirty === false` y coincide con `--harness-sha` (prefijo) y
+  `--model` cuando se pasan. **Todo lo demás se excluye con motivo explícito**
+  (`no task identity (legacy run)`, `task-file run`, `no SPEC hash (legacy run)`, `dirty harness tree`,
+  `harness sha mismatch`, `model mismatch`, `malformed run-report.json (...)`).
+- Salidas en `--out` (por defecto `<runs-dir>/_aggregate`): `runs.csv` (una fila
+  por corrida incluida: config, modelo, sha, estado, duración, llamadas,
+  reintentos, tokens, costo, `budget.exhausted`, checks aprobados/total por
+  batería, `batteriesPassed` y URL de publicación), `summary.csv` (una fila por
+  config: `n`, éxitos de generación, baterías aprobadas, razón media de
+  aprobación por batería, y media y desviación estándar muestral de costo,
+  tokens y duración; la desviación queda vacía con n < 2) y `summary.md`
+  (resumen por config, corridas incluidas y excluidas con su motivo). También
+  imprime `summary.md` por stdout. Las celdas de batería quedan vacías si falta
+  `batteries-report.json` o tiene `parseError`.
+- Si las corridas incluidas usan más de una versión de `SPEC.md` o del
+  *harness*, `summary.md` lo marca en una sección **Warnings**: no son
+  comparables entre sí y conviene filtrar con `--harness-sha`.
+
 ## Salvaguardas
 
 - **Validación de flags.** Un `--max-turns`/`--max-steps`/`--tool-rounds`
@@ -433,6 +475,8 @@ false` y un tope definido se agrega `budget.warning`.
   rastreados por git.
 
 ## Tests
+
+`node --test runner/aggregate-runs.test.mjs` cubre el agregador (filtros y motivos de exclusión, celdas de batería vacías, media/desviación por config, escape CSV y la CLI) con fixtures en directorios temporales.
 
 `node --test runner/run-experiment.test.mjs` (el test runner incorporado de
 Node; sin dependencia extra). Cubre la conexión de `--harness-config` contra

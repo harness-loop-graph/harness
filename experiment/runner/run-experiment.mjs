@@ -35,6 +35,23 @@ const DEFAULT_TASK =
   'following every requirement (RF-01..RF-27), the endpoint catalog, the screens and the delivery contract. ' +
   'Work only inside the workspace.';
 
+// Identifies the task text the model received so SPEC runs stay
+// distinguishable from cheap `--task-file` validation runs. `path` is
+// repo-relative when the file lives inside this repository.
+function describeTask({ source, filePath, text, specPath }) {
+  const repoRoot = path.resolve(__dirname, '..', '..');
+  const rel = path.relative(repoRoot, filePath);
+  const inside = rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  return {
+    source,
+    path: inside ? rel.split(path.sep).join('/') : filePath,
+    sha256: createHash('sha256').update(text).digest('hex'),
+    // SPEC.md is copied into every workspace, so its bytes are part of the
+    // input even when the task sentence is unchanged.
+    specSha256: createHash('sha256').update(readFileSync(specPath)).digest('hex'),
+  };
+}
+
 const CHAIN = ['architect', 'data', 'backend', 'frontend', 'reviewer'];
 
 // Parses a numeric flag's value as a positive integer, or exits with a usage
@@ -957,6 +974,13 @@ async function main() {
     task = raw;
   }
 
+  const taskIdentity = describeTask({
+    source: parsed.taskFile ? 'task-file' : 'spec',
+    filePath: parsed.taskFile ?? parsed.spec,
+    text: task,
+    specPath: parsed.spec,
+  });
+
   const { apiKey, modelId } = await loadCredentials();
   const ws = await createWorkspace(parsed.runsDir, parsed.config, modelId, parsed.spec, { dryRun: parsed.dryRun });
 
@@ -975,6 +999,7 @@ async function main() {
       },
       sampling: parsed.sampling,
       modelTimeoutMs,
+      task: taskIdentity,
       budget: { maxCostUsd: parsed.maxCostUsd, exhausted: false, costReported: null },
       ...gitMetadata,
       batteryPhase: parsed.withBatteries,
@@ -1005,6 +1030,7 @@ async function main() {
     model: modelId,
     sampling: parsed.sampling,
     modelTimeoutMs,
+    task: taskIdentity,
     ...gitMetadata,
     startedAt,
     finishedAt: null,
@@ -1211,6 +1237,8 @@ if (isEntryPoint) {
 }
 
 export {
+  DEFAULT_TASK,
+  describeTask,
   HARNESS_INSTRUCTIONS,
   parseBatteryReport,
   parseArgs,

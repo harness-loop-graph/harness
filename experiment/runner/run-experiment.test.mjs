@@ -1378,3 +1378,87 @@ test('parseBatteryReport reads the pretty-printed run-all.mjs report', () => {
   assert.equal(broken.parseError, true);
   assert.equal(broken.raw, 'not json');
 });
+
+// --- task identity in run-report.json / --dry-run plan ---
+
+const sha256Hex = async (text) => (await import('node:crypto')).createHash('sha256').update(text).digest('hex');
+
+test('--dry-run plan records task identity: spec by default (sha256 of the default task text), repo-relative SPEC path', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { DEFAULT_TASK } = await import('./run-experiment.mjs');
+  const res = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run'],
+    { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  const plan = JSON.parse(res.stdout);
+  assert.equal(typeof DEFAULT_TASK, 'string');
+  assert.deepEqual(plan.task, {
+    source: 'spec',
+    path: 'experiment/SPEC.md',
+    sha256: await sha256Hex(DEFAULT_TASK),
+    specSha256: await sha256Hex(await fs.readFile(path.join(__dirname, '..', 'SPEC.md'))),
+  });
+});
+
+test('--dry-run plan records task identity for --task-file: source task-file, sha256 of the exact file text, repo-relative path when inside the repo', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-taskid-'));
+  try {
+    const taskFile = path.join(dir, 'task.txt');
+    const text = 'Create notes/summary.txt documenting the API\n';
+    await fs.writeFile(taskFile, text);
+    const run = (file) => {
+      const res = spawnSync(
+        process.execPath,
+        [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c3', '--dry-run', '--task-file', file],
+        { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+      );
+      assert.equal(res.status, 0, res.stderr);
+      return JSON.parse(res.stdout);
+    };
+
+    // Outside the repo (tmpdir): the absolute path is kept.
+    assert.deepEqual(run(taskFile).task, {
+      source: 'task-file',
+      path: taskFile,
+      sha256: await sha256Hex(text),
+      specSha256: await sha256Hex(await fs.readFile(path.join(__dirname, '..', 'SPEC.md'))),
+    });
+
+    // Inside the repo: recorded relative to the repo root.
+    assert.equal(run(path.join(__dirname, 'validation-task.txt')).task.path, 'experiment/runner/validation-task.txt');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a FAILED run (thrown exception) still records task identity in run-report.json', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const runsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runsdir-taskid-'));
+  const configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-taskid-config-'));
+  try {
+    const configPath = path.join(configDir, 'harness-config.json');
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({ router: { routes: { longContext: { model: 'm', apiKeyEnv: 'RUNNER_TEST_UNSET_ENV_VAR' } } } }),
+    );
+    const childEnv = { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model', MODEL_BASE_URL: 'https://test.example/v1' };
+    delete childEnv.RUNNER_TEST_UNSET_ENV_VAR;
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--runs-dir', runsDir, '--harness-config', configPath],
+      { encoding: 'utf8', env: childEnv },
+    );
+    assert.notEqual(res.status, 0, res.stderr);
+    const reportPath = res.stdout.trim().split('\n').pop();
+    const report = JSON.parse(await fs.readFile(reportPath, 'utf-8'));
+    assert.equal(report.status, 'FAILED');
+    assert.equal(report.task.source, 'spec');
+    assert.match(report.task.sha256, /^[0-9a-f]{64}$/);
+  } finally {
+    await fs.rm(runsDir, { recursive: true, force: true });
+    await fs.rm(configDir, { recursive: true, force: true });
+  }
+});
