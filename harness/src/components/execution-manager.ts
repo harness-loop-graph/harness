@@ -1,5 +1,6 @@
 import type { ExecutionRequest, ExecutionResult } from '../contracts/core.js';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { BoundedOutput } from './truncate.js';
 
@@ -9,6 +10,17 @@ export interface ExecutionManager {
 }
 
 const MAX_OUTPUT_BYTES = 512 * 1024;
+
+const BASH_PATH = '/bin/bash';
+
+/**
+ * Models write bash (brace expansion, `[[ ]]`); /bin/sh is dash on Debian/Ubuntu
+ * and silently misreads them. Falls back to the platform default shell when bash
+ * is not installed.
+ */
+function resolveShell(): string | true {
+  return existsSync(BASH_PATH) ? BASH_PATH : true;
+}
 
 const SECRET_NAME_PATTERN = /API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY/i;
 const DEFAULT_SECRET_NAMES = ['MODEL_API_KEY', 'MODEL_BASE_URL'];
@@ -58,7 +70,7 @@ export class LocalExecutionManager implements ExecutionManager {
 
     return new Promise<ExecutionResult>((resolve) => {
       const child = spawn(req.command, {
-        shell: true,
+        shell: resolveShell(),
         cwd,
         env: { ...scrubEnv(process.env, this.opts.envDenylist), ...req.env },
       });

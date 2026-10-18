@@ -78,7 +78,10 @@ tres herramientas incorporadas y devuelve su `ToolSpec[]`:
 
 `run(req)` resuelve `req.cwd` contra `workspaceRoot` y rechaza cualquier ruta
 resuelta fuera de ella (`exitCode: 126`) antes de lanzar nada. Lanza el comando
-con `child_process.spawn(..., { shell: true })`, captura stdout/stderr
+con `child_process.spawn(..., { shell: '/bin/bash' })` (si `/bin/bash` no
+existe cae a `shell: true`, es decir `sh`). Se usa bash porque los modelos
+asumen sintaxis bash: en Ubuntu `/bin/sh` es dash y `mkdir -p src/{a,b}` crearía
+un único directorio literal `src/{a,b`. Captura stdout/stderr
 topeados en 512 KiB (`MAX_OUTPUT_BYTES`) conservando el inicio y el final (los
 errores suelen aparecer al final) con un marcador `…[truncated N chars]…` en el
 medio, y aplica un timeout estricto

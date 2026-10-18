@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import { LocalExecutionManager, scrubEnv } from '../src/components/execution-manager.js';
 
 describe('scrubEnv', () => {
@@ -97,5 +99,37 @@ describe('LocalExecutionManager output capture', () => {
     const mgr = new LocalExecutionManager({ workspaceRoot: os.tmpdir() });
     const res = await mgr.run({ command: 'echo hello', cwd: '.' });
     expect(res.stdout.trim()).toBe('hello');
+  });
+});
+
+describe('LocalExecutionManager shell', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-shell-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('expands bash brace expansion instead of creating a literal directory', async () => {
+    const mgr = new LocalExecutionManager({ workspaceRoot: dir });
+    const res = await mgr.run({ command: 'mkdir -p d/{a,b}', cwd: '.' });
+    expect(res.exitCode).toBe(0);
+    expect((await fs.readdir(path.join(dir, 'd'))).sort()).toEqual(['a', 'b']);
+  });
+
+  it('supports bash-only syntax such as [[ ]]', async () => {
+    const mgr = new LocalExecutionManager({ workspaceRoot: dir });
+    const res = await mgr.run({ command: '[[ 1 == 1 ]] && echo yes', cwd: '.' });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout.trim()).toBe('yes');
+  });
+
+  it('runs commands under bash', async () => {
+    const mgr = new LocalExecutionManager({ workspaceRoot: dir });
+    const res = await mgr.run({ command: 'echo $BASH_VERSION', cwd: '.' });
+    expect(res.stdout.trim()).not.toBe('');
   });
 });
