@@ -512,6 +512,18 @@ async function workspaceMayHaveDockerStack(ws, verifyCmd) {
   return false;
 }
 
+// run-all.mjs prints its report pretty-printed (multi-line), so the whole
+// output is parsed first; the last line covers single-line output after logs.
+function parseBatteryReport(stdout) {
+  const trimmed = stdout.trim();
+  for (const candidate of [trimmed, trimmed.split('\n').pop()]) {
+    try {
+      return JSON.parse(candidate);
+    } catch { /* try the next candidate */ }
+  }
+  return { parseError: true, raw: stdout.slice(0, 5000) };
+}
+
 async function runBatteries(ws, keep, scrubNames = []) {
   let batteryReport = null;
   let batteryError = null;
@@ -546,12 +558,7 @@ async function runBatteries(ws, keep, scrubNames = []) {
       },
       timeoutMs: 600_000,
     });
-    try {
-      const lines = result.stdout.trim().split('\n');
-      batteryReport = JSON.parse(lines.pop() || '{}');
-    } catch {
-      batteryReport = { parseError: true, raw: result.stdout.slice(0, 5000) };
-    }
+    batteryReport = parseBatteryReport(result.stdout);
     await fs.writeFile(path.join(ws, 'batteries-report.json'), JSON.stringify(batteryReport, null, 2));
   } catch (err) {
     batteryError = err.message;
@@ -1205,6 +1212,7 @@ if (isEntryPoint) {
 
 export {
   HARNESS_INSTRUCTIONS,
+  parseBatteryReport,
   parseArgs,
   loadCredentials,
   loadHarnessExtras,

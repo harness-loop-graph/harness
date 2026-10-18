@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { McpToolProvider, OpenAICompatibleModelAdapter, RoutingModelAdapter, BudgetedModelAdapter } from '../../harness/dist/index.js';
 import {
   HARNESS_INSTRUCTIONS,
+  parseBatteryReport,
   parseArgs,
   buildNodes,
   loadHarnessExtras,
@@ -1367,4 +1368,13 @@ test('default tool-round budget lets c1 finish the SPEC and keeps c2/c3 per-turn
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).toolRounds, 200);
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']).toolRounds, 30);
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c3']).toolRounds, 30);
+});
+
+test('parseBatteryReport reads the pretty-printed run-all.mjs report', () => {
+  const report = { timestamp: 't', batteries: [{ battery: 'battery4-coherence', passed: true }], passed: false };
+  assert.deepEqual(parseBatteryReport(JSON.stringify(report, null, 2)), report);
+  assert.deepEqual(parseBatteryReport(`log line\n${JSON.stringify(report)}\n`), report);
+  const broken = parseBatteryReport('not json');
+  assert.equal(broken.parseError, true);
+  assert.equal(broken.raw, 'not json');
 });
