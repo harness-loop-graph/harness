@@ -95,7 +95,7 @@ function parseArgs(argv) {
     runsDir: path.resolve(__dirname, '..', '..', '..', 'pi-runs'),
     spec: path.resolve(__dirname, '..', 'SPEC.md'),
     taskFile: null,
-    maxTurns: 8,
+    maxTurns: null,
     maxSteps: 12,
     toolRounds: null,
     // `up -d` returns once containers start, not once the backend serves, so
@@ -176,6 +176,10 @@ function parseArgs(argv) {
   if (!parsed.publishOnly && (!parsed.config || !['c1', 'c2', 'c3'].includes(parsed.config))) {
     console.error('Usage: node run-experiment.mjs --config c1|c2|c3 [options]');
     process.exit(1);
+  }
+  // c2's single loop gets more turns than each of c3's five node loops.
+  if (parsed.maxTurns == null) {
+    parsed.maxTurns = parsed.config === 'c2' ? 20 : 8;
   }
   if (parsed.toolRounds == null) {
     parsed.toolRounds = parsed.config === 'c1' ? 200 : 30;

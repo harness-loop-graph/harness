@@ -2093,3 +2093,11 @@ test('runBatteries() treats run-all exiting 1 with a valid report as failed batt
     await fs.rm(fx.ws, { recursive: true, force: true });
   }
 });
+
+test('default loop turn budget is 20 for c2 and 8 per node for c3; --max-turns overrides both', () => {
+  const parse = (...a) => parseArgs(['node', 'run-experiment.mjs', ...a]);
+  assert.equal(parse('--config', 'c2').maxTurns, 20);
+  assert.equal(parse('--config', 'c3').maxTurns, 8);
+  assert.equal(parse('--config', 'c2', '--max-turns', '5').maxTurns, 5);
+  assert.equal(parse('--config', 'c3', '--max-turns', '5').maxTurns, 5);
+});
