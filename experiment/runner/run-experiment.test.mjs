@@ -1462,3 +1462,9 @@ test('a FAILED run (thrown exception) still records task identity in run-report.
     await fs.rm(configDir, { recursive: true, force: true });
   }
 });
+
+test('default c2 verify command waits for the backend health check instead of probing once', () => {
+  const { verifyCmd } = parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']);
+  assert.match(verifyCmd, /^docker compose up -d --build && /);
+  assert.match(verifyCmd, /curl -sf --retry 60 --retry-delay 2 --retry-all-errors http:\/\/localhost:3000\/health$/);
+});

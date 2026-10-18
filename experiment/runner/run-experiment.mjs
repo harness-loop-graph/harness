@@ -98,7 +98,9 @@ function parseArgs(argv) {
     maxTurns: 8,
     maxSteps: 12,
     toolRounds: null,
-    verifyCmd: 'docker compose up -d --build && curl -sf http://localhost:3000/health',
+    // `up -d` returns once containers start, not once the backend serves, so
+    // the probe retries for up to ~120s, like the battery phase health wait.
+    verifyCmd: 'docker compose up -d --build && curl -sf --retry 60 --retry-delay 2 --retry-all-errors http://localhost:3000/health',
     withBatteries: false,
     keep: false,
     dryRun: false,
