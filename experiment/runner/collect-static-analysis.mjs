@@ -118,10 +118,16 @@ const bump = (counts, key) => {
   if (typeof key === 'string' && key) counts[key] = (counts[key] ?? 0) + 1;
 };
 
+const isSemgrep = (item) => String(item?.tool?.name ?? '').toLowerCase().startsWith('semgrep');
+
 async function collectSemgrep({ repoName, run }) {
   try {
+    // No uploaded Semgrep analysis yet means no result, not zero findings.
+    const { stdout: analysesOut } = await run('gh', ['api', '--paginate', `repos/${repoName}/code-scanning/analyses?per_page=100`], {});
+    if (!parseConcatenatedJsonArrays(analysesOut).some(isSemgrep)) return { status: 'pending' };
+
     const { stdout } = await run('gh', ['api', '--paginate', `repos/${repoName}/code-scanning/alerts?state=open&per_page=100`], {});
-    const alerts = parseConcatenatedJsonArrays(stdout).filter((a) => String(a?.tool?.name ?? '').toLowerCase().startsWith('semgrep'));
+    const alerts = parseConcatenatedJsonArrays(stdout).filter(isSemgrep);
     const bySeverity = {};
     const bySecuritySeverity = {};
     for (const a of alerts) {

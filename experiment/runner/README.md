@@ -340,6 +340,9 @@ node runner/collect-static-analysis.mjs [--runs-dir <dir>] [--force]
   (`complete` | `pending` | `error`), `sonar` (`status`, `projectKey`,
   `measures`) y `semgrep` (`status`, `openAlerts`, `bySeverity`,
   `bySecuritySeverity`). El estado global es `complete` solo si ambos lo son.
+- **Semgrep exige un análisis subido.** Mientras GitHub no tenga un análisis de
+  code scanning de Semgrep para el repo, el resultado es `pending`: una lista de
+  alertas vacía antes del análisis no es "cero hallazgos".
 - **`pending` es normal** los primeros minutos tras publicar (Sonar responde
   404 / sin medidas; `gh` dice "no analysis found"). Volvé a ejecutar el
   comando más tarde: las corridas ya `complete` se saltan; las `pending` y

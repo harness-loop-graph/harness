@@ -77,10 +77,15 @@ const ALERTS = [
   alert('CodeQL', 'error', 'critical'), // must be ignored
 ];
 
-function fakeRun(result, calls = []) {
+const SEMGREP_ANALYSES = [{ tool: { name: 'Semgrep OSS' } }];
+
+// Alerts are counted only once a Semgrep analysis exists, so the fake answers
+// the analyses listing separately (default: one Semgrep analysis uploaded).
+function fakeRun(result, calls = [], { analyses = SEMGREP_ANALYSES } = {}) {
   const fn = async (cmd, args) => {
     calls.push({ cmd, args });
     if (result instanceof Error) throw result;
+    if (args.some((a) => a.includes('/code-scanning/analyses'))) return { stdout: JSON.stringify(analyses), stderr: '' };
     return { stdout: typeof result === 'string' ? result : JSON.stringify(result), stderr: '' };
   };
   fn.calls = calls;
@@ -113,8 +118,9 @@ test('complete case: Sonar measures + Semgrep alerts (non-semgrep ignored) are w
     assert.equal(url.searchParams.get('metricKeys'), 'ncloc,bugs,vulnerabilities,code_smells,security_hotspots,duplicated_lines_density,cognitive_complexity,sqale_index,reliability_rating,security_rating,sqale_rating');
     assert.equal(fetchFn.calls[0].init?.headers?.Authorization, undefined, 'no token => no auth header');
 
-    assert.equal(run.calls[0].cmd, 'gh');
-    assert.deepEqual(run.calls[0].args.slice(0, 3), ['api', '--paginate', 'repos/harness-loop-graph/run-ws1/code-scanning/alerts?state=open&per_page=100']);
+    const alertsCall = run.calls.find((c) => c.args.some((a) => a.includes('/code-scanning/alerts')));
+    assert.equal(alertsCall.cmd, 'gh');
+    assert.deepEqual(alertsCall.args.slice(0, 3), ['api', '--paginate', 'repos/harness-loop-graph/run-ws1/code-scanning/alerts?state=open&per_page=100']);
 
     const out = await readOut(runsDir, 'ws1');
     assert.deepEqual(out, {
@@ -265,5 +271,19 @@ test('main: one line per run, exit 0 unless every published run errored', async 
 
     const mixed = { fetchFn: fakeFetch(jsonResponse(404, {})), run: fakeRun(ALERTS), log, env: {} };
     assert.equal(await collect.main(['node', 'x', '--runs-dir', runsDir, '--force'], mixed), 0, 'pending is not an error');
+  });
+});
+
+test('an empty alert list before any Semgrep analysis is uploaded is pending, never a perfect score', async () => {
+  await withRunsDir(async (runsDir) => {
+    await addRun(runsDir, 'ws1', publishedReport('ws1'));
+    for (const analyses of [[], [{ tool: { name: 'CodeQL' } }]]) {
+      const run = fakeRun([], [], { analyses });
+      await collectAll(runsDir, { fetchFn: fakeFetch(jsonResponse(200, SONAR_BODY)), run }, { force: true });
+      const out = await readOut(runsDir, 'ws1');
+      assert.equal(out.semgrep.status, 'pending');
+      assert.equal(out.semgrep.openAlerts, undefined);
+      assert.equal(out.status, 'pending');
+    }
   });
 });
