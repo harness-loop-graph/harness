@@ -285,11 +285,37 @@ async function ensureRunGitignore(ws) {
 const GIT_HOOKS_OFF_ENV = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null' };
 const MINIMAL_GIT_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n';
 
+// Writes a runner-owned file inside the workspace without following
+// model-planted symlinks: each parent directory is checked (and created)
+// one component at a time and must be a real directory, and an existing
+// entry (possibly a symlink) is removed before the file is created
+// exclusively.
+async function writeOwnedFile(ws, rel, content) {
+  let dir = ws;
+  for (const part of path.dirname(rel).split(path.sep).filter((p) => p && p !== '.')) {
+    dir = path.join(dir, part);
+    let stat = null;
+    try {
+      stat = await fs.lstat(dir);
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
+    if (!stat) await fs.mkdir(dir);
+    else if (!stat.isDirectory()) throw new Error(`refusing to write ${rel}: ${path.relative(ws, dir)} is a symlink or not a directory inside the workspace`);
+  }
+  const target = path.join(ws, rel);
+  await fs.rm(target, { force: true });
+  await fs.writeFile(target, content, { flag: 'wx' });
+}
+
 async function sanitizeWorkspaceGit(ws) {
   const gitDir = path.join(ws, '.git');
+  const stat = await fs.lstat(gitDir);
+  if (!stat.isDirectory()) throw new Error('refusing to use the workspace .git: it is not a real directory (symlink or gitdir file)');
+  // fs.rm removes a symlinked hooks dir as a link, never its target.
   await fs.rm(path.join(gitDir, 'hooks'), { recursive: true, force: true });
-  await fs.mkdir(path.join(gitDir, 'hooks'), { recursive: true });
-  await fs.writeFile(path.join(gitDir, 'config'), MINIMAL_GIT_CONFIG);
+  await fs.mkdir(path.join(gitDir, 'hooks'));
+  await writeOwnedFile(ws, path.join('.git', 'config'), MINIMAL_GIT_CONFIG);
 }
 
 // Turns a finished run workspace into its own git repo with one commit, using
@@ -553,7 +579,12 @@ async function commitAll(run, ws, message) {
 async function publishWorkspace({
   ws, report, modelId, config, org, secrets, sonarOrg, sonarToken, run = spawnCommand, benchDir, fetchFn = globalThis.fetch,
 }) {
-  await sanitizeWorkspaceGit(ws);
+  try {
+    await sanitizeWorkspaceGit(ws);
+  } catch (err) {
+    report.publishError = err instanceof Error ? err.message : String(err);
+    return;
+  }
   const gitRun = (cmd, args, opts = {}) => run(cmd, args, { ...opts, env: { ...opts.env, ...GIT_HOOKS_OFF_ENV } });
   const acceptancePath = await findAcceptancePathInWorkspace(ws, benchDir);
   if (acceptancePath) {
@@ -584,9 +615,8 @@ async function publishWorkspace({
       await commitAll(gitRun, ws, 'harness: remove model-authored workflows');
     }
 
-    await fs.mkdir(path.join(ws, WORKFLOWS_DIR), { recursive: true });
-    await fs.writeFile(path.join(ws, STATIC_ANALYSIS_WORKFLOW_PATH), STATIC_ANALYSIS_WORKFLOW);
-    await fs.writeFile(path.join(ws, SONAR_PROPERTIES_PATH), buildSonarProjectProperties({ sonarOrg, workspaceName }));
+    await writeOwnedFile(ws, STATIC_ANALYSIS_WORKFLOW_PATH, STATIC_ANALYSIS_WORKFLOW);
+    await writeOwnedFile(ws, SONAR_PROPERTIES_PATH, buildSonarProjectProperties({ sonarOrg, workspaceName }));
     // -f: a model-written .gitignore must not be able to keep the injected files out of the push.
     await gitRun('git', ['add', '-f', '--', STATIC_ANALYSIS_WORKFLOW_PATH, SONAR_PROPERTIES_PATH], { cwd: ws });
     const pending = await gitRun('git', ['status', '--porcelain', '--', STATIC_ANALYSIS_WORKFLOW_PATH, SONAR_PROPERTIES_PATH], { cwd: ws });

@@ -1873,3 +1873,47 @@ test('publishWorkspace() neutralizes model-planted git hooks and config before a
     await fs.rm(marker, { force: true });
   }
 });
+
+test('publishWorkspace() never writes or deletes outside the workspace through model-planted symlinks', async () => {
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-outside-'));
+  const victim = path.join(outside, 'victim.txt');
+  const cleanup = [benchDir, outside];
+  try {
+    await fs.writeFile(victim, 'original');
+
+    // A symlinked sonar-project.properties is replaced, not followed.
+    const wsFile = await seedWorkspace('runner-publish-symfile-');
+    cleanup.push(wsFile);
+    await fs.symlink(victim, path.join(wsFile, 'sonar-project.properties'));
+    const r1 = {};
+    await publishWorkspace({ ws: wsFile, report: r1, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run: makeRecordingRun(), benchDir, ...SONAR_OK() });
+    assert.equal(await fs.readFile(victim, 'utf8'), 'original');
+    assert.equal(r1.publishError, undefined, r1.publishError);
+    assert.equal((await fs.lstat(path.join(wsFile, 'sonar-project.properties'))).isSymbolicLink(), false);
+
+    // A symlinked .github directory aborts publishing before gh runs.
+    const wsDir = await seedWorkspace('runner-publish-symdir-');
+    cleanup.push(wsDir);
+    await fs.symlink(outside, path.join(wsDir, '.github'));
+    const run2 = makeRecordingRun();
+    const r2 = {};
+    await publishWorkspace({ ws: wsDir, report: r2, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run: run2, benchDir, ...SONAR_OK() });
+    assert.match(r2.publishError ?? '', /symlink|outside the workspace/i);
+    assert.equal(run2.calls.some((c) => c.cmd === 'gh'), false);
+    assert.deepEqual((await fs.readdir(outside)).sort(), ['victim.txt']);
+
+    // A .git that is not a real directory aborts instead of being "sanitized".
+    const wsGit = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-symgit-'));
+    cleanup.push(wsGit);
+    await fs.writeFile(path.join(wsGit, 'run-report.json'), '{}');
+    await fs.symlink(outside, path.join(wsGit, '.git'));
+    const r3 = {};
+    await publishWorkspace({ ws: wsGit, report: r3, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run: makeRecordingRun(), benchDir, ...SONAR_OK() });
+    assert.match(r3.publishError ?? '', /\.git/);
+    assert.deepEqual((await fs.readdir(outside)).sort(), ['victim.txt']);
+    assert.equal(await fs.readFile(victim, 'utf8'), 'original');
+  } finally {
+    for (const dir of cleanup) await fs.rm(dir, { recursive: true, force: true });
+  }
+});
