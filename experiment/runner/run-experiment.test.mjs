@@ -1944,8 +1944,8 @@ test('publishWorkspace() creates the SonarCloud project (form params + Bearer to
     tracked.calls = fetchFn.calls;
     await publishWorkspace(publishArgs(ws, {}, { run, benchDir, sonarOrg: 'my-org', sonarToken: 'tok-123', fetchFn: tracked }));
 
-    assert.deepEqual(order, ['sonar', 'gh']);
-    assert.equal(fetchFn.calls.length, 1);
+    assert.deepEqual(order, ['sonar', 'sonar', 'gh']);
+    assert.equal(fetchFn.calls.length, 2);
     const { url, init } = fetchFn.calls[0];
     assert.equal(url, 'https://sonarcloud.io/api/projects/create');
     assert.equal(init.method, 'POST');
@@ -1955,6 +1955,16 @@ test('publishWorkspace() creates the SonarCloud project (form params + Bearer to
     assert.equal(form.get('project'), `my-org_run-${path.basename(ws)}`);
     assert.equal(form.get('name'), `run-${path.basename(ws)}`);
     assert.equal(form.get('visibility'), 'public');
+
+    // SonarCloud names a new project's main branch `master`; we push `main`, which would be
+    // analyzed as a non-main branch whose measures a free org cannot read.
+    const rename = fetchFn.calls[1];
+    assert.equal(rename.url, 'https://sonarcloud.io/api/project_branches/rename');
+    assert.equal(rename.init.method, 'POST');
+    assert.equal(rename.init.headers.Authorization, 'Bearer tok-123');
+    const renameForm = new URLSearchParams(String(rename.init.body));
+    assert.equal(renameForm.get('project'), `my-org_run-${path.basename(ws)}`);
+    assert.equal(renameForm.get('name'), 'main');
   } finally {
     await fs.rm(ws, { recursive: true, force: true });
     await fs.rm(benchDir, { recursive: true, force: true });
@@ -1963,13 +1973,18 @@ test('publishWorkspace() creates the SonarCloud project (form params + Bearer to
 
 test('createSonarProject() tolerates HTTP 400 "key already exists" but rejects any other failure', async () => {
   const args = { sonarOrg: 'o', projectKey: 'o_run-x', projectName: 'run-x', sonarToken: 't' };
-  await createSonarProject({ ...args, fetchFn: makeFetch([{ status: 400, body: '{"errors":[{"msg":"Could not create Project, key already exists: o_run-x"}]}' }]) });
+  await createSonarProject({ ...args, fetchFn: makeFetch([{ status: 400, body: '{"errors":[{"msg":"Could not create Project, key already exists: o_run-x"}]}' }, { status: 204, body: '' }]) });
   await assert.rejects(
     createSonarProject({ ...args, fetchFn: makeFetch([{ status: 400, body: '{"errors":[{"msg":"Organization not found"}]}' }]) }),
     /400/,
   );
   await assert.rejects(createSonarProject({ ...args, fetchFn: makeFetch([{ status: 401, body: 'Unauthorized' }]) }), /401/);
   await assert.rejects(createSonarProject({ ...args, fetchFn: async () => { throw new Error('network down'); } }), /network down/);
+  // Created (or already existing) but the main-branch rename failed: refuse, measures would be unreadable.
+  await assert.rejects(
+    createSonarProject({ ...args, fetchFn: makeFetch([{ status: 200, body: '{}' }, { status: 403, body: 'Insufficient privileges' }]) }),
+    /main branch.*403/,
+  );
 });
 
 test('publishWorkspace() sets publishError and never calls gh when SonarCloud project creation fails', async () => {

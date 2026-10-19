@@ -566,6 +566,7 @@ jobs:
 
 const SONAR_EXCLUSIONS = '**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,run-report.json,batteries-report.json,audit*.jsonl,SPEC.md,.github/**';
 const SONARCLOUD_CREATE_URL = 'https://sonarcloud.io/api/projects/create';
+const SONARCLOUD_RENAME_BRANCH_URL = 'https://sonarcloud.io/api/project_branches/rename';
 const WORKFLOWS_DIR = '.github/workflows';
 const STATIC_ANALYSIS_WORKFLOW_PATH = `${WORKFLOWS_DIR}/static-analysis.yml`;
 const SONAR_PROPERTIES_PATH = 'sonar-project.properties';
@@ -587,16 +588,26 @@ function buildSonarProjectProperties({ sonarOrg, workspaceName }) {
 
 // Creates the (public) SonarCloud project so the first workflow run has somewhere to report.
 // HTTP 400 "key already exists" is success (republishing the same workspace); anything else throws.
+// Then renames the project's main branch to `main` (SonarCloud defaults it to `master`): the pushed
+// `main` would otherwise be analyzed as a non-main branch, whose measures a free org cannot read.
+// Renaming to the current name is a no-op 204, so republishing stays idempotent.
 async function createSonarProject({ sonarOrg, projectKey, projectName, sonarToken, fetchFn = globalThis.fetch }) {
+  const headers = { Authorization: `Bearer ${sonarToken}`, 'Content-Type': 'application/x-www-form-urlencoded' };
   const res = await fetchFn(SONARCLOUD_CREATE_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${sonarToken}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers,
     body: new URLSearchParams({ organization: sonarOrg, project: projectKey, name: projectName, visibility: 'public' }).toString(),
   });
-  if (res.ok) return;
-  const body = await res.text();
-  if (res.status === 400 && /already exist/i.test(body)) return;
-  throw new Error(`HTTP ${res.status}: ${body.slice(0, 300)}`);
+  if (!res.ok) {
+    const body = await res.text();
+    if (!(res.status === 400 && /already exist/i.test(body))) throw new Error(`HTTP ${res.status}: ${body.slice(0, 300)}`);
+  }
+  const rename = await fetchFn(SONARCLOUD_RENAME_BRANCH_URL, {
+    method: 'POST',
+    headers,
+    body: new URLSearchParams({ project: projectKey, name: 'main' }).toString(),
+  });
+  if (!rename.ok) throw new Error(`renaming the SonarCloud main branch failed: HTTP ${rename.status}: ${(await rename.text()).slice(0, 300)}`);
 }
 
 const GIT_COMMIT_IDENTITY = ['-c', 'user.name=pi-runner', '-c', 'user.email=pi-runner@users.noreply.github.com'];

@@ -302,7 +302,11 @@ los archivos del modelo podrían manipular el análisis. Por eso, **antes** de
    `name`, `visibility=public`; cabecera `Authorization: Bearer
    $SONAR_TOKEN`). Un HTTP 400 "key already exists" se tolera (republicar es
    idempotente); cualquier otro fallo registra `publishError` y se detiene
-   **antes** de `gh repo create`.
+   **antes** de `gh repo create`. Después renombra la rama principal del
+   proyecto a `main` (`POST .../api/project_branches/rename`): SonarCloud la
+   crea como `master`, y el `main` empujado se analizaría como rama
+   secundaria, cuyas métricas una organización gratuita no puede leer. Si el
+   renombre falla, también registra `publishError` antes de `gh repo create`.
 5. Registra `staticAnalysis: { sonarOrganization, sonarProjectKey,
    semgrepConfig, workflowSha256, removedWorkflows }` en `run-report.json`.
 
