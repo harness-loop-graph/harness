@@ -119,7 +119,10 @@ export function registerBuiltinTools(manager: RegistryToolManager, deps: Builtin
 
   const runSpec: ToolSpec = {
     name: 'run_command',
-    description: 'Run a shell command inside the isolated workspace.',
+    description:
+      'Run a bash command inside the isolated workspace. Each call runs in a new shell that starts at the ' +
+      'workspace root, so `cd` does not persist between calls: chain it in the same command ' +
+      '(`cd backend && npm install`) or use paths relative to the workspace root.',
     inputSchema: {
       type: 'object',
       properties: {
