@@ -1014,6 +1014,28 @@ async function seedWorkspace(prefix, files = {}) {
   return ws;
 }
 
+test('publishWorkspace() records the repository URL even when gh prints git push output after it', async () => {
+  const ws = await seedWorkspace('runner-publish-url-');
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));
+  try {
+    const repoName = `harness-loop-graph/run-${path.basename(ws)}`;
+    // Real `gh repo create --push` output: the URL, then git's tracking message.
+    const run = async (cmd) => ({
+      stdout: cmd === 'gh' ? `https://github.com/${repoName}\nbranch 'main' set up to track 'origin/main'.\n` : '',
+      stderr: '',
+    });
+    const report = { status: 'SUCCESS' };
+
+    await publishWorkspace({ ws, report, modelId: 'm', config: 'c1', org: 'harness-loop-graph', secrets: [], run, benchDir, ...SONAR_OK() });
+
+    assert.equal(report.publishError, undefined);
+    assert.deepEqual(report.repository, { name: repoName, url: `https://github.com/${repoName}` });
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(benchDir, { recursive: true, force: true });
+  }
+});
+
 test('publishWorkspace() builds the gh repo create command and records repository in run-report.json', async () => {
   const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-'));
   const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-empty-'));

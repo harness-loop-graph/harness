@@ -687,7 +687,9 @@ async function publishWorkspace({
       ['repo', 'create', repoName, '--public', '--source', ws, '--push', '--description', description],
       {},
     );
-    const url = (result?.stdout ?? '').trim().split('\n').filter(Boolean).pop() || `https://github.com/${repoName}`;
+    // `--push` makes gh relay git's output after the URL, so take the last URL line, not the last line.
+    const url = (result?.stdout ?? '').split('\n').map((l) => l.trim()).filter((l) => l.startsWith('https://')).pop()
+      || `https://github.com/${repoName}`;
     report.repository = { name: repoName, url };
 
     // Commit the updated report (now carrying `repository`) and push again,
