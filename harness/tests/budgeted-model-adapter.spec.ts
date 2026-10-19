@@ -36,6 +36,10 @@ class CostStubAdapter implements ModelAdapter {
   getSamplingConfig() {
     return { temperature: 0.3, topP: null, seed: null, maxTokens: null };
   }
+
+  getProviderConfig() {
+    return { order: ['DeepInfra'], allowFallbacks: false };
+  }
 }
 
 describe('BudgetedModelAdapter', () => {
@@ -92,7 +96,13 @@ describe('BudgetedModelAdapter', () => {
 
     expect(model.getUsage()).toEqual(inner.getUsage());
     expect(model.getSamplingConfig?.()).toEqual(inner.getSamplingConfig());
+    expect(model.getProviderConfig?.()).toEqual(inner.getProviderConfig());
     expect(model.getRouting).toBeUndefined();
+  });
+
+  it('only exposes getProviderConfig() when the inner adapter has it', () => {
+    const bare = { complete: async () => ({ type: 'finish' as const, content: '' }), getUsage: () => ({ calls: 0, cost: 0 }) };
+    expect(new BudgetedModelAdapter(bare, { maxCostUsd: 1 }).getProviderConfig).toBeUndefined();
   });
 
   it('forwards getRouting() when the inner adapter is a router', async () => {

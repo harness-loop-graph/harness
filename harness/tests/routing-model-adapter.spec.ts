@@ -15,11 +15,17 @@ class UsageStubAdapter implements ModelAdapter {
   private cost = 0;
   private calls = 0;
   private retries = 0;
+  private readonly providers: Record<string, number> = {};
   public readonly seenRequests: ModelRequest[] = [];
 
   constructor(
     private readonly response: ModelResponse = { type: 'finish', content: 'ok' },
-    private readonly perCall = { promptTokens: 10, completionTokens: 5, cost: 0.01, retries: 0 },
+    private readonly perCall: { promptTokens: number; completionTokens: number; cost: number; retries?: number; provider?: string } = {
+      promptTokens: 10,
+      completionTokens: 5,
+      cost: 0.01,
+      retries: 0,
+    },
   ) {}
 
   async complete(req: ModelRequest): Promise<ModelResponse> {
@@ -29,6 +35,7 @@ class UsageStubAdapter implements ModelAdapter {
     this.completionTokens += this.perCall.completionTokens;
     this.cost += this.perCall.cost;
     this.retries += this.perCall.retries ?? 0;
+    if (this.perCall.provider) this.providers[this.perCall.provider] = (this.providers[this.perCall.provider] ?? 0) + 1;
     return this.response;
   }
 
@@ -41,6 +48,7 @@ class UsageStubAdapter implements ModelAdapter {
       retries: this.retries,
       cost: this.cost,
       modelsUsed: [] as string[],
+      providersUsed: { ...this.providers },
     };
   }
 }
@@ -229,7 +237,29 @@ describe('RoutingModelAdapter', () => {
     await router.complete(request());
     await router.complete(request());
 
-    expect(router.getUsage()).toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 2, retries: 0, cost: 0, modelsUsed: [] });
+    expect(router.getUsage()).toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 2, retries: 0, cost: 0, modelsUsed: [], providersUsed: {} });
+  });
+
+  it('merges providersUsed counts across routes in getUsage()', async () => {
+    const def = new UsageStubAdapter({ type: 'finish', content: 'ok' }, { promptTokens: 1, completionTokens: 1, cost: 0, provider: 'DeepInfra' });
+    const retry = new UsageStubAdapter({ type: 'finish', content: 'ok' }, { promptTokens: 1, completionTokens: 1, cost: 0, provider: 'Fireworks' });
+    const router = new RoutingModelAdapter({ routes: { default: def, retry } });
+
+    await router.complete(request());
+    await router.complete(request());
+    await router.complete(request({ feedback: 'try again' }));
+
+    expect(router.getUsage().providersUsed).toEqual({ DeepInfra: 2, Fireworks: 1 });
+  });
+
+  it('attributes providersUsed deltas correctly when two route names share an adapter', async () => {
+    const shared = new UsageStubAdapter({ type: 'finish', content: 'ok' }, { promptTokens: 1, completionTokens: 1, cost: 0, provider: 'DeepInfra' });
+    const router = new RoutingModelAdapter({ routes: { default: shared, retry: shared } });
+
+    await router.complete(request());
+    await router.complete(request({ feedback: 'again' }));
+
+    expect(router.getUsage().providersUsed).toEqual({ DeepInfra: 2 });
   });
 
   it('records the call and any usage delta when the delegate throws, then rethrows', async () => {

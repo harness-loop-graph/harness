@@ -69,6 +69,8 @@ Router:
 | `--top-p <n>` | sin valor | `top_p`, número en (0, 1]. Mismo alcance que `--temperature` |
 | `--seed <n>` | sin valor | `seed` de muestreo, entero. Mismo alcance que `--temperature` |
 | `--max-tokens <n>` | sin valor | `max_tokens` por llamada, entero positivo. Mismo alcance que `--temperature` |
+| `--provider <nombre[,nombre...]\|none>` | `DeepInfra` | Fija el enrutamiento de proveedores de OpenRouter (`provider: { order, allow_fallbacks: false }`) en **todas** las llamadas al modelo (adaptador predeterminado y de cada ruta del *router*), para que C1/C2/C3 sean comparables: sin esto, un proveedor *upstream* con el modelo deprecado hizo fallar turnos con `http_400`. `none` no envía el campo `provider`. Una lista vacía o mal formada termina con un error de uso |
+| `--allow-provider-fallbacks` | desactivado | Con `--provider`, envía `allow_fallbacks: true` (OpenRouter puede usar otro proveedor si los listados fallan). Con `--provider none` es un error de uso |
 | `--model-timeout <s>` | 600 | Timeout por solicitud al modelo, en segundos (entero positivo). Cubre la respuesta completa, cuerpo incluido: OpenRouter responde 200 de inmediato y envía el cuerpo no *streaming* recién al terminar la generación, así que con contextos de 20-35k tokens el default del adaptador (120 s) agota el tiempo en cada reintento (`body_read_error ... aborted due to timeout`). Se pasa como `timeoutMs` a **todos** los adaptadores que crea el runner (el predeterminado y los de cada ruta del *router*; un `timeoutMs` explícito en la configuración de una ruta tiene prioridad). No cambia el default de la biblioteca. Un valor inválido termina con un error de uso |
 | `--max-cost <usd>` | sin valor (sin tope) | Tope de gasto en USD, número positivo. Envuelve el modelo de **todas** las configuraciones (c1/c2/c3, plano o con *router*) en un `BudgetedModelAdapter`: antes de cada llamada, si el costo acumulado (`usage.cost` que reporta el proveedor, p. ej. OpenRouter) ya alcanzó el tope, no se llama al modelo y se devuelve un error `budget_exceeded`. El tope se comprueba *antes* de la llamada, así que la última puede sobrepasarlo por su propio costo. Sin este flag la corrida no tiene tope y, si no es `--dry-run`, imprime una advertencia en stderr. Un valor inválido termina con un error de uso |
 | `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf --retry 60 --retry-delay 2 --retry-all-errors http://localhost:3000/health` | Comando de verificación de C2. El `curl` reintenta hasta ~120 s porque `up -d` vuelve cuando arrancan los contenedores, no cuando el backend ya responde |
@@ -403,7 +405,9 @@ publicado.
 ## Referencia de `run-report.json`
 
 Cada corrida escribe `run-report.json` en el espacio de trabajo. `sampling`
-(`null` por cada parámetro sin definir), `harnessGitSha` (`git rev-parse HEAD`
+(`null` por cada parámetro sin definir), `provider` (`{ order, allowFallbacks }`,
+o `null` con `--provider none`), `usage.providersUsed` (proveedores *upstream*
+que devolvieron las respuestas, con su conteo, sumados entre adaptadores), `harnessGitSha` (`git rev-parse HEAD`
 del repositorio del *harness*) y `harnessGitDirty` (`git status --porcelain`
 no vacío) están presentes en toda corrida, también las fallidas y el plan de
 `--dry-run`; los dos últimos valen `null` si git no está disponible:
@@ -436,6 +440,7 @@ false` y un tope definido se agrega `budget.warning`.
   "config": "c1|c2|c3",
   "model": "gpt-4o-mini",
   "sampling": { "temperature": null, "topP": null, "seed": null, "maxTokens": null },
+  "provider": { "order": ["DeepInfra"], "allowFallbacks": false },
   "modelTimeoutMs": 600000,
   "harnessGitSha": "<git rev-parse HEAD del repo, o null>",
   "harnessGitDirty": false,
@@ -443,7 +448,7 @@ false` y un tope definido se agrega `budget.warning`.
   "finishedAt": "...",
   "durationMs": 0,
   "status": "SUCCESS|FAILED",
-  "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "calls": 0 },
+  "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "calls": 0, "providersUsed": { "DeepInfra": 0 } },
   "budget": { "maxCostUsd": null, "exhausted": false, "costReported": null },
   "turns": 0,
   "steps?": 0,

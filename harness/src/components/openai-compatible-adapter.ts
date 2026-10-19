@@ -54,6 +54,17 @@ export interface OpenAICompatibleAdapterConfig {
   seed?: number;
   /** Max completion tokens. Sent as `max_tokens` only when set. */
   maxTokens?: number;
+  /**
+   * OpenRouter provider routing. Sent as `provider: { order, allow_fallbacks }`
+   * only when set, pinning every call to the listed upstream providers.
+   */
+  provider?: ProviderRoutingConfig;
+}
+
+/** OpenRouter provider routing: tried in `order`; with `allowFallbacks` false, no other provider is used. */
+export interface ProviderRoutingConfig {
+  order: string[];
+  allowFallbacks: boolean;
 }
 
 /** Effective sampling settings; `null` means unset (provider default, field omitted from requests). */
@@ -145,12 +156,14 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
   private readonly sampling: SamplingConfig;
+  private readonly provider: ProviderRoutingConfig | null;
   private retries = 0;
   private promptTokens = 0;
   private completionTokens = 0;
   private cost = 0;
   private calls = 0;
   private modelsUsed = new Set<string>();
+  private providersUsed = new Map<string, number>();
 
   constructor(config: OpenAICompatibleAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.MODEL_API_KEY ?? '';
@@ -171,6 +184,9 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       seed: config.seed ?? null,
       maxTokens: config.maxTokens ?? null,
     };
+    this.provider = config.provider
+      ? { order: [...config.provider.order], allowFallbacks: config.provider.allowFallbacks }
+      : null;
 
     if (this.apiKey === '') {
       throw new Error('MODEL_API_KEY is not set. Export it before constructing OpenAICompatibleModelAdapter.');
@@ -195,6 +211,9 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       ...(this.sampling.topP !== null && { top_p: this.sampling.topP }),
       ...(this.sampling.seed !== null && { seed: this.sampling.seed }),
       ...(this.sampling.maxTokens !== null && { max_tokens: this.sampling.maxTokens }),
+      ...(this.provider !== null && {
+        provider: { order: this.provider.order, allow_fallbacks: this.provider.allowFallbacks },
+      }),
     };
 
     const fetched = await this.fetchWithRetry(body);
@@ -203,6 +222,9 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
 
     if (payload.model) {
       this.modelsUsed.add(payload.model);
+    }
+    if (payload.provider) {
+      this.providersUsed.set(payload.provider, (this.providersUsed.get(payload.provider) ?? 0) + 1);
     }
 
     if (payload.usage) {
@@ -446,6 +468,11 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     return { ...this.sampling };
   }
 
+  /** Effective provider routing (null = unset, field omitted from requests), for recording in run reports. */
+  getProviderConfig(): ProviderRoutingConfig | null {
+    return this.provider && { order: [...this.provider.order], allowFallbacks: this.provider.allowFallbacks };
+  }
+
   getUsage(): {
     modelsUsed: string[];
     cost: number;
@@ -454,7 +481,9 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     retries: number;
     promptTokens: number;
     totalTokens: number;
-    completionTokens: number
+    completionTokens: number;
+    /** Upstream provider names returned in responses (`payload.provider`), with how many responses each served. */
+    providersUsed: Record<string, number>;
   } {
     return {
       promptTokens: this.promptTokens,
@@ -464,6 +493,7 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       retries: this.retries,
       cost: this.cost,
       modelsUsed: [...this.modelsUsed],
+      providersUsed: Object.fromEntries(this.providersUsed),
     };
   }
 

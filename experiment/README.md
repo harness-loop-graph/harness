@@ -44,7 +44,8 @@ Consecuencias para el análisis:
   se compara normalizado por tokens, costo (USD) y tiempo, tomados de
   `run-report.json`. Una mejora de calidad sin su costo no es un resultado.
 - **Lo que debe ser idéntico entre configuraciones:** modelo, parámetros de
-  muestreo (`--temperature`, `--top-p`, `--seed`, `--max-tokens`), SPEC,
+  muestreo (`--temperature`, `--top-p`, `--seed`, `--max-tokens`), el
+  proveedor de OpenRouter fijado (`--provider`, por defecto `DeepInfra`), SPEC,
   *skills*, servidores MCP y el tope de costo (`--max-cost`). El tope es una
   red de seguridad, no un mecanismo de igualación.
 - **Repeticiones.** Una corrida por configuración es una anécdota; los

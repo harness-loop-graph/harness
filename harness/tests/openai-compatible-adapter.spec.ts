@@ -291,6 +291,7 @@ describe('OpenAICompatibleModelAdapter', () => {
       retries: 0,
       cost: 0.000003,
       modelsUsed: [],
+      providersUsed: {},
     });
   });
 
@@ -336,6 +337,7 @@ describe('OpenAICompatibleModelAdapter', () => {
       retries: 0,
       cost: 0,
       modelsUsed: [],
+      providersUsed: {},
     });
   });
 
@@ -1000,6 +1002,7 @@ describe('OpenAICompatibleModelAdapter', () => {
         retries: 2,
         cost: 0.001,
         modelsUsed: ['m-1'],
+        providersUsed: {},
       });
     });
 
@@ -1254,6 +1257,74 @@ describe('OpenAICompatibleModelAdapter', () => {
       expect('top_p' in body).toBe(false);
       expect('max_tokens' in body).toBe(false);
       expect(adapter.getSamplingConfig()).toEqual({ temperature: 0, topP: null, seed: 0, maxTokens: null });
+    });
+  });
+
+  describe('provider routing', () => {
+    const OK = { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }] };
+
+    function providerAdapter(
+      provider?: { order: string[]; allowFallbacks: boolean },
+      bodies: unknown[] = [OK],
+    ) {
+      const fetchImpl = vi.fn<typeof fetch>();
+      for (const body of bodies) fetchImpl.mockResolvedValueOnce(jsonResponse(200, body));
+      const adapter = new OpenAICompatibleModelAdapter({
+        apiKey: 'k',
+        model: 'm',
+        baseUrl: 'https://api.example.test/v1',
+        fetchImpl,
+        ...(provider && { provider }),
+      });
+      const sentBody = () => JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string) as Record<string, unknown>;
+      return { adapter, sentBody };
+    }
+
+    it('omits the provider field and reports a null config when unset', async () => {
+      const { adapter, sentBody } = providerAdapter();
+      await adapter.complete(request());
+      expect('provider' in sentBody()).toBe(false);
+      expect(adapter.getProviderConfig()).toBeNull();
+    });
+
+    it('sends provider.order and provider.allow_fallbacks (snake_case) when set', async () => {
+      const { adapter, sentBody } = providerAdapter({ order: ['DeepInfra', 'Fireworks'], allowFallbacks: false });
+      await adapter.complete(request());
+      expect(sentBody().provider).toEqual({ order: ['DeepInfra', 'Fireworks'], allow_fallbacks: false });
+      expect(adapter.getProviderConfig()).toEqual({ order: ['DeepInfra', 'Fireworks'], allowFallbacks: false });
+    });
+
+    it('sends allow_fallbacks true when fallbacks are allowed', async () => {
+      const { adapter, sentBody } = providerAdapter({ order: ['DeepInfra'], allowFallbacks: true });
+      await adapter.complete(request());
+      expect(sentBody().provider).toEqual({ order: ['DeepInfra'], allow_fallbacks: true });
+    });
+
+    it('does not let callers mutate the configured order afterwards', async () => {
+      const order = ['DeepInfra'];
+      const { adapter, sentBody } = providerAdapter({ order, allowFallbacks: false });
+      order.push('Other');
+      adapter.getProviderConfig()!.order.push('Mutated');
+      await adapter.complete(request());
+      expect(sentBody().provider).toEqual({ order: ['DeepInfra'], allow_fallbacks: false });
+    });
+
+    it('counts the upstream providers returned in responses, per provider name', async () => {
+      const { adapter } = providerAdapter(undefined, [
+        { ...OK, provider: 'DeepInfra' },
+        { ...OK, provider: 'DeepInfra' },
+        { ...OK, provider: 'Fireworks' },
+        OK,
+      ]);
+      for (let i = 0; i < 4; i += 1) await adapter.complete(request());
+      expect(adapter.getUsage().providersUsed).toEqual({ DeepInfra: 2, Fireworks: 1 });
+    });
+
+    it('returns a copy of providersUsed so callers cannot mutate internal counts', async () => {
+      const { adapter } = providerAdapter(undefined, [{ ...OK, provider: 'DeepInfra' }]);
+      await adapter.complete(request());
+      adapter.getUsage().providersUsed.DeepInfra = 99;
+      expect(adapter.getUsage().providersUsed).toEqual({ DeepInfra: 1 });
     });
   });
 

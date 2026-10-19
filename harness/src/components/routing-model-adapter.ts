@@ -47,6 +47,7 @@ interface UsageLike {
   totalTokens: number;
   cost: number;
   modelsUsed?: string[];
+  providersUsed?: Record<string, number>;
 }
 
 function hasUsage(adapter: ModelAdapter): adapter is ModelAdapter & { getUsage(): UsageLike } {
@@ -82,6 +83,7 @@ export class RoutingModelAdapter implements ModelAdapter {
   private readonly usageByRoute = new Map<string, RouteUsage>();
   private readonly decisions: RouteDecision[] = [];
   private readonly modelsUsed = new Set<string>();
+  private readonly providersUsed = new Map<string, number>();
 
   constructor(config: RoutingModelAdapterConfig) {
     if (!config.routes.default) {
@@ -151,6 +153,10 @@ export class RoutingModelAdapter implements ModelAdapter {
       for (const model of after.modelsUsed ?? []) {
         if (!(before.modelsUsed ?? []).includes(model)) this.modelsUsed.add(model);
       }
+      for (const [provider, count] of Object.entries(after.providersUsed ?? {})) {
+        const delta = count - (before.providersUsed?.[provider] ?? 0);
+        if (delta > 0) this.providersUsed.set(provider, (this.providersUsed.get(provider) ?? 0) + delta);
+      }
     }
     this.usageByRoute.set(route, entry);
   }
@@ -164,6 +170,7 @@ export class RoutingModelAdapter implements ModelAdapter {
     retries: number;
     cost: number;
     modelsUsed: string[];
+    providersUsed: Record<string, number>;
   } {
     let promptTokens = 0;
     let completionTokens = 0;
@@ -179,7 +186,16 @@ export class RoutingModelAdapter implements ModelAdapter {
       retries += usage.retries;
       cost += usage.cost;
     }
-    return { promptTokens, completionTokens, totalTokens, calls, retries, cost, modelsUsed: [...this.modelsUsed] };
+    return {
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      calls,
+      retries,
+      cost,
+      modelsUsed: [...this.modelsUsed],
+      providersUsed: Object.fromEntries(this.providersUsed),
+    };
   }
 
   /** Per-route usage plus the ordered route-decision log, for reporting/diagnostics. */

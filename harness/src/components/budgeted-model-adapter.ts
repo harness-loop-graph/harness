@@ -1,6 +1,6 @@
 import type { ModelRequest, ModelResponse } from '../contracts/core.js';
 import type { ModelAdapter } from './model-adapter.js';
-import type { SamplingConfig } from './openai-compatible-adapter.js';
+import type { ProviderRoutingConfig, SamplingConfig } from './openai-compatible-adapter.js';
 import type { RoutingModelAdapter } from './routing-model-adapter.js';
 
 /** Error code returned (never thrown) once the cost ceiling is reached. */
@@ -23,7 +23,7 @@ export type BudgetableModelAdapter = ModelAdapter & { getUsage(): { cost: number
  * network). The cap is checked before a call, so the last call may overshoot
  * the limit by its own cost.
  *
- * `getUsage()` is forwarded, and `getRouting()` / `getSamplingConfig()` only
+ * `getUsage()` is forwarded, and `getRouting()` / `getSamplingConfig()` / `getProviderConfig()` only
  * exist on the wrapper when the inner adapter has them, so `typeof
  * model.getRouting === 'function'` checks keep behaving as without the wrapper.
  */
@@ -34,6 +34,7 @@ export class BudgetedModelAdapter<T extends BudgetableModelAdapter = BudgetableM
 
   getRouting?: () => ReturnType<RoutingModelAdapter['getRouting']>;
   getSamplingConfig?: () => SamplingConfig;
+  getProviderConfig?: () => ProviderRoutingConfig | null;
 
   constructor(private readonly inner: T, config: BudgetedModelAdapterConfig) {
     if (!Number.isFinite(config.maxCostUsd) || config.maxCostUsd <= 0) {
@@ -45,6 +46,8 @@ export class BudgetedModelAdapter<T extends BudgetableModelAdapter = BudgetableM
     if (typeof routable.getRouting === 'function') this.getRouting = () => routable.getRouting!();
     const sampled = inner as unknown as { getSamplingConfig?: BudgetedModelAdapter['getSamplingConfig'] };
     if (typeof sampled.getSamplingConfig === 'function') this.getSamplingConfig = () => sampled.getSamplingConfig!();
+    const pinned = inner as unknown as { getProviderConfig?: BudgetedModelAdapter['getProviderConfig'] };
+    if (typeof pinned.getProviderConfig === 'function') this.getProviderConfig = () => pinned.getProviderConfig!();
   }
 
   async complete(request: ModelRequest): Promise<ModelResponse> {

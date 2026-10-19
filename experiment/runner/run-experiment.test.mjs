@@ -541,6 +541,139 @@ test('readGitMetadata() returns nulls instead of throwing when git is unavailabl
   assert.deepEqual(meta, { harnessGitSha: null, harnessGitDirty: null });
 });
 
+test('parseArgs() --provider defaults to DeepInfra with fallbacks disabled', () => {
+  const parsed = parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']);
+  assert.deepEqual(parsed.provider, { order: ['DeepInfra'], allowFallbacks: false });
+});
+
+test('parseArgs() --provider accepts a comma-separated order, "none", and --allow-provider-fallbacks in any position', () => {
+  const base = ['node', 'run-experiment.mjs', '--config', 'c2'];
+  assert.deepEqual(
+    parseArgs([...base, '--provider', 'DeepInfra, Fireworks']).provider,
+    { order: ['DeepInfra', 'Fireworks'], allowFallbacks: false },
+  );
+  assert.equal(parseArgs([...base, '--provider', 'none']).provider, null);
+  assert.deepEqual(
+    parseArgs([...base, '--provider', 'Fireworks', '--allow-provider-fallbacks']).provider,
+    { order: ['Fireworks'], allowFallbacks: true },
+  );
+  assert.deepEqual(
+    parseArgs([...base, '--allow-provider-fallbacks', '--provider', 'Fireworks']).provider,
+    { order: ['Fireworks'], allowFallbacks: true },
+  );
+  assert.deepEqual(
+    parseArgs([...base, '--allow-provider-fallbacks']).provider,
+    { order: ['DeepInfra'], allowFallbacks: true },
+  );
+});
+
+test('invalid --provider values exit with a usage error', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const cases = [
+    [['--provider'], /--provider/],
+    [['--provider', ''], /--provider/],
+    [['--provider', '   '], /--provider/],
+    [['--provider', ','], /--provider/],
+    [['--provider', 'DeepInfra,,Fireworks'], /--provider/],
+    [['--provider', 'none,DeepInfra'], /--provider/],
+    [['--provider', 'none', '--allow-provider-fallbacks'], /--allow-provider-fallbacks/],
+  ];
+  for (const [flags, pattern] of cases) {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', ...flags],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.equal(res.status, 1, `${flags.join(' ')} should exit 1`);
+    assert.match(res.stderr, /Usage/);
+    assert.match(res.stderr, pattern);
+  }
+});
+
+test('--dry-run plan records the configured provider routing', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const run = (...flags) => {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', ...flags],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.equal(res.status, 0, res.stderr);
+    return JSON.parse(res.stdout);
+  };
+  assert.deepEqual(run().provider, { order: ['DeepInfra'], allowFallbacks: false });
+  assert.equal(run('--provider', 'none').provider, null);
+  assert.deepEqual(run('--provider', 'A,B', '--allow-provider-fallbacks').provider, { order: ['A', 'B'], allowFallbacks: true });
+});
+
+test('createModel() pins the same provider on the default adapter and every route adapter, and merges providers used', async () => {
+  const bodies = [];
+  const stubFetch = (providerName) => async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return new Response(
+      JSON.stringify({ provider: providerName, choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+  const created = [];
+  const makeAdapter = (cfg) => {
+    created.push(cfg);
+    return new OpenAICompatibleModelAdapter({ ...cfg, fetchImpl: stubFetch('Fireworks') });
+  };
+  const previous = {
+    MODEL_API_KEY: process.env.MODEL_API_KEY,
+    MODEL_BASE_URL: process.env.MODEL_BASE_URL,
+    fetch: globalThis.fetch,
+  };
+  process.env.MODEL_API_KEY = 'env-key';
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  globalThis.fetch = stubFetch('DeepInfra');
+  const provider = { order: ['DeepInfra'], allowFallbacks: false };
+  const request = (feedback) => ({
+    task: 't',
+    context: { projectRoot: '/tmp/ws', files: [], language: 'typescript' },
+    availTools: [],
+    ...(feedback && { feedback }),
+  });
+  try {
+    const harnessExtras = { router: { routes: { retry: { model: 'retry-model' } } } };
+    const model = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, makeAdapter, provider });
+    assert.deepEqual(created[0].provider, provider);
+
+    await model.complete(request());
+    await model.complete(request());
+    await model.complete(request('fix it'));
+    assert.equal(bodies.length, 3);
+    for (const body of bodies) {
+      assert.deepEqual(body.provider, { order: ['DeepInfra'], allow_fallbacks: false });
+    }
+
+    // Counts from the default adapter and the route adapter land in one report.usage.
+    const report = {};
+    attachUsageAndRouting(report, model);
+    assert.deepEqual(report.usage.providersUsed, { DeepInfra: 2, Fireworks: 1 });
+
+    // Budget wrapper forwards the effective routing; plain adapters expose it too.
+    const capped = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null, provider, maxCostUsd: 1 });
+    assert.deepEqual(capped.getProviderConfig(), provider);
+
+    // Without a provider (--provider none), nothing is sent and route configs get no extra key.
+    bodies.length = 0;
+    created.length = 0;
+    const unpinned = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, makeAdapter, provider: null });
+    await unpinned.complete(request());
+    await unpinned.complete(request('fix it'));
+    assert.ok(bodies.every((body) => !('provider' in body)));
+    assert.ok(created.every((cfg) => !('provider' in cfg)));
+  } finally {
+    for (const [k, v] of Object.entries(previous)) {
+      if (k === 'fetch') globalThis.fetch = v;
+      else if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test('createModel() applies the same sampling to the default adapter and every route adapter', async () => {
   const created = [];
   const makeAdapter = (cfg) => {
