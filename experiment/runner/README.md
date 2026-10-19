@@ -240,7 +240,10 @@ salvaguardas.
    Es una verificación de **contenido**, no de ruta: una carpeta propia de
    una app generada que resulte llamarse `acceptance/` nunca se marca, solo
    una copia real de un archivo del banco se marca, sin importar dónde
-   termine en el espacio de trabajo.
+   termine en el espacio de trabajo. Las salidas de corrida que `run-all.mjs`
+   y Playwright escriben dentro del banco (`report.json`, `test-results/`,
+   `playwright-report/`) no se comparan: son resultados, y `report.json` se
+   copia tal cual a `batteries-report.json`.
 2. Escanea los bytes crudos de cada archivo rastreado (de modo que un archivo
    binario se compara honestamente en lugar de omitirse en silencio) en
    busca del valor exacto de la clave de API del modelo usada por la

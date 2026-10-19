@@ -917,6 +917,32 @@ test("findAcceptancePathInWorkspace() does not flag a generated app's own accept
   }
 });
 
+test("findAcceptancePathInWorkspace() ignores the bench's own run outputs (report.json, test-results/, playwright-report/)", async () => {
+  const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-'));
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-acceptance-outputs-'));
+  try {
+    // run-all.mjs writes its report into the bench dir; the runner writes the
+    // same bytes to <ws>/batteries-report.json, which must not count as a bench copy.
+    const report = '{"batteries":[]}\n';
+    await fs.writeFile(path.join(benchDir, 'battery.mjs'), '// hidden battery assertion logic\n');
+    await fs.writeFile(path.join(benchDir, 'report.json'), report);
+    await fs.mkdir(path.join(benchDir, 'test-results', 'case'), { recursive: true });
+    await fs.writeFile(path.join(benchDir, 'test-results', 'case', 'error-context.md'), 'page snapshot\n');
+    await fs.mkdir(path.join(benchDir, 'playwright-report'), { recursive: true });
+    await fs.writeFile(path.join(benchDir, 'playwright-report', 'index.html'), '<html></html>\n');
+
+    await fs.writeFile(path.join(ws, 'batteries-report.json'), report);
+    await fs.writeFile(path.join(ws, 'notes.md'), 'page snapshot\n');
+    await fs.writeFile(path.join(ws, 'index.html'), '<html></html>\n');
+    await initWorkspaceRepo(ws, 'test: seed');
+
+    assert.equal(await findAcceptancePathInWorkspace(ws, benchDir), null);
+  } finally {
+    await fs.rm(benchDir, { recursive: true, force: true });
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
 test('findAcceptancePathInWorkspace() flags a byte-identical copy of a bench file, regardless of its path in the workspace', async () => {
   const benchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-bench-'));
   const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-acceptance-copy-'));

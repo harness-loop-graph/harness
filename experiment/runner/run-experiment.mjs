@@ -408,10 +408,17 @@ async function listTrackedFiles(ws) {
 // acceptance bench), skipping `.git`/`node_modules`. Returns a
 // Map<sha256Hex, relPath[]>; a missing `benchDir` (e.g. a checkout without
 // the gitignored bench) hashes to an empty map rather than throwing.
+// Run outputs written into the bench dir by run-all.mjs / Playwright. They are
+// results, not the hidden bench: the runner copies report.json verbatim to
+// <ws>/batteries-report.json, so hashing it would refuse every battery run.
+const BENCH_OUTPUT_DIRS = ['test-results', 'playwright-report'];
+const BENCH_OUTPUT_FILES = new Set(['report.json']);
+
 async function hashBenchFiles(benchDir) {
   const hashes = new Map();
-  const files = await walkFiles(benchDir, new Set(['.git', 'node_modules']));
+  const files = await walkFiles(benchDir, new Set(['.git', 'node_modules', ...BENCH_OUTPUT_DIRS]));
   for (const { rel, full } of files) {
+    if (BENCH_OUTPUT_FILES.has(rel)) continue;
     const content = await fs.readFile(full);
     const digest = createHash('sha256').update(content).digest('hex');
     const existing = hashes.get(digest);
