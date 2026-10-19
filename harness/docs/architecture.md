@@ -72,7 +72,9 @@ tres herramientas incorporadas y devuelve su `ToolSpec[]`:
   espacio de trabajo, creando los directorios padre.
 - `read_file` — lee un archivo UTF-8, truncado a 256 KiB (`MAX_READ_BYTES`).
 - `run_command` — delega al `ExecutionManager` con `cwd` fijado a la raíz del
-  espacio de trabajo.
+  espacio de trabajo. Cada llamada es un shell nuevo, así que un `cd` no
+  persiste entre llamadas; la descripción de la herramienta se lo dice al
+  modelo (sin eso, un `cd` suelto seguido de `mkdir` creaba carpetas en la raíz).
 
 ### 4. Execution Manager — `LocalExecutionManager`
 
