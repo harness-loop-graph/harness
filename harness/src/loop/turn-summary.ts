@@ -38,7 +38,7 @@ export function summarizeTurn(run: TurnActivity): string | undefined {
       continue;
     }
 
-    if (response.tool === 'write_file' && toolResult.success) {
+    if ((response.tool === 'write_file' || response.tool === 'search_replace') && toolResult.success) {
       const target = response.args.path;
       if (typeof target === 'string' && !files.includes(target)) files.push(target);
     } else if (response.tool === 'run_command') {

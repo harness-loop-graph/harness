@@ -74,7 +74,7 @@ export interface BuiltinToolDeps {
   workspaceRoot: string;
 }
 
-/** Registers write_file, read_file and run_command; returns their specs. */
+/** Registers write_file, read_file, search_replace and run_command; returns their specs. */
 export function registerBuiltinTools(manager: RegistryToolManager, deps: BuiltinToolDeps): ToolSpec[] {
   const root = path.resolve(deps.workspaceRoot);
 
@@ -117,6 +117,46 @@ export function registerBuiltinTools(manager: RegistryToolManager, deps: Builtin
     return content.length > MAX_READ_BYTES ? content.slice(0, MAX_READ_BYTES) : content;
   });
 
+  const searchReplaceSpec: ToolSpec = {
+    name: 'search_replace',
+    description:
+      'Edit an existing file by replacing one exact piece of text with another. Prefer this over write_file ' +
+      'when changing part of an existing file. `search` must match exactly once (whitespace included): if it ' +
+      'is not found or matches several times the call fails, so include enough surrounding context to make it ' +
+      'unique. `replace` may be empty to delete the text.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative path inside the workspace' },
+        search: { type: 'string', description: 'Exact, non-empty text to find; must occur exactly once' },
+        replace: { type: 'string', description: 'Text to put in its place (may be empty)' },
+      },
+      required: ['path', 'search', 'replace'],
+    },
+  };
+  manager.register(searchReplaceSpec, async (args) => {
+    const rel = requireString(args.path, 'path');
+    const search = requireString(args.search, 'search');
+    if (typeof args.replace !== 'string') {
+      throw new Error("Missing or invalid 'replace' argument");
+    }
+    const replace = args.replace;
+    const target = path.resolve(root, rel);
+    const content = await fs.readFile(target, 'utf8');
+    const first = content.indexOf(search);
+    if (first === -1) {
+      throw new Error(`Text to replace was not found in '${rel}'. Read the file again and copy the text exactly.`);
+    }
+    const occurrences = content.split(search).length - 1;
+    if (occurrences > 1) {
+      throw new Error(
+        `Text to replace matches ${occurrences} occurrences in '${rel}'; include more surrounding context so it is unique.`,
+      );
+    }
+    await fs.writeFile(target, content.slice(0, first) + replace + content.slice(first + search.length), 'utf8');
+    return { path: rel, replacements: 1 };
+  });
+
   const runSpec: ToolSpec = {
     name: 'run_command',
     description:
@@ -136,7 +176,7 @@ export function registerBuiltinTools(manager: RegistryToolManager, deps: Builtin
     return deps.execution.run({ command, cwd: root });
   });
 
-  return [writeSpec, readSpec, runSpec];
+  return [writeSpec, readSpec, searchReplaceSpec, runSpec];
 }
 
 function requireString(value: unknown, field: string): string {

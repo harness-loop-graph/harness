@@ -82,6 +82,19 @@ describe('summarizeTurn', () => {
     expect(summary).not.toContain('failed-write.ts');
   });
 
+  it('lists files edited with search_replace and skips failed edits', () => {
+    const final: ModelResponse = { type: 'finish', content: 'done' };
+    const edit = (path: string, success: boolean) => ({
+      response: { type: 'tool_call', tool: 'search_replace', args: { path, search: 'a', replace: 'b' } } as ModelResponse,
+      toolResult: { type: 'tool_result', tool: 'search_replace', success, result: success ? { path, replacements: 1 } : 'not found' } as ToolResult,
+    });
+    const summary = summarizeTurn(
+      record([write('a.ts'), edit('b.ts', true), edit('missed.ts', false), { response: final }], final),
+    )!;
+    expect(summary).toContain('a.ts, b.ts');
+    expect(summary).not.toContain('missed.ts');
+  });
+
   it('caps files at 40 with a "+N more" marker', () => {
     const final: ModelResponse = { type: 'finish', content: 'done' };
     const writes = Array.from({ length: 45 }, (_, i) => write(`f${i}.ts`));

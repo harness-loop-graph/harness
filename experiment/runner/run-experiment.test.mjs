@@ -106,6 +106,7 @@ test('buildHarness() registers MCP tools + load_skill and extends the guardrail 
       'mcp__fixture__fail',
       'read_file',
       'run_command',
+      'search_replace',
       'write_file',
     ]);
 
@@ -125,7 +126,7 @@ test('buildHarness() without a --harness-config builds the same tool set as befo
     const { tools, guardrails } = buildHarness(workspace, {}, 5, path.join(workspace, 'audit.jsonl'), null);
 
     const names = tools.getSpecs().map((s) => s.name).sort();
-    assert.deepEqual(names, ['read_file', 'run_command', 'write_file']);
+    assert.deepEqual(names, ['read_file', 'run_command', 'search_replace', 'write_file']);
 
     const decision = await guardrails.evaluate({ kind: 'tool', tool: 'mcp__fixture__echo', args: {} });
     assert.equal(decision.decision, 'denied');

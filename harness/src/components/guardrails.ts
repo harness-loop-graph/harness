@@ -28,7 +28,7 @@ export interface Guardrails {
   getAuditLog(): GuardrailDecision[];
 }
 
-export const DEFAULT_ALLOWED_TOOLS = ['write_file', 'read_file', 'run_command'];
+export const DEFAULT_ALLOWED_TOOLS = ['write_file', 'read_file', 'search_replace', 'run_command'];
 export const DEFAULT_ALLOWED_COMMAND_PREFIXES = [
   'npm', 'node', 'npx', 'git', 'ls', 'cat', 'echo', 'mkdir', 'docker', 'pnpm', 'psql',
   'cd', 'head', 'tail', 'grep', 'sed', 'awk', 'find', 'touch', 'cp', 'mv', 'rm',
@@ -70,12 +70,13 @@ export class PolicyGuardrails implements Guardrails {
       return this.decideCommand({ kind: 'command', command, cwd: this.policy.workspaceRoot });
     }
     const relPath = typeof action.args.path === 'string' ? action.args.path : '';
-    if (action.tool === 'write_file' || action.tool === 'read_file') {
+    if (action.tool === 'write_file' || action.tool === 'read_file' || action.tool === 'search_replace') {
       const pathDecision = this.checkPath(relPath);
       if (pathDecision.decision === 'denied') return pathDecision;
     }
-    if (action.tool === 'write_file') {
-      const content = typeof action.args.content === 'string' ? action.args.content : '';
+    if (action.tool === 'write_file' || action.tool === 'search_replace') {
+      const field = action.tool === 'write_file' ? 'content' : 'replace';
+      const content = typeof action.args[field] === 'string' ? (action.args[field] as string) : '';
       const bytes = Buffer.byteLength(content, 'utf8');
       if (bytes > this.policy.maxFileBytes) {
         return {
