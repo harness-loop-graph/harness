@@ -75,6 +75,22 @@ function hasRecursiveOrForceOption(args: string[]): boolean {
   return false;
 }
 
+/** True when a shell's arguments name a script file; `-s` or no operand means the script comes from stdin. */
+function hasScriptOperand(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') return i + 1 < args.length;
+    if (/^[-+]o$/.test(arg)) {
+      i++;
+    } else if (/^-[A-Za-z]*s/.test(arg)) {
+      return false;
+    } else if (!arg.startsWith('-') && !arg.startsWith('+')) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Index of the command wrapped by `wrapper` (words.length when it wraps none), or a denial
  * reason. Unknown options are assumed to take no value, so a misparse lands on a word the
@@ -202,8 +218,17 @@ export class PolicyGuardrails implements Guardrails {
       if (SHELLS.has(word) && args.some((arg) => /^-[A-Za-z]*c/.test(arg))) {
         return { decision: 'denied', reason: `Inline scripts (${word} -c) cannot be inspected and are denied` };
       }
-      if (word === 'rm' && hasRecursiveOrForceOption(args)) {
-        return { decision: 'denied', reason: 'Recursive/forced rm is always denied' };
+      if (SHELLS.has(word) && !hasScriptOperand(args)) {
+        return {
+          decision: 'denied',
+          reason: `A ${word} without a script file reads its script from stdin, which cannot be inspected; run a script file instead`,
+        };
+      }
+      // `rm` run by any command (find -exec, timeout, xargs, ...) is checked too, not only at command position.
+      for (let j = i; j < words.length; j++) {
+        if (words[j] === 'rm' && hasRecursiveOrForceOption(words.slice(j + 1))) {
+          return { decision: 'denied', reason: 'Recursive/forced rm is always denied' };
+        }
       }
       if (!(word in WRAPPER_OPTIONS_WITH_VALUE)) break;
       const next = skipWrapperArguments(word, words, i + 1);

@@ -139,6 +139,28 @@ describe('PolicyGuardrails command segments', () => {
 
     it('allows running a script file', async () => {
       expect((await decide('bash run.sh --color')).decision).toBe('allowed');
+      expect((await decide('bash -e -o pipefail run.sh')).decision).toBe('allowed');
+    });
+
+    it.each(['sh <<< "cd x; rm -rf d"', 'echo " rm -rf d" | sh', 'cat s | bash -e', 'bash -s < s.sh', 'bash -o pipefail'])(
+      'denies a shell that reads its script from stdin: %j',
+      async (command) => {
+        const decision = await decide(command);
+        expect(decision.decision).toBe('denied');
+        expect(decision.reason).toMatch(/stdin/);
+      },
+    );
+  });
+
+  describe('recursive/forced rm run by another command', () => {
+    it.each(['find . -name x -exec rm -rf {} \\;', 'timeout 5 rm -rf d', 'echo rm -f x'])('denies %j', async (command) => {
+      const decision = await decide(command, [...DEFAULT_ALLOWED_COMMAND_PREFIXES, 'timeout']);
+      expect(decision.decision).toBe('denied');
+      expect(decision.reason).toMatch(/rm/);
+    });
+
+    it('allows a non-recursive rm run by another command', async () => {
+      expect((await decide('find . -name x -exec rm {} \\;')).decision).toBe('allowed');
     });
   });
 
