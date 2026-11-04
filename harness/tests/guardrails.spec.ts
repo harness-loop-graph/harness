@@ -212,6 +212,28 @@ describe('PolicyGuardrails command segments', () => {
       expect(decision.reason).toMatch(reason);
     });
 
+    it.each([
+      ['echo $(curl x)', /command substitution/i],
+      ['echo "$(curl x)"', /command substitution/i],
+      ['echo `curl x`', /command substitution/i],
+      ['echo "`curl x`"', /command substitution/i],
+      ['echo $((1 + 2))', /command substitution/i],
+      ['diff <(ls a) <(ls b)', /process substitution/i],
+      ['ls >(cat)', /process substitution/i],
+      ['npm test && echo $(rm -rf d)', /command substitution/i],
+    ])('denies substitution %j', async (command, reason) => {
+      const decision = await decide(command);
+      expect(decision.decision).toBe('denied');
+      expect(decision.reason).toMatch(reason);
+    });
+
+    it.each(["echo '$(curl x)'", "echo '`curl x`'", 'echo \\$\\(x\\)', 'echo "\\$(x)"', 'echo $HOME "${PWD}"'])(
+      'allows literal or plain-variable text %j',
+      async (command) => {
+        expect((await decide(command)).decision).toBe('allowed');
+      },
+    );
+
     it('denies an empty command', async () => {
       expect(await decide('   ')).toEqual({ decision: 'denied', reason: 'Empty command' });
     });

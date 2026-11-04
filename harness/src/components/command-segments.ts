@@ -24,9 +24,9 @@ const REDIRECTION_OPERATOR = /&>>|&>|>>|>&|>\||<&|<>|>|</y;
  * segments without words so the caller can reject them; only a single trailing
  * `;`, `&` or newline is dropped.
  *
- * Expansions (`$(...)`, backticks, `<(`, `>(`) are not understood yet: the
- * unquoted forms hit the parenthesis rule, while backticks and `$(` inside
- * double quotes pass through as plain characters.
+ * Command substitution (`$(...)`, `$((...))`, backticks) outside single quotes
+ * and process substitution (`<(`, `>(`) are denied: they run commands hidden
+ * inside a word. Plain variables (`$HOME`, `${PWD}`) are allowed.
  */
 export function splitCommandSegments(input: string): CommandSegmentsResult {
   const segments: CommandSegment[] = [];
@@ -55,10 +55,17 @@ export function splitCommandSegments(input: string): CommandSegmentsResult {
     return null;
   };
   const fail = (reason: string): CommandSegmentsResult => ({ ok: false, reason });
+  const commandSubstitution = (at: number): boolean =>
+    input[at] === '`' || (input[at] === '$' && input[at + 1] === '(');
+  const COMMAND_SUBSTITUTION_DENIED = 'Command substitution ($(...) or backticks) cannot be inspected and is denied';
 
   let i = 0;
   while (i < input.length) {
     const ch = input[i];
+    if (commandSubstitution(i)) return fail(COMMAND_SUBSTITUTION_DENIED);
+    if ((ch === '<' || ch === '>') && input[i + 1] === '(') {
+      return fail('Process substitution (<(...) or >(...)) cannot be inspected and is denied');
+    }
     if (ch === '\\') {
       if (i + 1 >= input.length) return fail('Command ends with a trailing backslash');
       if (input[i + 1] !== '\n') {
@@ -78,6 +85,7 @@ export function splitCommandSegments(input: string): CommandSegmentsResult {
         if (i >= input.length) return fail('Command has an unbalanced double quote');
         const c = input[i];
         if (c === '"') break;
+        if (commandSubstitution(i)) return fail(COMMAND_SUBSTITUTION_DENIED);
         if (c === '\\' && i + 1 < input.length && '$`"\\\n'.includes(input[i + 1])) {
           if (input[i + 1] !== '\n') word += input[i + 1];
           i += 2;
