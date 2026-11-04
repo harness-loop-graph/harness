@@ -402,6 +402,10 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     const messages: ChatMessage[] = [];
 
     const systemParts: string[] = [];
+    for (const file of request.context.contextFiles ?? []) {
+      const note = file.truncated ? '\n\n[truncated: the file is longer than the size limit]' : '';
+      systemParts.push(`Project instructions (from ${file.path}):\n${file.content}${note}`);
+    }
     if (request.instructions) systemParts.push(request.instructions);
     if (request.availTools.length > 0) {
       const toolList = request.availTools

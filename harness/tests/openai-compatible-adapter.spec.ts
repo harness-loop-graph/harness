@@ -367,6 +367,49 @@ describe('OpenAICompatibleModelAdapter', () => {
     expect(body.messages[3].tool_call_id).toBe('call_write_file');
   });
 
+  it('puts project instructions first in the system message, before request.instructions', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }],
+      }),
+    );
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const req = request();
+    req.context.contextFiles = [{ path: 'AGENTS.md', content: 'Use pnpm.', truncated: false }];
+
+    await adapter.complete(req);
+
+    const init = (fetchImpl.mock.calls[0] as unknown[])[1] as RequestInit;
+    const system: string = JSON.parse(String(init.body)).messages[0].content;
+    expect(system.startsWith('Project instructions (from AGENTS.md):\nUse pnpm.')).toBe(true);
+    expect(system.indexOf('Use pnpm.')).toBeLessThan(system.indexOf('Be brief.'));
+    expect(system).not.toContain('truncated');
+  });
+
+  it('notes in the system message when the project instructions were truncated', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }],
+      }),
+    );
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const req = request();
+    req.context.contextFiles = [{ path: 'CLAUDE.md', content: 'partial', truncated: true }];
+
+    await adapter.complete(req);
+
+    const init = (fetchImpl.mock.calls[0] as unknown[])[1] as RequestInit;
+    const system: string = JSON.parse(String(init.body)).messages[0].content;
+    expect(system).toContain('Project instructions (from CLAUDE.md):');
+    expect(system).toMatch(/truncated/);
+  });
+
   it('keeps the tail of a long tool result so trailing errors reach the model', async () => {
     process.env.MODEL_API_KEY = 'test-key';
     process.env.MODEL_ID = 'test-model';
