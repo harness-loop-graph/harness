@@ -1231,6 +1231,20 @@ function truncate(s, n) {
   return s.slice(0, n) + ' …';
 }
 
+// --publish-only scans for the same secrets as a --publish run: MODEL_* and route keys may live
+// only in the root .env, and --harness-config (parsed, never connected) adds route keys and MCP
+// server env values. Nothing is required: an unset key just has no value to look for.
+async function loadPublishOnlySecrets({ envPath = DEFAULT_ENV_FILE, harnessConfigPath = null } = {}) {
+  let harnessExtras = null;
+  if (harnessConfigPath) {
+    const raw = await fs.readFile(harnessConfigPath, 'utf-8');
+    const config = parseHarnessConfig(raw, path.dirname(harnessConfigPath), harnessConfigPath);
+    harnessExtras = { router: config.router, mcpServers: config.mcpServers };
+  }
+  await exportFromEnvFile([...ENV_FILE_KEYS, ...routeApiKeyEnvNames(harnessExtras)], envPath);
+  return collectSecretValues({ apiKey: process.env.MODEL_API_KEY, harnessExtras });
+}
+
 async function mainPublishOnly(parsed) {
   try {
     await loadPublishableWorkspace(parsed.publishOnly);
@@ -1243,8 +1257,7 @@ async function mainPublishOnly(parsed) {
     process.exit(1);
   }
   const sonarToken = await loadSonarToken();
-  // No model credentials here: collectSecretValues() just has no MODEL_API_KEY to look for.
-  const secrets = collectSecretValues({ apiKey: process.env.MODEL_API_KEY, harnessExtras: null });
+  const secrets = await loadPublishOnlySecrets({ harnessConfigPath: parsed.harnessConfig });
   const report = await publishExistingWorkspace({
     wsDir: parsed.publishOnly, org: parsed.publishOrg, sonarOrg: parsed.sonarOrg, sonarToken, secrets,
   });
@@ -1575,6 +1588,7 @@ export {
   listTrackedFiles,
   findAcceptancePathInWorkspace,
   collectSecretValues,
+  loadPublishOnlySecrets,
   scanWorkspaceForSecrets,
   checkGhAuthenticated,
   publishWorkspace,

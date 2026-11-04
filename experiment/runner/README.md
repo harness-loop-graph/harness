@@ -355,10 +355,14 @@ node runner/collect-static-analysis.mjs [--runs-dir <dir>] [--force]
 #### Publicar un espacio de trabajo existente (`--publish-only`)
 
 `node run-experiment.mjs --publish-only <workspace-dir> [--publish-org <org>]
-[--sonar-org <key>]` carga `<workspace-dir>/run-report.json`, exige que el
-directorio sea un repositorio git, corre el mismo flujo de publicación y
-reescribe `run-report.json` con `repository`/`staticAnalysis` (o
-`publishError`). Termina con código distinto de cero si hay `publishError`.
+[--sonar-org <key>] [--harness-config <path>]` carga
+`<workspace-dir>/run-report.json`, exige que el directorio sea un repositorio
+git, corre el mismo flujo de publicación y reescribe `run-report.json` con
+`repository`/`staticAnalysis` (o `publishError`). Termina con código distinto
+de cero si hay `publishError`. El escaneo de secretos busca las mismas claves
+que `--publish`: `MODEL_API_KEY` (del entorno o del `.env` de la raíz) y, si
+se pasa el `--harness-config` de la corrida, las claves de las rutas del
+*router* y los valores `env` de los servidores MCP (sin conectarlos).
 No requiere `MODEL_API_KEY`/`MODEL_ID` ni `--config`. Si el reporte ya tiene
 `repository`, se rehúsa con un error de uso (no hay doble publicación).
 

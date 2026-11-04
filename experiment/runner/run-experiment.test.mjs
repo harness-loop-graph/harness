@@ -28,6 +28,7 @@ import {
   listTrackedFiles,
   findAcceptancePathInWorkspace,
   collectSecretValues,
+  loadPublishOnlySecrets,
   scanWorkspaceForSecrets,
   checkGhAuthenticated,
   publishWorkspace,
@@ -1846,6 +1847,37 @@ test('loadSonarToken() prefers the environment, falls back to .env, and never ex
   } finally {
     if (saved === undefined) delete process.env.SONAR_TOKEN;
     else process.env.SONAR_TOKEN = saved;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadPublishOnlySecrets() scans for MODEL_API_KEY and route keys that live only in .env', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-publish-only-secrets-'));
+  const names = ['MODEL_API_KEY', 'MODEL_ID', 'MODEL_BASE_URL', 'SONAR_TOKEN', 'PUBONLY_ROUTE_KEY'];
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  try {
+    for (const name of names) delete process.env[name];
+    const envFile = path.join(dir, '.env');
+    await fs.writeFile(envFile, 'MODEL_API_KEY=sk-from-dotenv-123\nPUBONLY_ROUTE_KEY=route-from-dotenv-456\n');
+    const configFile = path.join(dir, 'harness-config.json');
+    await fs.writeFile(configFile, JSON.stringify({
+      router: { routes: { longContext: { model: 'long-model', apiKeyEnv: 'PUBONLY_ROUTE_KEY' } } },
+      mcpServers: { db: { command: 'node', env: { DB_PASSWORD: 'mcp-secret-789' } } },
+    }));
+
+    const withoutConfig = await loadPublishOnlySecrets({ envPath: envFile });
+    assert.deepEqual(withoutConfig, [{ label: 'MODEL_API_KEY', value: 'sk-from-dotenv-123' }]);
+
+    const withConfig = await loadPublishOnlySecrets({ envPath: envFile, harnessConfigPath: configFile });
+    assert.deepEqual(
+      withConfig.map((s) => s.value).sort(),
+      ['mcp-secret-789', 'route-from-dotenv-456', 'sk-from-dotenv-123'],
+    );
+  } finally {
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
