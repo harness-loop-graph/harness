@@ -10,6 +10,7 @@ export * from './components/budgeted-model-adapter.js';
 export * from './components/tool-manager.js';
 export * from './components/execution-manager.js';
 export * from './components/verification-manager.js';
+export * from './components/command-segments.js';
 export * from './components/guardrails.js';
 export * from './components/mcp-tool-provider.js';
 export * from './components/skill-catalog.js';

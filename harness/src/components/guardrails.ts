@@ -1,6 +1,7 @@
 import type { GuardrailDecision } from '../contracts/core.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { splitCommandSegments, type CommandSegment } from './command-segments.js';
 
 /**
  * An action the agent wants to perform, evaluated against the policy
@@ -35,6 +36,79 @@ export const DEFAULT_ALLOWED_COMMAND_PREFIXES = [
   'chmod', 'curl', 'bash', 'sh', 'test', 'diff', 'wc', 'sort', 'uniq', 'tr', 'cut',
   'xargs', 'tee', 'env', 'printenv', 'which', 'sleep', 'true', 'false',
 ];
+
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash']);
+
+/** Commands that run another command; maps each to the short options that take a separate value. */
+const WRAPPER_OPTIONS_WITH_VALUE: Record<string, string> = {
+  env: 'uC',
+  xargs: 'adEILnPs',
+  time: 'fo',
+  nice: 'n',
+  nohup: '',
+};
+
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function skipAssignments(words: string[], from: number): number {
+  let i = from;
+  while (i < words.length && ASSIGNMENT.test(words[i])) i++;
+  return i;
+}
+
+/** First word that is actually executed: after assignments, or undefined for an assignment-only segment. */
+function commandWord(words: string[]): string | undefined {
+  return words[skipAssignments(words, 0)];
+}
+
+/** True when an option of `rm` is a recursive/force flag (short cluster or GNU long option, abbreviations included). */
+function hasRecursiveOrForceOption(args: string[]): boolean {
+  for (const arg of args) {
+    if (arg === '--') return false;
+    if (arg.startsWith('--')) {
+      const name = arg.split('=')[0];
+      if (name.length > 2 && ('--recursive'.startsWith(name) || '--force'.startsWith(name))) return true;
+    } else if (/^-[A-Za-z]+$/.test(arg) && /[rRf]/.test(arg)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Index of the command wrapped by `wrapper` (words.length when it wraps none), or a denial
+ * reason. Unknown options are assumed to take no value, so a misparse lands on a word the
+ * whitelist then rejects rather than skipping past the real command.
+ */
+function skipWrapperArguments(wrapper: string, words: string[], from: number): number | string {
+  const optionsWithValue = WRAPPER_OPTIONS_WITH_VALUE[wrapper];
+  const splitStringDenied = `'${wrapper} -S' runs a string that cannot be inspected and is denied`;
+  let i = from;
+  while (i < words.length) {
+    const word = words[i];
+    if (word === '--') return i + 1;
+    if (wrapper === 'env' && ASSIGNMENT.test(word)) {
+      i++;
+    } else if (word.startsWith('--')) {
+      const name = word.split('=')[0];
+      if (wrapper === 'env' && name.length > 2 && '--split-string'.startsWith(name)) return splitStringDenied;
+      i++;
+    } else if (word.startsWith('-') && word.length > 1) {
+      let takesValue = false;
+      for (let j = 1; j < word.length; j++) {
+        if (wrapper === 'env' && word[j] === 'S') return splitStringDenied;
+        if (optionsWithValue.includes(word[j])) {
+          takesValue = j === word.length - 1;
+          break;
+        }
+      }
+      i += takesValue ? 2 : 1;
+    } else {
+      return i;
+    }
+  }
+  return words.length;
+}
 
 /** Policy guardrails: path confinement, tool/command whitelists, size limits, audit trail. */
 export class PolicyGuardrails implements Guardrails {
@@ -95,17 +169,48 @@ export class PolicyGuardrails implements Guardrails {
     }
     const cwdDecision = this.checkPath(action.cwd, true);
     if (cwdDecision.decision === 'denied') return cwdDecision;
-    const firstToken = command.split(/\s+/)[0];
-    if (!this.policy.allowedCommandPrefixes.includes(firstToken)) {
-      return {
-        decision: 'denied',
-        reason: `Command '${firstToken}' is not in the allowed command prefix list`,
-      };
+    const parsed = splitCommandSegments(command);
+    if (!parsed.ok) return { decision: 'denied', reason: parsed.reason };
+    if (parsed.segments.length === 0) return { decision: 'denied', reason: 'Empty command' };
+    for (const segment of parsed.segments) {
+      const denial = this.checkSegment(segment);
+      if (denial) return denial;
     }
-    if (/(^|\s)rm\s+-[rf]/.test(command)) {
-      return { decision: 'denied', reason: 'Recursive/forced rm is always denied' };
+    const first = commandWord(parsed.segments[0].words);
+    return {
+      decision: 'allowed',
+      reason: first ? `Command '${first}' is allowed by policy` : 'Command line is allowed by policy',
+    };
+  }
+
+  /** Returns a denial for the first rule a segment breaks, or null when it is allowed. */
+  private checkSegment(segment: CommandSegment): GuardrailDecision | null {
+    const { words } = segment;
+    if (words.length === 0 && !segment.hasRedirection) {
+      return { decision: 'denied', reason: 'Empty command segment between shell operators' };
     }
-    return { decision: 'allowed', reason: `Command '${firstToken}' is allowed by policy` };
+    let i = skipAssignments(words, 0);
+    while (i < words.length) {
+      const word = words[i];
+      if (word === '{' || word === '}') {
+        return { decision: 'denied', reason: 'Subshells and command grouping are not allowed' };
+      }
+      if (!this.policy.allowedCommandPrefixes.includes(word)) {
+        return { decision: 'denied', reason: `Command '${word}' is not in the allowed command prefix list` };
+      }
+      const args = words.slice(i + 1);
+      if (SHELLS.has(word) && args.some((arg) => /^-[A-Za-z]*c/.test(arg))) {
+        return { decision: 'denied', reason: `Inline scripts (${word} -c) cannot be inspected and are denied` };
+      }
+      if (word === 'rm' && hasRecursiveOrForceOption(args)) {
+        return { decision: 'denied', reason: 'Recursive/forced rm is always denied' };
+      }
+      if (!(word in WRAPPER_OPTIONS_WITH_VALUE)) break;
+      const next = skipWrapperArguments(word, words, i + 1);
+      if (typeof next === 'string') return { decision: 'denied', reason: next };
+      i = next;
+    }
+    return null;
   }
 
   /** Relative paths are confined to the workspace; `..` escapes are rejected. */
