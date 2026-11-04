@@ -63,8 +63,9 @@ arista `on_failure`, no una decisión del modelo.
    espacio de trabajo, captura stdout/stderr, timeout estricto
 5. **Verification Manager** (`RecordingVerificationManager`) — evalúa resultados de
    comandos, guarda historial (en memoria + JSONL)
-6. **Guardrails** (`PolicyGuardrails`) — lista blanca de herramientas, lista blanca de prefijos de
-   comando, confinamiento de rutas, límites de tamaño, auditoría de solo-append
+6. **Guardrails** (`PolicyGuardrails`) — lista blanca de herramientas, lista blanca de comandos
+   verificada en cada tramo de un comando encadenado, confinamiento de rutas, límites de tamaño,
+   auditoría de solo-append. No es un sandbox: ver `docs/decisions.md`, ADR 6
 
 ## Harness
 

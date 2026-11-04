@@ -21,8 +21,10 @@ comparar directamente:
   chat-completions compatible con OpenAI (OpenRouter, OpenCode Go, un
   servidor autoalojado…), configurado solo mediante variables de entorno.
 - **Guardrails.** Cada llamada a herramienta se verifica contra una lista
-  blanca de herramientas y prefijos de comando, se confina al espacio de
-  trabajo de la corrida, y se escribe en un log de auditoría. Las
+  blanca de herramientas y de comandos (en cada tramo de un comando
+  encadenado), se confina al espacio de trabajo de la corrida, y se escribe en
+  un log de auditoría. No es un sandbox: los límites están en la ADR 6 de
+  `harness/docs/decisions.md`. Las
   herramientas incorporadas incluyen `search_replace` (edición por
   subcadena exacta), y un tope de llamadas idénticas consecutivas corta con
   el error `repeated_tool_call` los bucles sin progreso.

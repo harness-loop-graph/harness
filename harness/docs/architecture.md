@@ -138,6 +138,9 @@ política (`GuardrailPolicy`) es: `workspaceRoot`, `allowedTools`,
 [`decisions.md`](./decisions.md) para la justificación de diseño (lista blanca
 de herramientas, lista blanca de prefijos de comando, confinamiento de rutas,
 límites de tamaño, rastro de auditoría).
+Para `run_command`, cada tramo de la línea se verifica por separado con
+`splitCommandSegments` (`src/components/command-segments.ts`); la política de
+comandos y sus límites están en la ADR 6.
 `getAuditLog()` devuelve cada decisión tomada hasta el momento, en orden;
 cuando se construye con una ruta `auditFile`, las decisiones también se
 agregan a ese archivo como JSONL con una marca de tiempo `at`.
