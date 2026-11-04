@@ -72,6 +72,11 @@ decir, el *harness* la devolvió como respuesta final, lo que solo ocurre si
 que cualquier otro tipo que no sea `finish`: RETRY o FAIL según los turnos
 restantes.
 
+El error `repeated_tool_call` (el *harness* cortó la corrida porque el modelo
+repitió la misma llamada a herramienta `maxRepeatedToolCalls` veces seguidas)
+es un `error` más: C2 lo trata como un intento fallido y hace RETRY con feedback
+que nombra el código, mientras queden turnos.
+
 ## Feedback — `AgentLoop.buildFeedback`
 
 Se construye solo cuando la decisión es RETRY. Dos partes independientes,
@@ -100,7 +105,8 @@ herramientas y sus resultados); **no hay ninguna llamada extra al modelo**.
 devuelve `undefined` si el run no registró turnos. Las secciones, en orden:
 
 1. Cómo terminó el turno: `finish`, o `error '<code>': <message>`.
-2. Archivos escritos: rutas únicas de `write_file` exitosos, en orden, máximo
+2. Archivos escritos: rutas únicas de `write_file` y `search_replace`
+   exitosos, en orden, máximo
    40 con `(+N more)`.
 3. Los últimos 10 comandos de `run_command` con su exit code
    (`[exit 1] npm test`), cada línea truncada.
@@ -144,7 +150,7 @@ Previous turn summary (what your last attempt did, recorded by the harness):
   sin ellos no se puede saber por qué terminó mal un turno (p. ej.
   `max_tool_rounds`). El runner los conserva en `run-report.json` (`trace` de
   c2). En c3 el trace del grafo ya trae el código y el mensaje dentro de
-  `loopFailure`.
+  `loopFailure` (p. ej. `repeated_tool_call`).
 
 ## Comportamiento verificado por `tests/loop.spec.ts`
 

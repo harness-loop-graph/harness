@@ -100,7 +100,7 @@ decisión de permitir/denegar:
   `LocalExecutionManager.run` vuelve a verificar de forma independiente el
   `cwd` resuelto, de modo que el confinamiento se aplica en dos capas.
 - **Límites de tamaño** — `GuardrailPolicy.maxFileBytes` acota una sola
-  llamada a `write_file`; `read_file` y la salida de comandos están limitados
+  llamada a `write_file` (o el `replace` de una llamada a `search_replace`); `read_file` y la salida de comandos están limitados
   en bytes de forma independiente dentro de la propia capa de
   herramientas/ejecución.
 - **Rastro de auditoría de solo-append** — cada decisión se agrega a un
@@ -114,3 +114,40 @@ rastro de auditoría forma parte de la evidencia registrada de la corrida, no
 solo un canal lateral de depuración. Ver
 [`architecture.md`](./architecture.md#6-guardrails--policyguardrails) para la
 interfaz completa de `PolicyGuardrails`.
+
+## ADR 5 — Línea base fija para C1/C2/C3: archivo de contexto, `search_replace` y tope de llamadas repetidas
+
+**Contexto.** Los tres niveles del experimento (C1 *harness*, C2 *loop*, C3
+grafo) deben compararse sobre una base común. Se tomaron tres prácticas de
+*Harness Engineering: Anatomy, Architecture, and Evolution of Coding Agents*
+(arXiv 2609.00006, recomendaciones 3/5, 6 y 18) y se adoptaron como línea base
+fija, idéntica en los tres niveles, en lugar de variables del experimento.
+
+**Decisión.**
+
+- **Archivo de contexto del proyecto.** `FsContextManager`
+  (`src/components/context-manager.ts`) lee `AGENTS.md` de la raíz del espacio
+  de trabajo (con `CLAUDE.md` como alternativa; solo uno, solo archivos
+  regulares, tope `MAX_CONTEXT_FILE_BYTES` = 32 KiB con nota de truncamiento) y
+  `buildMessages` lo inyecta al inicio del *system prompt*. Los archivos de
+  ámbito de usuario (`~/`) se excluyen a propósito: harían que el resultado de
+  una corrida dependiera de la máquina anfitriona y se perdería la
+  reproducibilidad entre corridas y entre quienes ejecutan el experimento.
+- **Herramienta `search_replace`.** Reemplazo de una subcadena exacta y única
+  (`path`, `search`, `replace`) que falla si no se encuentra o es ambigua, con
+  el mismo confinamiento de rutas y límite de tamaño que `write_file`
+  (`src/components/tool-manager.ts`, `guardrails.ts`). Evita reescribir
+  archivos enteros para cambios pequeños. Las ediciones exitosas aparecen como
+  archivos escritos en el resumen del turno previo de C2.
+- **Tope de llamadas repetidas.** La N-ésima llamada consecutiva idéntica
+  (misma herramienta y argumentos, sin importar el orden de las claves;
+  `maxRepeatedToolCalls`, por defecto 3, entero >= 2 o el constructor lanza un
+  error) no se ejecuta y la corrida termina con el código `repeated_tool_call`
+  (`src/harness.ts`). C2 lo trata como intento fallido y hace RETRY con
+  feedback; C3 lo muestra en la razón de fallo del nodo.
+
+**Consecuencias.** Los tres niveles parten de las mismas capacidades, así que
+las diferencias medidas provienen del *loop* y del grafo, no de la base. La
+compactación por umbral (recomendación 7 del mismo artículo) queda diferida:
+solo se implementará si los logs de las corridas muestran desbordes de
+contexto; hasta entonces añadiría complejidad sin evidencia de necesidad.

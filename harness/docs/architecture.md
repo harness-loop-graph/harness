@@ -45,6 +45,19 @@ gruesa de `language` derivada de las extensiones de archivo (`typescript`,
 `javascript`, `python`, `go`, o `undefined`), y el string de la tarea. Es un
 escaneo determinista — no interviene ninguna llamada al modelo.
 
+Además lee un archivo de instrucciones del proyecto: `AGENTS.md` en la raíz del
+espacio de trabajo y, si no existe, `CLAUDE.md` (solo se usa el primero que se
+encuentre). Solo se aceptan archivos regulares — un enlace simbólico se ignora
+para que un enlace plantado no pueda filtrar archivos de fuera del espacio de
+trabajo — y el contenido se acota a `MAX_CONTEXT_FILE_BYTES` (32 KiB); si se
+corta, se marca como `truncated`. Queda en `Context.contextFiles` y
+`buildMessages` (`openai-compatible-adapter.ts`) lo inyecta al inicio del
+*system prompt* como `Project instructions (from AGENTS.md)`, con una nota de
+truncamiento cuando corresponde. Los archivos de ámbito de usuario (`~/`) y los
+directorios padre no se leen a propósito, para que las corridas no dependan de
+la máquina anfitriona. Un archivo ausente o ilegible se omite en lugar de hacer
+fallar el ciclo.
+
 ### 2. Model Adapter — interfaz + `OpenAICompatibleModelAdapter`
 
 `ModelAdapter` (`src/components/model-adapter.ts`) es la abstracción
@@ -66,11 +79,17 @@ Mantiene un registro de pares `ToolSpec` + `ToolHandler` (`register`). En
    convierten en un `ToolResult` fallido en lugar de propagarse.
 
 `registerBuiltinTools(manager, { execution, workspaceRoot })` registra las
-tres herramientas incorporadas y devuelve su `ToolSpec[]`:
+cuatro herramientas incorporadas y devuelve su `ToolSpec[]`:
 
 - `write_file` — escribe contenido UTF-8 en una ruta relativa a la raíz del
   espacio de trabajo, creando los directorios padre.
 - `read_file` — lee un archivo UTF-8, truncado a 256 KiB (`MAX_READ_BYTES`).
+- `search_replace` — edita un archivo existente reemplazando una subcadena
+  exacta (`path`, `search`, `replace`). `search` debe aparecer exactamente una
+  vez: si no se encuentra o es ambigua, la llamada falla con un mensaje que le
+  indica al modelo cómo corregirla. Tiene el mismo confinamiento de rutas y el
+  mismo límite de tamaño (aplicado sobre `replace`) que `write_file`, y está en
+  `DEFAULT_ALLOWED_TOOLS`.
 - `run_command` — delega al `ExecutionManager` con `cwd` fijado a la raíz del
   espacio de trabajo. Cada llamada es un shell nuevo, así que un `cd` no
   persiste entre llamadas; la descripción de la herramienta se lo dice al
@@ -129,7 +148,9 @@ agregan a ese archivo como JSONL con una marca de tiempo `at`.
 estáticas (`HarnessOptions`: `workspaceRoot`, `availTools`, `instructions`,
 `maxToolRounds` — por defecto `1`, que es el contrato de C1 de una única
 interacción sin reintento correctivo; los *loops* de C2 sobrescriben esto por
-corrida mediante `HarnessRunOptions.maxToolRounds`).
+corrida mediante `HarnessRunOptions.maxToolRounds` — y `maxRepeatedToolCalls`,
+por defecto `DEFAULT_MAX_REPEATED_TOOL_CALLS` = 3; debe ser un entero >= 2 o el
+constructor lanza un error).
 
 `run(task, runOptions)`:
 
@@ -148,6 +169,12 @@ corrida mediante `HarnessRunOptions.maxToolRounds`).
    el payload del resultado de la herramienta parece un `ExecutionResult`
    (`exitCode`/`stdout`/`stderr`, verificado por `isExecutionResult`) —
    ejecuta `verification.verify(...)` y lo adjunta al turno.
+   Antes de ejecutar, cuenta las llamadas consecutivas idénticas (misma
+   herramienta y mismos argumentos, ignorando el orden de las claves): la
+   N-ésima llamada consecutiva (`maxRepeatedToolCalls`) no se ejecuta y el
+   *harness* termina la corrida con una respuesta `error` con código
+   `repeated_tool_call`, para cortar bucles donde el modelo repite la misma
+   acción sin avanzar.
 5. Si se alcanza el límite de rondas sin una respuesta que no sea `tool_call`,
    el *harness* sintetiza una respuesta `error` con código `max_tool_rounds`.
 
@@ -162,7 +189,8 @@ corrida, no solo las adjuntadas a turnos individuales.
 Estos son los tipos que comparten cada componente y el *harness*:
 
 - **`Context`** — `projectRoot`, `files: string[]`, `language` opcional,
-  `framework`, `task`.
+  `framework`, `task`, `skills` y `contextFiles` opcionales (este último con
+  `path`, `content`, `truncated`).
 - **`ModelRequest`** — `task`, `context`, `availTools: ToolSpec[]`,
   opcionales `instructions`, `feedback` (feedback de verificación de un
   intento fallido anterior — solo reintento del *loop*), `history` (entradas

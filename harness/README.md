@@ -54,10 +54,11 @@ arista `on_failure`, no una decisión del modelo.
 
 ## Componentes (6)
 
-1. **Context Manager** (`FsContextManager`) — escaneo determinista del espacio de trabajo
+1. **Context Manager** (`FsContextManager`) — escaneo determinista del espacio de trabajo;
+   inyecta `AGENTS.md` (o `CLAUDE.md`) de la raíz del espacio de trabajo en el *system prompt*
 2. **Model Adapter** — interfaz + un adaptador concreto para un endpoint compatible con OpenAI
 3. **Tool Manager** (`RegistryToolManager`) — registro, verificación de *guardrails*, ejecución
-   de `write_file`, `read_file`, `run_command`
+   de `write_file`, `read_file`, `search_replace`, `run_command`
 4. **Execution Manager** (`LocalExecutionManager`) — lanza comandos confinados al
    espacio de trabajo, captura stdout/stderr, timeout estricto
 5. **Verification Manager** (`RecordingVerificationManager`) — evalúa resultados de
@@ -68,7 +69,9 @@ arista `on_failure`, no una decisión del modelo.
 ## Harness
 
 `src/harness.ts` compone los seis componentes y ejecuta exactamente un
-ciclo de interacción (`maxToolRounds` por defecto es 1). Cada corrida devuelve la
+ciclo de interacción (`maxToolRounds` por defecto es 1). Corta la corrida con
+el error `repeated_tool_call` si el modelo repite la misma llamada a herramienta
+`maxRepeatedToolCalls` veces seguidas (por defecto 3). Cada corrida devuelve la
 respuesta final del modelo, una traza por turno, el log de auditoría de *guardrails* y el
 historial de verificación.
 
