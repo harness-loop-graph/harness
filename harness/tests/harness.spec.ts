@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ModelRequest, ModelResponse } from '../src/index.js';
 import {
+  DEFAULT_MAX_REPEATED_TOOL_CALLS,
   Harness,
   FsContextManager,
   LocalExecutionManager,
@@ -12,7 +13,7 @@ import {
   RecordingVerificationManager,
   registerBuiltinTools,
 } from '../src/index.js';
-import type { ModelAdapter } from '../src/index.js';
+import type { HarnessOptions, ModelAdapter } from '../src/index.js';
 
 /** Scripted model: replays a fixed sequence of responses. */
 class ScriptedModelAdapter implements ModelAdapter {
@@ -41,7 +42,7 @@ describe('C1 harness end-to-end', () => {
     await fs.rm(workspace, { recursive: true, force: true });
   });
 
-  function buildHarness(model: ModelAdapter) {
+  function buildHarness(model: ModelAdapter, options: Partial<HarnessOptions> = {}) {
     const execution = new LocalExecutionManager({ workspaceRoot: workspace, timeoutMs: 10_000 });
     const guardrails = new PolicyGuardrails(
       {
@@ -64,7 +65,7 @@ describe('C1 harness end-to-end', () => {
         verification: new RecordingVerificationManager(path.join(workspace, 'verifications.jsonl')),
         guardrails,
       },
-      { workspaceRoot: workspace, availTools, instructions: 'Stay inside the workspace.' },
+      { workspaceRoot: workspace, availTools, instructions: 'Stay inside the workspace.', ...options },
     );
   }
 
@@ -175,5 +176,103 @@ describe('C1 harness end-to-end', () => {
     if (result.finalResponse.type === 'error') {
       expect(result.finalResponse.code).toBe('max_tool_rounds');
     }
+  });
+
+  describe('repeated tool call cap', () => {
+    const readA = { type: 'tool_call', tool: 'read_file', args: { path: 'a.txt' } } as const;
+    const readB = { type: 'tool_call', tool: 'read_file', args: { path: 'b.txt' } } as const;
+
+    function executedCalls(result: Awaited<ReturnType<Harness['run']>>): number {
+      return result.turns.filter((turn) => turn.toolResult !== undefined).length;
+    }
+
+    it('defaults to 3 identical consecutive calls', () => {
+      expect(DEFAULT_MAX_REPEATED_TOOL_CALLS).toBe(3);
+    });
+
+    it('stops before executing the 3rd identical consecutive call', async () => {
+      const model = new ScriptedModelAdapter([readA, readA, readA, { type: 'finish', content: 'never reached' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('loop forever', { maxToolRounds: 10 });
+
+      expect(result.finalResponse.type).toBe('error');
+      if (result.finalResponse.type === 'error') {
+        expect(result.finalResponse.code).toBe('repeated_tool_call');
+        expect(result.finalResponse.message).toContain('read_file');
+        expect(result.finalResponse.message).toContain('3 times in a row');
+        expect(result.finalResponse.message).toContain('identical arguments');
+      }
+      expect(executedCalls(result)).toBe(2);
+      expect(result.audit).toHaveLength(2);
+      // 3 model turns + the recorded error turn, same shape as max_tool_rounds
+      expect(result.turns).toHaveLength(4);
+      expect(result.turns[3].response).toEqual(result.finalResponse);
+    });
+
+    it('treats argument key order as irrelevant', async () => {
+      const model = new ScriptedModelAdapter([
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls', cwd: '.' } },
+        { type: 'tool_call', tool: 'run_command', args: { cwd: '.', command: 'ls' } },
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls', cwd: '.' } },
+      ]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('loop forever', { maxToolRounds: 10 });
+
+      expect(result.finalResponse.type === 'error' && result.finalResponse.code).toBe('repeated_tool_call');
+      expect(executedCalls(result)).toBe(2);
+    });
+
+    it('resets the counter when a different call comes in between', async () => {
+      const model = new ScriptedModelAdapter([readA, readA, readB, readA, readA, { type: 'finish', content: 'done' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('varied calls', { maxToolRounds: 10 });
+
+      expect(result.finalResponse.type).toBe('finish');
+      expect(executedCalls(result)).toBe(5);
+    });
+
+    it('does not treat the same tool with different args as a repeat', async () => {
+      const model = new ScriptedModelAdapter([readA, readB, readA, readB, { type: 'finish', content: 'done' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('alternating calls', { maxToolRounds: 10 });
+
+      expect(result.finalResponse.type).toBe('finish');
+      expect(executedCalls(result)).toBe(4);
+    });
+
+    it('honours a custom maxRepeatedToolCalls', async () => {
+      const model = new ScriptedModelAdapter([readA, readA, { type: 'finish', content: 'never reached' }]);
+      const harness = buildHarness(model, { maxRepeatedToolCalls: 2 });
+
+      const result = await harness.run('loop forever', { maxToolRounds: 10 });
+
+      expect(result.finalResponse.type === 'error' && result.finalResponse.code).toBe('repeated_tool_call');
+      if (result.finalResponse.type === 'error') {
+        expect(result.finalResponse.message).toContain('2 times in a row');
+      }
+      expect(executedCalls(result)).toBe(1);
+    });
+
+    it('lets max_tool_rounds win when the round limit is reached first', async () => {
+      const model = new ScriptedModelAdapter([readA, readA]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('limited', { maxToolRounds: 1 });
+
+      expect(result.finalResponse.type === 'error' && result.finalResponse.code).toBe('max_tool_rounds');
+    });
+
+    it.each([1, 0, -3, 2.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'throws in the constructor for an invalid maxRepeatedToolCalls (%s)',
+      (value) => {
+        expect(() => buildHarness(new ScriptedModelAdapter([]), { maxRepeatedToolCalls: value })).toThrow(
+          /maxRepeatedToolCalls/,
+        );
+      },
+    );
   });
 });

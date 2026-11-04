@@ -309,4 +309,32 @@ describe('C2 corrective loop', () => {
     expect(result.trace[0].responseCode).toBe('max_tool_rounds');
     expect(result.trace[0].responseMessage).toContain('limit of 1 tool round');
   });
+
+  it('retries with feedback after a repeated_tool_call stop', async () => {
+    const model = new TurnScriptedModelAdapter([
+      [
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+      ],
+      [{ type: 'finish', content: 'done differently' }],
+    ]);
+    const loop = buildLoop(model);
+
+    let calls = 0;
+    const originalComplete = model.complete.bind(model);
+    model.complete = async (request: ModelRequest) => {
+      calls += 1;
+      if (calls === 4) model.advanceTurn();
+      return originalComplete(request);
+    };
+
+    const result = await loop.run({ task: 'Do something', maxTurns: 2 });
+
+    expect(result.status).toBe('SUCCESS');
+    expect(result.turns).toBe(2);
+    expect(result.trace[0].responseCode).toBe('repeated_tool_call');
+    expect(result.trace[0].decision.action).toBe('RETRY');
+    expect(model.seenRequests[3].feedback).toContain("error 'repeated_tool_call'");
+  });
 });

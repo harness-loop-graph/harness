@@ -22,6 +22,9 @@ export interface HarnessComponents {
   guardrails: Guardrails;
 }
 
+/** Identical consecutive tool calls tolerated before the run is stopped. */
+export const DEFAULT_MAX_REPEATED_TOOL_CALLS = 3;
+
 export interface HarnessOptions {
   workspaceRoot: string;
   availTools: ToolSpec[];
@@ -31,6 +34,12 @@ export interface HarnessOptions {
    * C2 loops override this per run.
    */
   maxToolRounds?: number;
+  /**
+   * Doom-loop cap: the Nth consecutive identical tool call (same tool, deep-equal
+   * args) is not executed and the run ends with a `repeated_tool_call` error.
+   * Integer >= 2; defaults to DEFAULT_MAX_REPEATED_TOOL_CALLS.
+   */
+  maxRepeatedToolCalls?: number;
 }
 
 export interface HarnessRunOptions {
@@ -59,12 +68,18 @@ export interface HarnessRunResult {
  */
 export class Harness {
   private readonly maxToolRounds: number;
+  private readonly maxRepeatedToolCalls: number;
 
   constructor(
     private readonly components: HarnessComponents,
     private readonly options: HarnessOptions,
   ) {
     this.maxToolRounds = options.maxToolRounds ?? 1;
+    const maxRepeatedToolCalls = options.maxRepeatedToolCalls ?? DEFAULT_MAX_REPEATED_TOOL_CALLS;
+    if (!Number.isInteger(maxRepeatedToolCalls) || maxRepeatedToolCalls < 2) {
+      throw new Error(`maxRepeatedToolCalls must be an integer >= 2, got ${maxRepeatedToolCalls}`);
+    }
+    this.maxRepeatedToolCalls = maxRepeatedToolCalls;
   }
 
   async run(task: string, runOptions: HarnessRunOptions = {}): Promise<HarnessRunResult> {
@@ -76,6 +91,8 @@ export class Harness {
     const turns: InteractionTurn[] = [];
 
     let response: ModelResponse | undefined;
+    let lastCallKey: string | undefined;
+    let repeatedCalls = 0;
 
     for (let round = 0; round <= maxToolRounds; round++) {
       const request: ModelRequest = {
@@ -94,6 +111,20 @@ export class Harness {
       turns.push(turn);
 
       if (response.type !== 'tool_call') break;
+
+      const callKey = canonicalJson({ tool: response.tool, args: response.args });
+      repeatedCalls = callKey === lastCallKey ? repeatedCalls + 1 : 1;
+      lastCallKey = callKey;
+
+      if (repeatedCalls >= this.maxRepeatedToolCalls) {
+        response = {
+          type: 'error',
+          code: 'repeated_tool_call',
+          message: `Tool '${response.tool}' was requested ${repeatedCalls} times in a row with identical arguments`,
+        };
+        turns.push({ request: { ...request, history: [...history] }, response });
+        break;
+      }
 
       const toolResult = await tools.execute(response);
       turn.toolResult = toolResult;
@@ -137,4 +168,13 @@ export class Harness {
       'stderr' in result
     );
   }
+}
+
+/** JSON with object keys sorted recursively, so equal values serialize equally. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, val) =>
+    val !== null && typeof val === 'object' && !Array.isArray(val)
+      ? Object.fromEntries(Object.entries(val).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : val,
+  );
 }
