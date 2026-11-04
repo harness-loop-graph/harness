@@ -221,6 +221,9 @@ describe('PolicyGuardrails command segments', () => {
       ['diff <(ls a) <(ls b)', /process substitution/i],
       ['ls >(cat)', /process substitution/i],
       ['npm test && echo $(rm -rf d)', /command substitution/i],
+      ['echo "$\\\n(curl x)"', /command substitution/i],
+      ['echo $\\\n(curl x)', /command substitution/i],
+      ['diff <\\\n(ls a)', /process substitution/i],
     ])('denies substitution %j', async (command, reason) => {
       const decision = await decide(command);
       expect(decision.decision).toBe('denied');

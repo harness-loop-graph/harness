@@ -55,15 +55,21 @@ export function splitCommandSegments(input: string): CommandSegmentsResult {
     return null;
   };
   const fail = (reason: string): CommandSegmentsResult => ({ ok: false, reason });
+  // Bash removes backslash-newline before parsing, so `$\<newline>(` is still `$(`.
+  const nextAfterContinuations = (at: number): string => {
+    let j = at;
+    while (input[j] === '\\' && input[j + 1] === '\n') j += 2;
+    return input[j] ?? '';
+  };
   const commandSubstitution = (at: number): boolean =>
-    input[at] === '`' || (input[at] === '$' && input[at + 1] === '(');
+    input[at] === '`' || (input[at] === '$' && nextAfterContinuations(at + 1) === '(');
   const COMMAND_SUBSTITUTION_DENIED = 'Command substitution ($(...) or backticks) cannot be inspected and is denied';
 
   let i = 0;
   while (i < input.length) {
     const ch = input[i];
     if (commandSubstitution(i)) return fail(COMMAND_SUBSTITUTION_DENIED);
-    if ((ch === '<' || ch === '>') && input[i + 1] === '(') {
+    if ((ch === '<' || ch === '>') && nextAfterContinuations(i + 1) === '(') {
       return fail('Process substitution (<(...) or >(...)) cannot be inspected and is denied');
     }
     if (ch === '\\') {
