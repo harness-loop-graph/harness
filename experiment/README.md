@@ -19,6 +19,12 @@ trabajo.
   endpoints (EP-01..EP-20), pantallas (SCR-01..SCR-08), semilla determinista,
   stack fijo (PostgreSQL 16 / NestJS / React / Vitest / Playwright / Docker
   Compose).
+- `AGENTS.md` — reglas de trabajo fijas (estructura de carpetas, orden de
+  construcción, qué probar, cuándo la tarea está terminada). El *runner* lo
+  copia junto al `SPEC.md` en cada espacio de trabajo y registra su hash en
+  `task.agentsSha256`; el *harness* lo inyecta al inicio del *system prompt*.
+  Es igual para C1/C2/C3; cambiarlo invalida la comparación con corridas
+  previas.
 - `acceptance/` — baterías ocultas (ignoradas por git; nunca forman parte de
   lo que ve el generador).
 - `skills/` + `harness-config.json` — *skills* entregadas al *harness* en
