@@ -90,7 +90,7 @@ export class AgentLoop {
           : {}),
         verification,
         decision,
-        ...(decision.action === 'RETRY' ? { feedback } : {}),
+        ...(feedback !== undefined ? { feedback } : {}),
       });
 
       if (decision.action === 'FINISH') break;

@@ -269,6 +269,28 @@ describe('C2 corrective loop', () => {
     expect(feedback.slice(summaryAt)).toContain('[exit 0] ls');
   });
 
+  it('records in each trace entry the feedback that turn received, including on the final turn', async () => {
+    const model = new TurnScriptedModelAdapter([
+      [{ type: 'finish', content: 'first' }],
+      [{ type: 'finish', content: 'second' }],
+    ]);
+    const loop = buildLoop(model);
+    let calls = 0;
+    const originalComplete = model.complete.bind(model);
+    model.complete = async (request: ModelRequest) => {
+      calls += 1;
+      if (calls === 2) model.advanceTurn();
+      return originalComplete(request);
+    };
+
+    const result = await loop.run({ task: 't', maxTurns: 2, verification: { command: 'test -f never.txt' } });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.trace[0].feedback).toBeUndefined();
+    expect(result.trace[1].feedback).toBe(model.seenRequests[1].feedback);
+    expect(result.trace[1].feedback).toContain('Verification failed');
+  });
+
   it('records responseCode and a truncated responseMessage for errored turns only', async () => {
     const longMessage = 'e'.repeat(1000);
     const model = new TurnScriptedModelAdapter([

@@ -52,6 +52,6 @@ export interface LoopTurnTrace {
   responseMessage?: string;
   verification?: VerificationResult;
   decision: LoopDecision;
-  /** Present when the decision was RETRY. */
+  /** Feedback this turn received from the previous one; absent on the first turn. */
   feedback?: string;
 }

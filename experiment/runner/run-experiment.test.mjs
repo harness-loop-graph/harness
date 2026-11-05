@@ -23,6 +23,7 @@ import {
   attachUsageAndRouting,
   applyBudgetToReport,
   compactTraceC2,
+  MAX_TRACE_TEXT_CHARS,
   compactTraceC3,
   slugifyModelId,
   timestampForWorkspace,
@@ -437,6 +438,37 @@ test('compactTraceC2() keeps responseCode/responseMessage for errored turns and 
   assert.equal(compact[0].responseMessage, 'ran out');
   assert.equal('responseCode' in compact[1], false);
   assert.equal('responseMessage' in compact[1], false);
+});
+
+test('compactTraceC2() keeps the verification output tail and the feedback each turn received, capped', () => {
+  const loopResult = {
+    trace: [
+      {
+        turn: 1,
+        phases: ['generating', 'observing', 'verifying', 'deciding'],
+        decision: { action: 'RETRY', reason: 'x' },
+        response: { type: 'finish', content: 'done' },
+        verification: { passed: false, details: 'Command failed with exit code 1. Output tail: ' + 'a'.repeat(5000) + 'target stage "development" could not be found' },
+      },
+      {
+        turn: 2,
+        phases: ['generating', 'observing', 'verifying', 'deciding'],
+        decision: { action: 'FAIL', reason: 'y' },
+        response: { type: 'finish', content: 'done' },
+        verification: { passed: true, details: 'Command succeeded. Output tail: ok' },
+        feedback: 'Verification failed: ' + 'f'.repeat(9000),
+      },
+    ],
+  };
+
+  const compact = compactTraceC2(loopResult);
+
+  assert.ok(compact[0].verificationDetails.endsWith('target stage "development" could not be found'));
+  assert.ok(compact[0].verificationDetails.length <= MAX_TRACE_TEXT_CHARS + 1);
+  assert.equal('feedbackReceived' in compact[0], false);
+  assert.ok(compact[1].feedbackReceived.startsWith('Verification failed: '));
+  assert.ok(compact[1].feedbackReceived.length <= MAX_TRACE_TEXT_CHARS + 1);
+  assert.equal(compact[1].verificationDetails, 'Command succeeded. Output tail: ok');
 });
 
 test('compactTraceC3() copies loopFailure into a failed trace entry and omits it from a successful one', () => {

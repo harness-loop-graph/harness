@@ -496,7 +496,11 @@ false` y un tope definido se agrega `budget.warning`.
   respuesta `finish`. Ausente en C3 y en cualquier corrida que no haya
   terminado con `finish`.
 - `trace` — resúmenes compactos por turno/por paso; sin el contenido
-  completo del modelo. Para c3, un paso cuyo `loopStatus` es `"FAILED"`
+  completo del modelo. Para c2, cada turno lleva además `verificationDetails`
+  (el final de la salida del comando de verificación) y, desde el segundo
+  turno, `feedbackReceived` (el feedback que ese turno recibió: el error de
+  verificación más el resumen del turno anterior); ambos se recortan a 2000
+  caracteres, para ver en una corrida fallida qué se le dijo al modelo. Para c3, un paso cuyo `loopStatus` es `"FAILED"`
   también lleva `loopFailure`: por qué falló el *loop* de ese nodo (su
   propio resumen de fallo, o el motivo de la decisión terminal; con el
   código/mensaje de error del modelo agregado, truncado, cuando la

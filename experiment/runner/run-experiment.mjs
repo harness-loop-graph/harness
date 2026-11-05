@@ -1287,6 +1287,18 @@ function compactTraceC1(result) {
   }));
 }
 
+// Long text kept per C2 turn in run-report.json, so a failed run shows what the model was told.
+const MAX_TRACE_TEXT_CHARS = 2000;
+
+function clipHead(text) {
+  return text.length <= MAX_TRACE_TEXT_CHARS ? text : text.slice(0, MAX_TRACE_TEXT_CHARS) + '…';
+}
+
+// Verification output ends with the error, so keep its tail.
+function clipTail(text) {
+  return text.length <= MAX_TRACE_TEXT_CHARS ? text : '…' + text.slice(-MAX_TRACE_TEXT_CHARS);
+}
+
 function compactTraceC2(loopResult) {
   return loopResult.trace.map((t) => ({
     turn: t.turn,
@@ -1296,6 +1308,8 @@ function compactTraceC2(loopResult) {
     ...(t.responseCode !== undefined ? { responseCode: t.responseCode } : {}),
     ...(t.responseMessage !== undefined ? { responseMessage: t.responseMessage } : {}),
     verificationPassed: t.verification?.passed,
+    ...(typeof t.verification?.details === 'string' ? { verificationDetails: clipTail(t.verification.details) } : {}),
+    ...(typeof t.feedback === 'string' ? { feedbackReceived: clipHead(t.feedback) } : {}),
   }));
 }
 
@@ -1669,6 +1683,7 @@ export {
   attachUsageAndRouting,
   applyBudgetToReport,
   compactTraceC2,
+  MAX_TRACE_TEXT_CHARS,
   compactTraceC3,
   slugifyModelId,
   timestampForWorkspace,

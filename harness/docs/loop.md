@@ -144,8 +144,8 @@ Previous turn summary (what your last attempt did, recorded by the harness):
 - **`LoopResult`** — `{ status: 'SUCCESS' | 'FAILED', turns, finalResponse?,
   decision, verifications, trace, failure? }`.
 - **`LoopTurnTrace`** — `{ turn, phases, response, responseCode?,
-  responseMessage?, verification?, decision, feedback? }` (feedback presente
-  solo en turnos RETRY). `responseCode` y `responseMessage` (truncado a ~300
+  responseMessage?, verification?, decision, feedback? }` (`feedback` es el
+  que recibió ese turno del anterior; ausente en el primer turno). `responseCode` y `responseMessage` (truncado a ~300
   caracteres) aparecen solo cuando la respuesta final del turno fue un `error`;
   sin ellos no se puede saber por qué terminó mal un turno (p. ej.
   `max_tool_rounds`). El runner los conserva en `run-report.json` (`trace` de
