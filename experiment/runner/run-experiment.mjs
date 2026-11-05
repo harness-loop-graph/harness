@@ -151,6 +151,9 @@ function parseArgs(argv) {
     // Per-request model timeout (whole response body, incl. slow non-streamed
     // generations). The adapter's own 120s default is too short for long contexts.
     modelTimeoutSeconds: 600,
+    // Retries per model call for 429/5xx/network errors. The adapter's backoff doubles from 1s up to
+    // 30s (or honors Retry-After), so 8 retries ride out a ~2-3 minute upstream overload.
+    modelRetries: 8,
   };
   let providerOrder = parsed.provider.order;
   let allowProviderFallbacks = false;
@@ -182,6 +185,7 @@ function parseArgs(argv) {
     else if (a === '--provider') providerOrder = parseProviderFlag(args[++i]);
     else if (a === '--allow-provider-fallbacks') allowProviderFallbacks = true;
     else if (a === '--model-timeout') parsed.modelTimeoutSeconds = parsePositiveIntFlag('--model-timeout', args[++i]);
+    else if (a === '--model-retries') parsed.modelRetries = parsePositiveIntFlag('--model-retries', args[++i]);
     else if (a === '--max-cost') {
       parsed.maxCostUsd = parseNumberFlag('--max-cost', args[++i], {
         describe: 'a positive number of USD',
@@ -1002,16 +1006,16 @@ async function loadHarnessExtras(configPath) {
  * unaffected. With `maxCostUsd`, the result is wrapped in a
  * BudgetedModelAdapter (cost ceiling; getUsage()/getRouting() still forwarded).
  */
-async function createModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling, provider, timeoutMs, maxCostUsd = null }) {
-  const model = await createBaseModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling, provider, timeoutMs });
+async function createModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling, provider, timeoutMs, maxRetries, maxCostUsd = null }) {
+  const model = await createBaseModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling, provider, timeoutMs, maxRetries });
   // Same wrapper for c1/c2/c3 and for plain or routed models; without a cap
   // the model is returned unchanged.
   return maxCostUsd == null ? model : new BudgetedModelAdapter(model, { maxCostUsd });
 }
 
-async function createBaseModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling, provider, timeoutMs }) {
-  // Unset timeoutMs is left out so the adapter keeps its own default.
-  const timeoutCfg = timeoutMs != null ? { timeoutMs } : {};
+async function createBaseModel({ apiKey, modelId, harnessExtras, makeAdapter, sampling, provider, timeoutMs, maxRetries }) {
+  // Unset timeoutMs/maxRetries are left out so the adapter keeps its own defaults.
+  const timeoutCfg = { ...(timeoutMs != null ? { timeoutMs } : {}), ...(maxRetries != null ? { maxRetries } : {}) };
   const defaultAdapter = new OpenAICompatibleModelAdapter({ apiKey, model: modelId, ...samplingToAdapterConfig(sampling), ...providerToAdapterConfig(provider), ...timeoutCfg });
   if (!harnessExtras?.router) return defaultAdapter;
   // Route adapters get the same sampling and provider routing as the default one: equal conditions across c1/c2/c3 is the point.
@@ -1402,6 +1406,7 @@ async function main() {
       sampling: parsed.sampling,
       provider: parsed.provider,
       modelTimeoutMs,
+      modelRetries: parsed.modelRetries,
       task: taskIdentity,
       budget: { maxCostUsd: parsed.maxCostUsd, exhausted: false, costReported: null },
       ...gitMetadata,
@@ -1434,6 +1439,7 @@ async function main() {
     sampling: parsed.sampling,
     provider: parsed.provider,
     modelTimeoutMs,
+    modelRetries: parsed.modelRetries,
     task: taskIdentity,
     ...gitMetadata,
     startedAt,
@@ -1467,7 +1473,7 @@ async function main() {
   let runModel = null;
   if (!configFailure) try {
     if (parsed.config === 'c1') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxCostUsd: parsed.maxCostUsd });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, maxCostUsd: parsed.maxCostUsd });
       runModel = model;
       const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
@@ -1481,7 +1487,7 @@ async function main() {
         report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
       }
     } else if (parsed.config === 'c2') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxCostUsd: parsed.maxCostUsd });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, maxCostUsd: parsed.maxCostUsd });
       runModel = model;
       const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
@@ -1501,7 +1507,7 @@ async function main() {
         report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
       }
     } else if (parsed.config === 'c3') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxCostUsd: parsed.maxCostUsd });
+      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, maxCostUsd: parsed.maxCostUsd });
       runModel = model;
       const factory = (node) => {
         if (node.id === 'reviewer') clearStaleReviewVerdict(ws);

@@ -1493,6 +1493,56 @@ test('--dry-run plan records modelTimeoutMs (default 600000, overridable with --
   assert.equal(JSON.parse(custom.stdout).modelTimeoutMs, 45_000);
 });
 
+test('parseArgs() --model-retries defaults to 8 and rejects non-positive values', async () => {
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).modelRetries, 8);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--model-retries', '12']).modelRetries, 12);
+  const { spawnSync } = await import('node:child_process');
+  for (const value of [['0'], ['-1'], ['2.5'], ['x'], []]) {
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c1', '--dry-run', '--model-retries', ...value],
+      { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+    );
+    assert.notEqual(res.status, 0, `--model-retries ${value} should be rejected`);
+    assert.match(res.stderr, /Usage: --model-retries/);
+  }
+});
+
+test('--dry-run plan records modelRetries', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const res = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c2', '--dry-run', '--model-retries', '5'],
+    { encoding: 'utf8', env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' } },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).modelRetries, 5);
+});
+
+test('createModel() passes maxRetries to the default adapter and every route adapter', async () => {
+  const created = [];
+  const makeAdapter = (cfg) => {
+    created.push(cfg);
+    return { async complete() { return { type: 'finish', content: 'stub' }; } };
+  };
+  const harnessExtras = { router: { routes: { retry: { model: 'retry-model', apiKeyEnv: 'RETRY_ROUTE_KEY' } } } };
+  const previousBaseUrl = process.env.MODEL_BASE_URL;
+  process.env.RETRY_ROUTE_KEY = 'route-key';
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  try {
+    await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, makeAdapter, maxRetries: 8 });
+    assert.equal(created[0].maxRetries, 8);
+    const plain = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null, maxRetries: 8 });
+    assert.equal(plain.maxRetries, 8);
+    const unset = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null });
+    assert.equal(unset.maxRetries, 3);
+  } finally {
+    delete process.env.RETRY_ROUTE_KEY;
+    if (previousBaseUrl === undefined) delete process.env.MODEL_BASE_URL;
+    else process.env.MODEL_BASE_URL = previousBaseUrl;
+  }
+});
+
 test('createModel() passes timeoutMs to the default adapter and every route adapter', async () => {
   const created = [];
   const makeAdapter = (cfg) => {
