@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { McpToolProvider, OpenAICompatibleModelAdapter, RoutingModelAdapter, BudgetedModelAdapter } from '../../harness/dist/index.js';
 import {
   HARNESS_INSTRUCTIONS,
+  SONAR_EXCLUSIONS,
   parseBatteryReport,
   parseArgs,
   buildNodes,
@@ -731,6 +732,31 @@ test('createWorkspace() names the dir <slug>-<config>-<timestamp>, and --dry-run
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('createWorkspace() copies the AGENTS.md next to the spec, and only the spec when there is none', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runsdir-agents-'));
+  try {
+    const withAgents = path.join(dir, 'with');
+    await fs.mkdir(withAgents);
+    await fs.writeFile(path.join(withAgents, 'SPEC.md'), 'spec');
+    await fs.writeFile(path.join(withAgents, 'AGENTS.md'), 'rules');
+    const ws1 = await createWorkspace(path.join(dir, 'runs1'), 'c1', 'm', path.join(withAgents, 'SPEC.md'));
+    assert.equal(await fs.readFile(path.join(ws1, 'AGENTS.md'), 'utf8'), 'rules');
+    assert.equal(await fs.readFile(path.join(ws1, 'SPEC.md'), 'utf8'), 'spec');
+
+    const without = path.join(dir, 'without');
+    await fs.mkdir(without);
+    await fs.writeFile(path.join(without, 'SPEC.md'), 'spec');
+    const ws2 = await createWorkspace(path.join(dir, 'runs2'), 'c1', 'm', path.join(without, 'SPEC.md'));
+    assert.deepEqual(await fs.readdir(ws2), ['SPEC.md']);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the AGENTS.md copied as run input is excluded from static analysis like SPEC.md', () => {
+  assert.match(SONAR_EXCLUSIONS, /(^|,)AGENTS\.md(,|$)/);
 });
 
 test('c1 --dry-run creates nothing on disk (env-independent: uses its own --runs-dir, never the real default)', async () => {
@@ -1745,6 +1771,13 @@ test('parseBatteryReport reads the pretty-printed run-all.mjs report', () => {
 // --- task identity in run-report.json / --dry-run plan ---
 
 const sha256Hex = async (text) => (await import('node:crypto')).createHash('sha256').update(text).digest('hex');
+const agentsSha256OrNull = async () => {
+  try {
+    return await sha256Hex(await fs.readFile(path.join(__dirname, '..', 'AGENTS.md')));
+  } catch {
+    return null;
+  }
+};
 
 test('--dry-run plan records task identity: spec by default (sha256 of the default task text), repo-relative SPEC path', async () => {
   const { spawnSync } = await import('node:child_process');
@@ -1762,6 +1795,7 @@ test('--dry-run plan records task identity: spec by default (sha256 of the defau
     path: 'experiment/SPEC.md',
     sha256: await sha256Hex(DEFAULT_TASK),
     specSha256: await sha256Hex(await fs.readFile(path.join(__dirname, '..', 'SPEC.md'))),
+    agentsSha256: await agentsSha256OrNull(),
   });
 });
 
@@ -1788,6 +1822,7 @@ test('--dry-run plan records task identity for --task-file: source task-file, sh
       path: taskFile,
       sha256: await sha256Hex(text),
       specSha256: await sha256Hex(await fs.readFile(path.join(__dirname, '..', 'SPEC.md'))),
+      agentsSha256: await agentsSha256OrNull(),
     });
 
     // Inside the repo: recorded relative to the repo root.
@@ -1914,7 +1949,7 @@ test('publishWorkspace() injects the runner-owned workflow and sonar-project.pro
     assert.match(props, /^sonar\.sources=\.$/m);
     assert.match(
       props,
-      /^sonar\.exclusions=\*\*\/node_modules\/\*\*,\*\*\/dist\/\*\*,\*\*\/build\/\*\*,\*\*\/coverage\/\*\*,run-report\.json,batteries-report\.json,audit\*\.jsonl,SPEC\.md,\.github\/\*\*$/m,
+      /^sonar\.exclusions=\*\*\/node_modules\/\*\*,\*\*\/dist\/\*\*,\*\*\/build\/\*\*,\*\*\/coverage\/\*\*,run-report\.json,batteries-report\.json,audit\*\.jsonl,SPEC\.md,AGENTS\.md,\.github\/\*\*$/m,
     );
 
     const { createHash } = await import('node:crypto');
@@ -2291,9 +2326,9 @@ test('runBatteries() treats run-all exiting 1 with a valid report as failed batt
   }
 });
 
-test('default loop turn budget is 20 for c2 and 8 per node for c3; --max-turns overrides both', () => {
+test('default loop turn budget is 40 for c2 and 8 per node for c3; --max-turns overrides both', () => {
   const parse = (...a) => parseArgs(['node', 'run-experiment.mjs', ...a]);
-  assert.equal(parse('--config', 'c2').maxTurns, 20);
+  assert.equal(parse('--config', 'c2').maxTurns, 40);
   assert.equal(parse('--config', 'c3').maxTurns, 8);
   assert.equal(parse('--config', 'c2', '--max-turns', '5').maxTurns, 5);
   assert.equal(parse('--config', 'c3', '--max-turns', '5').maxTurns, 5);

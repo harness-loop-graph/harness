@@ -49,7 +49,22 @@ function describeTask({ source, filePath, text, specPath }) {
     // SPEC.md is copied into every workspace, so its bytes are part of the
     // input even when the task sentence is unchanged.
     specSha256: createHash('sha256').update(readFileSync(specPath)).digest('hex'),
+    // The working rules copied next to SPEC.md (see createWorkspace()); null when there are none.
+    agentsSha256: agentsFileSha256(specPath),
   };
+}
+
+// AGENTS.md next to the spec holds the fixed working rules every run receives.
+function agentsFilePath(specPath) {
+  return path.join(path.dirname(specPath), 'AGENTS.md');
+}
+
+function agentsFileSha256(specPath) {
+  try {
+    return createHash('sha256').update(readFileSync(agentsFilePath(specPath))).digest('hex');
+  } catch {
+    return null;
+  }
 }
 
 const CHAIN = ['architect', 'data', 'backend', 'frontend', 'reviewer'];
@@ -207,7 +222,7 @@ function parseArgs(argv) {
   }
   // c2's single loop gets more turns than each of c3's five node loops.
   if (parsed.maxTurns == null) {
-    parsed.maxTurns = parsed.config === 'c2' ? 20 : 8;
+    parsed.maxTurns = parsed.config === 'c2' ? 40 : 8;
   }
   if (parsed.toolRounds == null) {
     parsed.toolRounds = parsed.config === 'c1' ? 200 : 30;
@@ -286,6 +301,11 @@ async function createWorkspace(runsDir, config, modelId, specPath, { dryRun = fa
   if (dryRun) return ws;
   await fs.mkdir(ws, { recursive: true });
   await fs.copyFile(specPath, path.join(ws, 'SPEC.md'));
+  try {
+    await fs.copyFile(agentsFilePath(specPath), path.join(ws, 'AGENTS.md'));
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
   return ws;
 }
 
@@ -564,7 +584,7 @@ jobs:
           SONAR_HOST_URL: https://sonarcloud.io
 `;
 
-const SONAR_EXCLUSIONS = '**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,run-report.json,batteries-report.json,audit*.jsonl,SPEC.md,.github/**';
+const SONAR_EXCLUSIONS = '**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,run-report.json,batteries-report.json,audit*.jsonl,SPEC.md,AGENTS.md,.github/**';
 const SONARCLOUD_CREATE_URL = 'https://sonarcloud.io/api/projects/create';
 const SONARCLOUD_RENAME_BRANCH_URL = 'https://sonarcloud.io/api/project_branches/rename';
 const WORKFLOWS_DIR = '.github/workflows';
@@ -1660,6 +1680,7 @@ export {
   createSonarProject,
   buildSonarProjectProperties,
   STATIC_ANALYSIS_WORKFLOW,
+  SONAR_EXCLUSIONS,
   SEMGREP_CONFIGS,
   teardownDockerCompose,
   runBatteries,
