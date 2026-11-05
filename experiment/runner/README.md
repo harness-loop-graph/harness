@@ -64,7 +64,7 @@ Router:
 | `--task-file <path>` | — | Sobrescribe la tarea de generación (corridas de validación económicas). En c3, cada nodo conserva su rol y verificación pero trabaja sobre esta tarea en lugar de la SPEC, y la tarea a nivel de grafo del `GraphEngine` también se fija al valor sobrescrito (los nodos son lo que el motor realmente ejecuta, pero la tarea a nivel de grafo ya no lo contradice). El archivo se valida (existe, es legible, no está vacío ni es solo espacios en blanco) **antes** de crear el espacio de trabajo de la corrida, con un error de uso y salida distinta de cero si falla, para cada `--config` — de modo que un `--task-file` inválido nunca deja un directorio de espacio de trabajo huérfano |
 | `--max-turns <n>` | 40 (c2), 8 por nodo (c3) | Presupuesto de turnos del *loop* (C2, y cada nodo de C3). Debe ser un entero positivo |
 | `--max-steps <n>` | 12 | Presupuesto de pasos del grafo (solo C3). Debe ser un entero positivo |
-| `--tool-rounds <n>` | 200 (c1), 30 (c2/c3) | Presupuesto de llamadas a herramienta por interacción. Debe ser un entero positivo |
+| `--tool-rounds <n>` | 200 (c1), 80 (c2), 30 por nodo (c3) | Presupuesto de llamadas a herramienta por interacción. Debe ser un entero positivo |
 | `--temperature <n>` | sin valor (default del proveedor) | Temperatura de muestreo, número en [0, 2]. Se aplica a **todos** los adaptadores que crea el runner (el predeterminado y los de cada ruta del *router*), de modo que C1/C2/C3 muestreen igual |
 | `--top-p <n>` | sin valor | `top_p`, número en (0, 1]. Mismo alcance que `--temperature` |
 | `--seed <n>` | sin valor | `seed` de muestreo, entero. Mismo alcance que `--temperature` |

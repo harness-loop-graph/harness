@@ -1837,7 +1837,7 @@ test('harness instructions pin the repository root to the workspace root', () =>
 
 test('default tool-round budget lets c1 finish the SPEC and keeps c2/c3 per-turn budget', () => {
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).toolRounds, 200);
-  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']).toolRounds, 30);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']).toolRounds, 80);
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c3']).toolRounds, 30);
 });
 

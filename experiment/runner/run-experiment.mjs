@@ -229,7 +229,7 @@ function parseArgs(argv) {
     parsed.maxTurns = parsed.config === 'c2' ? 40 : 8;
   }
   if (parsed.toolRounds == null) {
-    parsed.toolRounds = parsed.config === 'c1' ? 200 : 30;
+    parsed.toolRounds = parsed.config === 'c1' ? 200 : parsed.config === 'c2' ? 80 : 30;
   }
   return parsed;
 }
