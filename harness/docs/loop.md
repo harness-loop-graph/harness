@@ -110,7 +110,17 @@ devuelve `undefined` si el run no registró turnos. Las secciones, en orden:
    40 con `(+N more)`.
 3. Los últimos 10 comandos de `run_command` con su exit code
    (`[exit 1] npm test`), cada línea truncada.
-4. Cantidad de llamadas a herramientas denegadas por guardrails, si hubo.
+4. Archivos leídos con `read_file` y *skills* cargadas con `load_skill`
+   (exitosos, sin repetir), seguidos de la instrucción de no volver a leerlos
+   salvo que haga falta: en la piloto de C2, el 80 % de las llamadas eran
+   relecturas y recargas al empezar cada turno.
+5. Cantidad de llamadas a herramientas denegadas por guardrails, si hubo.
+
+La parte de verificación usa `details` de `RecordingVerificationManager`: ante
+un fallo lista primero las líneas que parecen errores (`error`, `failed`,
+`npm ERR!`, …; hasta 12) y después la salida con su principio y su final,
+porque herramientas como `docker build` imprimen la causa muy por encima de
+su última línea.
 
 El total está acotado a `MAX_TURN_SUMMARY_CHARS` (2500). El feedback final es
 la parte de verificación de `buildFeedback` (sin cambios) seguida de la sección

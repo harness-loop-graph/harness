@@ -95,6 +95,32 @@ describe('summarizeTurn', () => {
     expect(summary).not.toContain('missed.ts');
   });
 
+  it('lists files read and skills loaded so the next turn does not repeat them', () => {
+    const final: ModelResponse = { type: 'finish', content: 'done' };
+    const call = (tool: string, args: Record<string, unknown>, success = true) => ({
+      response: { type: 'tool_call', tool, args } as ModelResponse,
+      toolResult: { type: 'tool_result', tool, success, result: success ? 'ok' : 'boom' } as ToolResult,
+    });
+    const summary = summarizeTurn(
+      record(
+        [
+          call('read_file', { path: 'SPEC.md' }),
+          call('read_file', { path: 'SPEC.md' }),
+          call('read_file', { path: 'backend/src/main.ts' }),
+          call('read_file', { path: 'missing.ts' }, false),
+          call('load_skill', { name: 'nestjs-best-practices' }),
+          call('load_skill', { name: 'nestjs-best-practices' }),
+          { response: final },
+        ],
+        final,
+      ),
+    )!;
+    expect(summary).toContain('Files read: SPEC.md, backend/src/main.ts');
+    expect(summary).not.toContain('missing.ts');
+    expect(summary).toContain('Skills loaded: nestjs-best-practices');
+    expect(summary).toMatch(/do not (re-?read|reload)/i);
+  });
+
   it('caps files at 40 with a "+N more" marker', () => {
     const final: ModelResponse = { type: 'finish', content: 'done' };
     const writes = Array.from({ length: 45 }, (_, i) => write(`f${i}.ts`));

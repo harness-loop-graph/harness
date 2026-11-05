@@ -27,6 +27,8 @@ export function summarizeTurn(run: TurnActivity): string | undefined {
   if (run.turns.length === 0) return undefined;
 
   const files: string[] = [];
+  const filesRead: string[] = [];
+  const skills: string[] = [];
   const commands: string[] = [];
   let denied = 0;
 
@@ -41,6 +43,12 @@ export function summarizeTurn(run: TurnActivity): string | undefined {
     if ((response.tool === 'write_file' || response.tool === 'search_replace') && toolResult.success) {
       const target = response.args.path;
       if (typeof target === 'string' && !files.includes(target)) files.push(target);
+    } else if (response.tool === 'read_file' && toolResult.success) {
+      const target = response.args.path;
+      if (typeof target === 'string' && !filesRead.includes(target)) filesRead.push(target);
+    } else if (response.tool === 'load_skill' && toolResult.success) {
+      const name = response.args.name;
+      if (typeof name === 'string' && !skills.includes(name)) skills.push(name);
     } else if (response.tool === 'run_command') {
       const command = response.args.command;
       if (typeof command === 'string') commands.push(`[${describeExit(toolResult)}] ${clip(oneLine(command), MAX_COMMAND_CHARS)}`);
@@ -62,7 +70,19 @@ export function summarizeTurn(run: TurnActivity): string | undefined {
     for (const command of commands.slice(-MAX_COMMANDS)) lines.push(`  - ${command}`);
   }
 
+  if (filesRead.length > 0) {
+    const shown = filesRead.slice(0, MAX_FILES).map((f) => clip(f, MAX_PATH_CHARS));
+    const more = filesRead.length > MAX_FILES ? ` (+${filesRead.length - MAX_FILES} more)` : '';
+    lines.push(`- Files read: ${shown.join(', ')}${more}`);
+  }
+
+  if (skills.length > 0) lines.push(`- Skills loaded: ${skills.join(', ')}`);
+
   if (denied > 0) lines.push(`- Denied tool calls: ${denied}`);
+
+  if (filesRead.length > 0 || skills.length > 0) {
+    lines.push('Do not re-read these files or reload these skills unless you need a detail you no longer have; go straight to fixing the failure.');
+  }
 
   return clip(lines.join('\n'), MAX_TURN_SUMMARY_CHARS);
 }
