@@ -217,6 +217,19 @@ describe('C2 corrective loop', () => {
     expect(result.verifications).toHaveLength(0);
   });
 
+  it.each(['http_402', 'http_401'])('FAIL immediately when the provider refuses every call (%s)', async (code) => {
+    const refusal: ModelResponse = { type: 'error', code, message: 'This request would exceed your available credits' };
+    const model = new TurnScriptedModelAdapter([[refusal], [refusal], [refusal]]);
+    const loop = buildLoop(model);
+
+    const result = await loop.run({ task: 'Create out.txt', maxTurns: 3, verification: { command: 'test -f out.txt' } });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.turns).toBe(1);
+    expect(result.decision.reason).toContain(code);
+    expect(result.verifications).toHaveLength(0);
+  });
+
   it('accepts a finish without verification configured', async () => {
     const model = new TurnScriptedModelAdapter([[{ type: 'finish', content: 'done' }]]);
     const loop = buildLoop(model);

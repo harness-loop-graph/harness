@@ -11,6 +11,12 @@ import type {
 } from './contracts.js';
 import { summarizeTurn } from './turn-summary.js';
 
+/**
+ * Model errors that every later call would repeat: an exhausted cost cap, no
+ * credits left (402) or a rejected key (401). Retrying them only burns turns.
+ */
+const FATAL_MODEL_ERROR_CODES = new Set(['budget_exceeded', 'http_401', 'http_402']);
+
 /** Error messages recorded in the trace are truncated past this length. */
 const MAX_TRACE_MESSAGE_LENGTH = 300;
 
@@ -55,10 +61,10 @@ export class AgentLoop {
 
       state.phase = 'observing';
 
-      // An exhausted model budget refuses every later call, so neither
-      // verifying nor retrying can change the outcome.
+      // A fatal model error refuses every later call, so neither verifying
+      // nor retrying can change the outcome.
       const budgetError =
-        finalResponse.type === 'error' && finalResponse.code === 'budget_exceeded' ? finalResponse : undefined;
+        finalResponse.type === 'error' && FATAL_MODEL_ERROR_CODES.has(finalResponse.code) ? finalResponse : undefined;
       const budgetExhausted = budgetError !== undefined;
 
       let verification: VerificationResult | undefined;
@@ -74,7 +80,7 @@ export class AgentLoop {
 
       state.phase = 'deciding';
       decision = budgetExhausted
-        ? { action: 'FAIL', reason: `Model budget exhausted (budget_exceeded: ${budgetError.message})` }
+        ? { action: 'FAIL', reason: `Model unavailable (${budgetError.code}: ${truncateMessage(budgetError.message)})` }
         : this.decide(finalResponse, verification, request.maxTurns - turn);
       state.lastAction = decision.action;
 
