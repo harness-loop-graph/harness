@@ -133,3 +133,37 @@ describe('LocalExecutionManager shell', () => {
     expect(res.stdout.trim()).not.toBe('');
   });
 });
+
+describe('LocalExecutionManager timeout', () => {
+  it('returns on timeout even when a background child keeps the output pipes open', async () => {
+    const mgr = new LocalExecutionManager({ workspaceRoot: os.tmpdir(), timeoutMs: 500 });
+    const started = Date.now();
+    // `sleep 30 &` inherits stdout/stderr: killing only the shell leaves the pipes open.
+    const result = await mgr.run({ command: 'sleep 30 & sleep 30', cwd: os.tmpdir() });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.exitCode).toBe(124);
+    expect(result.stderr).toContain('[timeout]');
+  }, 10_000);
+
+  it('kills the whole process group on timeout, not only the shell', async () => {
+    const seconds = 3000 + (process.pid % 900);
+    const mgr = new LocalExecutionManager({ workspaceRoot: os.tmpdir(), timeoutMs: 500 });
+    await mgr.run({ command: `sleep ${seconds} & sleep 30`, cwd: os.tmpdir() });
+    await new Promise((r) => setTimeout(r, 300));
+    const { execSync } = await import('node:child_process');
+    const alive = execSync(`ps -eo args | grep -c "^sleep ${seconds}$" || true`).toString().trim();
+    expect(alive).toBe('0');
+  }, 10_000);
+});
+
+describe('LocalExecutionManager non-interactive environment', () => {
+  it('sets CI=true so test runners do not start in watch mode', async () => {
+    const mgr = new LocalExecutionManager({ workspaceRoot: os.tmpdir(), timeoutMs: 5_000 });
+    expect((await mgr.run({ command: 'echo "$CI"', cwd: os.tmpdir() })).stdout.trim()).toBe('true');
+  });
+
+  it('lets req.env override CI', async () => {
+    const mgr = new LocalExecutionManager({ workspaceRoot: os.tmpdir(), timeoutMs: 5_000 });
+    expect((await mgr.run({ command: 'echo "$CI"', cwd: os.tmpdir(), env: { CI: '' } })).stdout.trim()).toBe('');
+  });
+});

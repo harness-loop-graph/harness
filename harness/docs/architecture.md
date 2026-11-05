@@ -106,8 +106,12 @@ un único directorio literal `src/{a,b`. Captura stdout/stderr
 topeados en 512 KiB (`MAX_OUTPUT_BYTES`) conservando el inicio y el final (los
 errores suelen aparecer al final) con un marcador `…[truncated N chars]…` en el
 medio, y aplica un timeout estricto
-(`timeoutMs`, 30 000 ms por defecto) que hace `SIGKILL` al hijo y reporta
-`exitCode: 124` con un marcador `[timeout]` en stderr. Un error de spawn en sí
+(`timeoutMs`, 30 000 ms por defecto). El comando corre en su propio grupo de
+procesos: al vencer el timeout se hace `SIGKILL` al grupo entero (también a
+procesos en segundo plano o nietos, como un `vitest` en modo *watch*), se
+cierran los pipes sin esperar a que el hijo los suelte y se reporta
+`exitCode: 124` con un marcador `[timeout]` en stderr. Los comandos corren con
+`CI=true` para que los *test runners* no arranquen en modo *watch*. Un error de spawn en sí
 mismo se traduce en `exitCode: 127`.
 
 El entorno del hijo se construye con `scrubEnv(process.env, envDenylist)`: se

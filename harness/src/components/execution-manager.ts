@@ -1,5 +1,5 @@
 import type { ExecutionRequest, ExecutionResult } from '../contracts/core.js';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { BoundedOutput } from './truncate.js';
@@ -72,12 +72,21 @@ export class LocalExecutionManager implements ExecutionManager {
       const child = spawn(req.command, {
         shell: resolveShell(),
         cwd,
-        env: { ...scrubEnv(process.env, this.opts.envDenylist), ...req.env },
+        // CI=true: nobody is at the terminal, so test runners must not start in watch mode.
+        env: { ...scrubEnv(process.env, this.opts.envDenylist), CI: 'true', ...req.env },
+        // Own process group, so a timeout can kill background and grandchild processes too.
+        detached: process.platform !== 'win32',
       });
 
       const out = new BoundedOutput(MAX_OUTPUT_BYTES);
       const err = new BoundedOutput(MAX_OUTPUT_BYTES);
-      let killed = false;
+      let settled = false;
+      const finish = (result: ExecutionResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
 
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
@@ -85,29 +94,39 @@ export class LocalExecutionManager implements ExecutionManager {
       child.stderr.on('data', (chunk: string) => err.append(chunk));
 
       const timer = setTimeout(() => {
-        killed = true;
-        child.kill('SIGKILL');
+        killProcessGroup(child);
+        // A surviving process can keep the pipes open, so do not wait for 'close'.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({
+          exitCode: 124,
+          stdout: out.toString(),
+          stderr: err.toString() + `\n[timeout] killed after ${this.timeoutMs}ms`,
+        });
       }, this.timeoutMs);
 
       child.on('error', (error) => {
-        clearTimeout(timer);
-        resolve({ exitCode: 127, stdout: out.toString(), stderr: err.toString() + String(error) });
+        finish({ exitCode: 127, stdout: out.toString(), stderr: err.toString() + String(error) });
       });
 
       child.on('close', (code) => {
-        clearTimeout(timer);
-        if (killed) {
-          resolve({
-            exitCode: 124,
-            stdout: out.toString(),
-            stderr: err.toString() + `\n[timeout] killed after ${this.timeoutMs}ms`,
-          });
-        } else {
-          resolve({ exitCode: code ?? 1, stdout: out.toString(), stderr: err.toString() });
-        }
+        finish({ exitCode: code ?? 1, stdout: out.toString(), stderr: err.toString() });
       });
     });
   }
+}
+
+/** Kills the child's whole process group (see `detached`), falling back to the child alone. */
+function killProcessGroup(child: ChildProcess): void {
+  if (child.pid !== undefined && process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    } catch {
+      // The group is already gone, or was never created: kill the child itself.
+    }
+  }
+  child.kill('SIGKILL');
 }
 
 /** Stub for unit tests. */
