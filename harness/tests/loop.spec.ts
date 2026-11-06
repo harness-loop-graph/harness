@@ -372,4 +372,27 @@ describe('C2 corrective loop', () => {
     expect(result.trace[0].decision.action).toBe('RETRY');
     expect(model.seenRequests[3].feedback).toContain("error 'repeated_tool_call'");
   });
+
+  it('tells the next turn when verification passed but the model did not finish', async () => {
+    const model = new TurnScriptedModelAdapter([
+      [{ type: 'error', code: 'max_tool_rounds', message: 'Reached the limit of 80 tool round(s)' }],
+      [{ type: 'finish', content: 'done' }],
+    ]);
+    const loop = buildLoop(model);
+    let calls = 0;
+    const originalComplete = model.complete.bind(model);
+    model.complete = async (request: ModelRequest) => {
+      calls += 1;
+      if (calls === 2) model.advanceTurn();
+      return originalComplete(request);
+    };
+
+    const result = await loop.run({ task: 't', maxTurns: 2, verification: { command: 'true' } });
+
+    expect(result.status).toBe('SUCCESS');
+    const feedback = model.seenRequests[1].feedback ?? '';
+    expect(feedback).toContain('Verification passed');
+    expect(feedback).toMatch(/finish/i);
+    expect(feedback).not.toContain('Verification failed');
+  });
 });

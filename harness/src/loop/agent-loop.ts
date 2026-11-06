@@ -175,6 +175,14 @@ export class AgentLoop {
           'Fix the workspace so the verification command passes, then finish.',
       );
     }
+    if (verification?.passed && response.type !== 'finish') {
+      // Without this the model never learns the check already passes and keeps working until it runs out of turns.
+      parts.push(
+        'Verification passed: the verification command now succeeds. ' +
+          'If the task is complete (see the definition of done in AGENTS.md, if present), finish now with a final answer; ' +
+          'otherwise finish the remaining work and then give a final answer.',
+      );
+    }
     return parts.join(' ');
   }
 }

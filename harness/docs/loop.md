@@ -79,13 +79,18 @@ que nombra el código, mientras queden turnos.
 
 ## Feedback — `AgentLoop.buildFeedback`
 
-Se construye solo cuando la decisión es RETRY. Dos partes independientes,
+Se construye solo cuando la decisión es RETRY. Tres partes independientes,
 unidas con un espacio:
 - Si la respuesta final del *harness* fue un `error`, una oración que nombra
   el `code` y el `message` del error.
 - Si la verificación se ejecutó y falló, una oración con `verification.details`
   más una instrucción para corregir el espacio de trabajo de modo que el
   comando pase.
+- Si la verificación pasó pero el modelo no terminó (p. ej. agotó sus rondas),
+  una oración que se lo dice y le pide terminar con una respuesta final si la
+  tarea está completa según la definición de terminado de `AGENTS.md`. Sin
+  ella, en la piloto de C2 con DeepSeek la verificación pasó en 36 de 40
+  turnos y el modelo nunca terminó, porque nadie le avisó.
 
 Este string se convierte en `runOptions.feedback` en la llamada al *harness*
 del siguiente turno, y el *harness* solo lo inyecta en la solicitud visible
