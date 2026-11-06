@@ -40,9 +40,10 @@ modelo.
    éxito/fallo, a través del string `feedback` del siguiente turno.
 4. **deciding** — llama a `this.decide(finalResponse, verification, maxTurns - turn)` y registra `state.lastAction`.
 5. Agrega una entrada `LoopTurnTrace` (`turn`, `phases`, `response`,
+   `responseCode`/`responseMessage` cuando la respuesta final fue un `error`,
    `verification`, `decision`, y `feedback` cuando la decisión fue RETRY).
 6. En `FINISH` el *loop* se corta de inmediato. En `RETRY` calcula el feedback
-   mediante `buildFeedback` y continúa al siguiente turno. En `FAIL` se corta.
+   (`buildFeedback` + resumen del turno previo, ver abajo) y continúa al siguiente turno. En `FAIL` se corta.
 
 Después del *loop*, `state.phase = 'final'` y se construye el resultado:
 `status: 'SUCCESS'` si y solo si la última decisión fue `FINISH`; de lo
@@ -71,20 +72,77 @@ decir, el *harness* la devolvió como respuesta final, lo que solo ocurre si
 que cualquier otro tipo que no sea `finish`: RETRY o FAIL según los turnos
 restantes.
 
+El error `repeated_tool_call` (el *harness* cortó la corrida porque el modelo
+repitió la misma llamada a herramienta `maxRepeatedToolCalls` veces seguidas)
+es un `error` más: C2 lo trata como un intento fallido y hace RETRY con feedback
+que nombra el código, mientras queden turnos.
+
 ## Feedback — `AgentLoop.buildFeedback`
 
-Se construye solo cuando la decisión es RETRY. Dos partes independientes,
+Se construye solo cuando la decisión es RETRY. Tres partes independientes,
 unidas con un espacio:
 - Si la respuesta final del *harness* fue un `error`, una oración que nombra
   el `code` y el `message` del error.
 - Si la verificación se ejecutó y falló, una oración con `verification.details`
   más una instrucción para corregir el espacio de trabajo de modo que el
   comando pase.
+- Si la verificación pasó pero el modelo no terminó (p. ej. agotó sus rondas),
+  una oración que se lo dice y le pide terminar con una respuesta final si la
+  tarea está completa según la definición de terminado de `AGENTS.md`. Sin
+  ella, en la piloto de C2 con DeepSeek la verificación pasó en 36 de 40
+  turnos y el modelo nunca terminó, porque nadie le avisó.
 
 Este string se convierte en `runOptions.feedback` en la llamada al *harness*
 del siguiente turno, y el *harness* solo lo inyecta en la solicitud visible
 para el modelo en la primera ronda de herramienta de ese turno (ver
 `Harness.run`, `round === 0`).
+
+## Resumen del turno previo — `summarizeTurn`
+
+Cada turno arranca una conversación nueva (`Harness.run` hace
+`context.prepare` y solo inyecta `feedback` en la ronda 0), así que el modelo
+no recuerda qué hizo antes, vuelve a explorar y agota las rondas. Para evitarlo,
+en un RETRY el *loop* añade al feedback un resumen **determinista** construido
+por el *harness* a partir de `HarnessRunResult.turns` (las llamadas a
+herramientas y sus resultados); **no hay ninguna llamada extra al modelo**.
+
+`summarizeTurn(run)` (`src/loop/turn-summary.ts`) es una función pura que
+devuelve `undefined` si el run no registró turnos. Las secciones, en orden:
+
+1. Cómo terminó el turno: `finish`, o `error '<code>': <message>`.
+2. Archivos escritos: rutas únicas de `write_file` y `search_replace`
+   exitosos, en orden, máximo
+   40 con `(+N more)`.
+3. Los últimos 10 comandos de `run_command` con su exit code
+   (`[exit 1] npm test`), cada línea truncada.
+4. Archivos leídos con `read_file` y *skills* cargadas con `load_skill`
+   (exitosos, sin repetir), seguidos de la instrucción de no volver a leerlos
+   salvo que haga falta: en la piloto de C2, el 80 % de las llamadas eran
+   relecturas y recargas al empezar cada turno.
+5. Cantidad de llamadas a herramientas denegadas por guardrails, si hubo.
+
+La parte de verificación usa `details` de `RecordingVerificationManager`: ante
+un fallo lista primero las líneas que parecen errores (`error`, `failed`,
+`npm ERR!`, …; hasta 12) y después la salida con su principio y su final,
+porque herramientas como `docker build` imprimen la causa muy por encima de
+su última línea.
+
+El total está acotado a `MAX_TURN_SUMMARY_CHARS` (2500). El feedback final es
+la parte de verificación de `buildFeedback` (sin cambios) seguida de la sección
+delimitada `Previous turn summary (…)`, separadas por una línea en blanco. El
+turno 1 no tiene resumen.
+
+Ejemplo:
+
+```
+Previous turn summary (what your last attempt did, recorded by the harness):
+- Ended with: error 'max_tool_rounds': Reached the limit of 8 tool round(s) without a final response
+- Files written: package.json, src/main.ts
+- Commands run (last 2):
+  - [exit 0] mkdir -p src/{a,b}
+  - [exit 1] npm install
+- Denied tool calls: 1
+```
 
 ## Contratos — `src/loop/contracts.ts`
 
@@ -100,8 +158,14 @@ para el modelo en la primera ronda de herramienta de ese turno (ver
 - **`LoopDecision`** — `{ action: 'FINISH' | 'RETRY' | 'FAIL', reason }`.
 - **`LoopResult`** — `{ status: 'SUCCESS' | 'FAILED', turns, finalResponse?,
   decision, verifications, trace, failure? }`.
-- **`LoopTurnTrace`** — `{ turn, phases, response, verification?, decision,
-  feedback? }` (feedback presente solo en turnos RETRY).
+- **`LoopTurnTrace`** — `{ turn, phases, response, responseCode?,
+  responseMessage?, verification?, decision, feedback? }` (`feedback` es el
+  que recibió ese turno del anterior; ausente en el primer turno). `responseCode` y `responseMessage` (truncado a ~300
+  caracteres) aparecen solo cuando la respuesta final del turno fue un `error`;
+  sin ellos no se puede saber por qué terminó mal un turno (p. ej.
+  `max_tool_rounds`). El runner los conserva en `run-report.json` (`trace` de
+  c2). En c3 el trace del grafo ya trae el código y el mensaje dentro de
+  `loopFailure` (p. ej. `repeated_tool_call`).
 
 ## Comportamiento verificado por `tests/loop.spec.ts`
 
@@ -111,5 +175,7 @@ del modelo no sobrevive a la verificación, con el feedback correctivo
 realmente llegando y corrigiendo el espacio de trabajo en el segundo turno;
 FAIL una vez agotado `maxTurns` con toda verificación aún fallando;
 RETRY-luego-SUCCESS después de que el propio *harness* devuelve una respuesta
-`error`; y aceptación de una respuesta `finish` simple como SUCCESS cuando no
+`error`; el turno 2 recibiendo feedback de verificación más el resumen del
+turno 1; `responseCode`/`responseMessage` en el trace de turnos con error; y
+aceptación de una respuesta `finish` simple como SUCCESS cuando no
 hay ninguna `verification` configurada.

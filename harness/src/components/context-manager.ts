@@ -11,6 +11,9 @@ export interface ContextManager {
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', '.cache']);
 const MAX_FILES = 500;
 const MAX_DEPTH = 6;
+/** Candidates in priority order: only the first one found is used. */
+const CONTEXT_FILE_NAMES = ['AGENTS.md', 'CLAUDE.md'];
+export const MAX_CONTEXT_FILE_BYTES = 32 * 1024;
 
 /** Deterministic workspace scan: file listing plus a coarse language guess. */
 export class FsContextManager implements ContextManager {
@@ -23,7 +26,44 @@ export class FsContextManager implements ContextManager {
 
     const language = this.guessLanguage(files);
     const skills = this.skillCatalog?.list();
-    return { projectRoot: root, files, language, task, ...(skills && skills.length > 0 ? { skills } : {}) };
+    const contextFile = await this.readContextFile(root);
+    return {
+      projectRoot: root,
+      files,
+      language,
+      task,
+      ...(skills && skills.length > 0 ? { skills } : {}),
+      ...(contextFile ? { contextFiles: [contextFile] } : {}),
+    };
+  }
+
+  /**
+   * Workspace root only (never home or parents) so experiment runs stay reproducible.
+   * Symlinks are ignored so a planted link cannot exfiltrate files outside the workspace.
+   */
+  private async readContextFile(
+    root: string,
+  ): Promise<{ path: string; content: string; truncated: boolean } | undefined> {
+    for (const name of CONTEXT_FILE_NAMES) {
+      const full = path.join(root, name);
+      try {
+        if (!(await fs.lstat(full)).isFile()) continue;
+        const handle = await fs.open(full, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+        try {
+          // One byte past the cap tells us whether the file was cut.
+          const buffer = Buffer.alloc(MAX_CONTEXT_FILE_BYTES + 1);
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+          const truncated = bytesRead > MAX_CONTEXT_FILE_BYTES;
+          const content = buffer.subarray(0, Math.min(bytesRead, MAX_CONTEXT_FILE_BYTES)).toString('utf8');
+          return { path: name, content, truncated };
+        } finally {
+          await handle.close();
+        }
+      } catch {
+        continue; // missing or unreadable: skip, never fail the cycle
+      }
+    }
+    return undefined;
   }
 
   private async walk(root: string, dir: string, files: string[], depth: number): Promise<void> {

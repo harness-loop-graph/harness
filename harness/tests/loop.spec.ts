@@ -199,6 +199,37 @@ describe('C2 corrective loop', () => {
     expect(result.trace[0].decision.action).toBe('RETRY');
   });
 
+  it('FAIL immediately without verifying when the model budget is exhausted', async () => {
+    const budgetError: ModelResponse = { type: 'error', code: 'budget_exceeded', message: 'spent $5 of $5 limit' };
+    const model = new TurnScriptedModelAdapter([[budgetError], [budgetError], [budgetError]]);
+    const loop = buildLoop(model);
+
+    const result = await loop.run({
+      task: 'Create out.txt',
+      maxTurns: 3,
+      verification: { command: 'test -f out.txt' },
+    });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.turns).toBe(1);
+    expect(result.decision.action).toBe('FAIL');
+    expect(result.decision.reason).toContain('budget_exceeded');
+    expect(result.verifications).toHaveLength(0);
+  });
+
+  it.each(['http_402', 'http_401'])('FAIL immediately when the provider refuses every call (%s)', async (code) => {
+    const refusal: ModelResponse = { type: 'error', code, message: 'This request would exceed your available credits' };
+    const model = new TurnScriptedModelAdapter([[refusal], [refusal], [refusal]]);
+    const loop = buildLoop(model);
+
+    const result = await loop.run({ task: 'Create out.txt', maxTurns: 3, verification: { command: 'test -f out.txt' } });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.turns).toBe(1);
+    expect(result.decision.reason).toContain(code);
+    expect(result.verifications).toHaveLength(0);
+  });
+
   it('accepts a finish without verification configured', async () => {
     const model = new TurnScriptedModelAdapter([[{ type: 'finish', content: 'done' }]]);
     const loop = buildLoop(model);
@@ -209,5 +240,159 @@ describe('C2 corrective loop', () => {
     expect(result.turns).toBe(1);
     expect(result.decision.reason).toContain('no verification');
     expect(result.verifications).toHaveLength(0);
+  });
+  it('gives turn 2 the verification feedback AND a summary of what turn 1 did', async () => {
+    const model = new TurnScriptedModelAdapter([
+      [
+        { type: 'tool_call', tool: 'write_file', args: { path: 'notes.txt', content: 'draft' } },
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+        { type: 'finish', content: 'done' },
+      ],
+      [
+        { type: 'tool_call', tool: 'write_file', args: { path: 'out.txt', content: 'ok' } },
+        { type: 'finish', content: 'fixed' },
+      ],
+    ]);
+    const loop = buildLoop(model);
+
+    let calls = 0;
+    const originalComplete = model.complete.bind(model);
+    model.complete = async (request: ModelRequest) => {
+      calls += 1;
+      if (calls === 4) model.advanceTurn();
+      return originalComplete(request);
+    };
+
+    const result = await loop.run({
+      task: 'Create out.txt',
+      maxTurns: 3,
+      verification: { command: 'test -f out.txt' },
+    });
+
+    expect(result.status).toBe('SUCCESS');
+    const firstTurn1 = model.seenRequests[0];
+    const firstTurn2 = model.seenRequests[3];
+    expect(firstTurn1.feedback).toBeUndefined();
+    const feedback = firstTurn2.feedback ?? '';
+    const verificationAt = feedback.indexOf('Verification failed');
+    const summaryAt = feedback.indexOf('Previous turn summary');
+    expect(verificationAt).toBeGreaterThan(-1);
+    expect(summaryAt).toBeGreaterThan(verificationAt);
+    expect(feedback.slice(summaryAt)).toContain('notes.txt');
+    expect(feedback.slice(summaryAt)).toContain('[exit 0] ls');
+  });
+
+  it('records in each trace entry the feedback that turn received, including on the final turn', async () => {
+    const model = new TurnScriptedModelAdapter([
+      [{ type: 'finish', content: 'first' }],
+      [{ type: 'finish', content: 'second' }],
+    ]);
+    const loop = buildLoop(model);
+    let calls = 0;
+    const originalComplete = model.complete.bind(model);
+    model.complete = async (request: ModelRequest) => {
+      calls += 1;
+      if (calls === 2) model.advanceTurn();
+      return originalComplete(request);
+    };
+
+    const result = await loop.run({ task: 't', maxTurns: 2, verification: { command: 'test -f never.txt' } });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.trace[0].feedback).toBeUndefined();
+    expect(result.trace[1].feedback).toBe(model.seenRequests[1].feedback);
+    expect(result.trace[1].feedback).toContain('Verification failed');
+  });
+
+  it('records responseCode and a truncated responseMessage for errored turns only', async () => {
+    const longMessage = 'e'.repeat(1000);
+    const model = new TurnScriptedModelAdapter([
+      [{ type: 'error', code: 'upstream_failed', message: longMessage }],
+      [{ type: 'finish', content: 'done' }],
+    ]);
+    const loop = buildLoop(model);
+
+    let calls = 0;
+    const originalComplete = model.complete.bind(model);
+    model.complete = async (request: ModelRequest) => {
+      calls += 1;
+      if (calls === 2) model.advanceTurn();
+      return originalComplete(request);
+    };
+
+    const result = await loop.run({ task: 'Do something', maxTurns: 2 });
+
+    expect(result.trace[0].responseCode).toBe('upstream_failed');
+    expect(result.trace[0].responseMessage!.length).toBeLessThanOrEqual(301);
+    expect(result.trace[0].responseMessage!.startsWith('eee')).toBe(true);
+    expect(result.trace[1].responseCode).toBeUndefined();
+    expect(result.trace[1].responseMessage).toBeUndefined();
+  });
+
+  it('reports max_tool_rounds from a real exhausted turn in the trace', async () => {
+    const model = new TurnScriptedModelAdapter([
+      [
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+      ],
+    ]);
+    const loop = buildLoop(model);
+
+    const result = await loop.run({ task: 'Do something', maxTurns: 1, toolRoundsPerTurn: 1 });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.trace[0].responseCode).toBe('max_tool_rounds');
+    expect(result.trace[0].responseMessage).toContain('limit of 1 tool round');
+  });
+
+  it('retries with feedback after a repeated_tool_call stop', async () => {
+    const model = new TurnScriptedModelAdapter([
+      [
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+        { type: 'tool_call', tool: 'run_command', args: { command: 'ls' } },
+      ],
+      [{ type: 'finish', content: 'done differently' }],
+    ]);
+    const loop = buildLoop(model);
+
+    let calls = 0;
+    const originalComplete = model.complete.bind(model);
+    model.complete = async (request: ModelRequest) => {
+      calls += 1;
+      if (calls === 4) model.advanceTurn();
+      return originalComplete(request);
+    };
+
+    const result = await loop.run({ task: 'Do something', maxTurns: 2 });
+
+    expect(result.status).toBe('SUCCESS');
+    expect(result.turns).toBe(2);
+    expect(result.trace[0].responseCode).toBe('repeated_tool_call');
+    expect(result.trace[0].decision.action).toBe('RETRY');
+    expect(model.seenRequests[3].feedback).toContain("error 'repeated_tool_call'");
+  });
+
+  it('tells the next turn when verification passed but the model did not finish', async () => {
+    const model = new TurnScriptedModelAdapter([
+      [{ type: 'error', code: 'max_tool_rounds', message: 'Reached the limit of 80 tool round(s)' }],
+      [{ type: 'finish', content: 'done' }],
+    ]);
+    const loop = buildLoop(model);
+    let calls = 0;
+    const originalComplete = model.complete.bind(model);
+    model.complete = async (request: ModelRequest) => {
+      calls += 1;
+      if (calls === 2) model.advanceTurn();
+      return originalComplete(request);
+    };
+
+    const result = await loop.run({ task: 't', maxTurns: 2, verification: { command: 'true' } });
+
+    expect(result.status).toBe('SUCCESS');
+    const feedback = model.seenRequests[1].feedback ?? '';
+    expect(feedback).toContain('Verification passed');
+    expect(feedback).toMatch(/finish/i);
+    expect(feedback).not.toContain('Verification failed');
   });
 });

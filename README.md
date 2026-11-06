@@ -21,8 +21,16 @@ comparar directamente:
   chat-completions compatible con OpenAI (OpenRouter, OpenCode Go, un
   servidor autoalojado…), configurado solo mediante variables de entorno.
 - **Guardrails.** Cada llamada a herramienta se verifica contra una lista
-  blanca de herramientas y prefijos de comando, se confina al espacio de
-  trabajo de la corrida, y se escribe en un log de auditoría.
+  blanca de herramientas y de comandos (en cada tramo de un comando
+  encadenado), se confina al espacio de trabajo de la corrida, y se escribe en
+  un log de auditoría. No es un sandbox: los límites están en la ADR 6 de
+  `harness/docs/decisions.md`. Las
+  herramientas incorporadas incluyen `search_replace` (edición por
+  subcadena exacta), y un tope de llamadas idénticas consecutivas corta con
+  el error `repeated_tool_call` los bucles sin progreso.
+- **Contexto de proyecto.** Inyecta el `AGENTS.md` (o `CLAUDE.md`) de la raíz
+  del espacio de trabajo en el *system prompt*; los archivos de usuario (`~/`)
+  no se leen, para que las corridas sean reproducibles.
 - **Herramientas MCP.** Se conecta a servidores MCP por stdio y expone sus
   herramientas al modelo, bajo los mismos *guardrails*.
 - **Agent skills.** Carga *skills* `SKILL.md` con divulgación progresiva:

@@ -46,8 +46,12 @@ export interface LoopTurnTrace {
   turn: number;
   phases: LoopPhase[];
   response: ModelResponse;
+  /** Present only when the turn's final response is an error. */
+  responseCode?: string;
+  /** Error message, truncated; present only when the final response is an error. */
+  responseMessage?: string;
   verification?: VerificationResult;
   decision: LoopDecision;
-  /** Present when the decision was RETRY. */
+  /** Feedback this turn received from the previous one; absent on the first turn. */
   feedback?: string;
 }

@@ -45,6 +45,19 @@ gruesa de `language` derivada de las extensiones de archivo (`typescript`,
 `javascript`, `python`, `go`, o `undefined`), y el string de la tarea. Es un
 escaneo determinista — no interviene ninguna llamada al modelo.
 
+Además lee un archivo de instrucciones del proyecto: `AGENTS.md` en la raíz del
+espacio de trabajo y, si no existe, `CLAUDE.md` (solo se usa el primero que se
+encuentre). Solo se aceptan archivos regulares — un enlace simbólico se ignora
+para que un enlace plantado no pueda filtrar archivos de fuera del espacio de
+trabajo — y el contenido se acota a `MAX_CONTEXT_FILE_BYTES` (32 KiB); si se
+corta, se marca como `truncated`. Queda en `Context.contextFiles` y
+`buildMessages` (`openai-compatible-adapter.ts`) lo inyecta al inicio del
+*system prompt* como `Project instructions (from AGENTS.md)`, con una nota de
+truncamiento cuando corresponde. Los archivos de ámbito de usuario (`~/`) y los
+directorios padre no se leen a propósito, para que las corridas no dependan de
+la máquina anfitriona. Un archivo ausente o ilegible se omite en lugar de hacer
+fallar el ciclo.
+
 ### 2. Model Adapter — interfaz + `OpenAICompatibleModelAdapter`
 
 `ModelAdapter` (`src/components/model-adapter.ts`) es la abstracción
@@ -66,23 +79,48 @@ Mantiene un registro de pares `ToolSpec` + `ToolHandler` (`register`). En
    convierten en un `ToolResult` fallido en lugar de propagarse.
 
 `registerBuiltinTools(manager, { execution, workspaceRoot })` registra las
-tres herramientas incorporadas y devuelve su `ToolSpec[]`:
+cuatro herramientas incorporadas y devuelve su `ToolSpec[]`:
 
 - `write_file` — escribe contenido UTF-8 en una ruta relativa a la raíz del
   espacio de trabajo, creando los directorios padre.
 - `read_file` — lee un archivo UTF-8, truncado a 256 KiB (`MAX_READ_BYTES`).
+- `search_replace` — edita un archivo existente reemplazando una subcadena
+  exacta (`path`, `search`, `replace`). `search` debe aparecer exactamente una
+  vez: si no se encuentra o es ambigua, la llamada falla con un mensaje que le
+  indica al modelo cómo corregirla. Tiene el mismo confinamiento de rutas y el
+  mismo límite de tamaño (aplicado sobre `replace`) que `write_file`, y está en
+  `DEFAULT_ALLOWED_TOOLS`.
 - `run_command` — delega al `ExecutionManager` con `cwd` fijado a la raíz del
-  espacio de trabajo.
+  espacio de trabajo. Cada llamada es un shell nuevo, así que un `cd` no
+  persiste entre llamadas; la descripción de la herramienta se lo dice al
+  modelo (sin eso, un `cd` suelto seguido de `mkdir` creaba carpetas en la raíz).
 
 ### 4. Execution Manager — `LocalExecutionManager`
 
 `run(req)` resuelve `req.cwd` contra `workspaceRoot` y rechaza cualquier ruta
 resuelta fuera de ella (`exitCode: 126`) antes de lanzar nada. Lanza el comando
-con `child_process.spawn(..., { shell: true })`, captura stdout/stderr
-topeados en 512 KiB (`MAX_OUTPUT_BYTES`), y aplica un timeout estricto
-(`timeoutMs`, 30 000 ms por defecto) que hace `SIGKILL` al hijo y reporta
-`exitCode: 124` con un marcador `[timeout]` en stderr. Un error de spawn en sí
+con `child_process.spawn(..., { shell: '/bin/bash' })` (si `/bin/bash` no
+existe cae a `shell: true`, es decir `sh`). Se usa bash porque los modelos
+asumen sintaxis bash: en Ubuntu `/bin/sh` es dash y `mkdir -p src/{a,b}` crearía
+un único directorio literal `src/{a,b`. Captura stdout/stderr
+topeados en 512 KiB (`MAX_OUTPUT_BYTES`) conservando el inicio y el final (los
+errores suelen aparecer al final) con un marcador `…[truncated N chars]…` en el
+medio, y aplica un timeout estricto
+(`timeoutMs`, 30 000 ms por defecto). El comando corre en su propio grupo de
+procesos: al vencer el timeout se hace `SIGKILL` al grupo entero (también a
+procesos en segundo plano o nietos, como un `vitest` en modo *watch*), se
+cierran los pipes sin esperar a que el hijo los suelte y se reporta
+`exitCode: 124` con un marcador `[timeout]` en stderr. Los comandos corren con
+`CI=true` para que los *test runners* no arranquen en modo *watch*. Un error de spawn en sí
 mismo se traduce en `exitCode: 127`.
+
+El entorno del hijo se construye con `scrubEnv(process.env, envDenylist)`: se
+eliminan las variables cuyo nombre contiene (sin distinguir mayúsculas)
+`API_KEY`, `APIKEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL` o
+`PRIVATE_KEY`, más `MODEL_API_KEY`, `MODEL_BASE_URL` y los nombres exactos de la
+opción `envDenylist`. El resto (`PATH`, `HOME`, `DOCKER_HOST`, …) se conserva, y
+las entradas explícitas de `req.env` se aplican después, así que ganan. Así un
+`env` o `printenv` emitido por el modelo no puede leer la clave de API.
 
 ### 5. Verification Manager — `RecordingVerificationManager`
 
@@ -104,9 +142,18 @@ política (`GuardrailPolicy`) es: `workspaceRoot`, `allowedTools`,
 [`decisions.md`](./decisions.md) para la justificación de diseño (lista blanca
 de herramientas, lista blanca de prefijos de comando, confinamiento de rutas,
 límites de tamaño, rastro de auditoría).
+Para `run_command`, cada tramo de la línea se verifica por separado con
+`splitCommandSegments` (`src/components/command-segments.ts`); la política de
+comandos y sus límites están en la ADR 6.
 `getAuditLog()` devuelve cada decisión tomada hasta el momento, en orden;
 cuando se construye con una ruta `auditFile`, las decisiones también se
-agregan a ese archivo como JSONL con una marca de tiempo `at`.
+agregan a ese archivo como JSONL con una marca de tiempo `at` y un resumen
+acotado de la acción evaluada: `tool` más `path` (`read_file`, `write_file`,
+`search_replace`) o `name` (`load_skill`), o `command` (`run_command` y acciones
+`kind: 'command'`, recortado a 300 caracteres con `…`). Nunca se escribe
+contenido de archivos ni los cuerpos de `search`/`replace`. Solo cambia la
+línea del archivo: `getAuditLog()` y la `GuardrailDecision` devuelta siguen
+siendo `{ decision, reason }`.
 
 ## El harness — `src/harness.ts`
 
@@ -114,7 +161,9 @@ agregan a ese archivo como JSONL con una marca de tiempo `at`.
 estáticas (`HarnessOptions`: `workspaceRoot`, `availTools`, `instructions`,
 `maxToolRounds` — por defecto `1`, que es el contrato de C1 de una única
 interacción sin reintento correctivo; los *loops* de C2 sobrescriben esto por
-corrida mediante `HarnessRunOptions.maxToolRounds`).
+corrida mediante `HarnessRunOptions.maxToolRounds` — y `maxRepeatedToolCalls`,
+por defecto `DEFAULT_MAX_REPEATED_TOOL_CALLS` = 3; debe ser un entero >= 2 o el
+constructor lanza un error).
 
 `run(task, runOptions)`:
 
@@ -133,6 +182,12 @@ corrida mediante `HarnessRunOptions.maxToolRounds`).
    el payload del resultado de la herramienta parece un `ExecutionResult`
    (`exitCode`/`stdout`/`stderr`, verificado por `isExecutionResult`) —
    ejecuta `verification.verify(...)` y lo adjunta al turno.
+   Antes de ejecutar, cuenta las llamadas consecutivas idénticas (misma
+   herramienta y mismos argumentos, ignorando el orden de las claves): la
+   N-ésima llamada consecutiva (`maxRepeatedToolCalls`) no se ejecuta y el
+   *harness* termina la corrida con una respuesta `error` con código
+   `repeated_tool_call`, para cortar bucles donde el modelo repite la misma
+   acción sin avanzar.
 5. Si se alcanza el límite de rondas sin una respuesta que no sea `tool_call`,
    el *harness* sintetiza una respuesta `error` con código `max_tool_rounds`.
 
@@ -147,7 +202,8 @@ corrida, no solo las adjuntadas a turnos individuales.
 Estos son los tipos que comparten cada componente y el *harness*:
 
 - **`Context`** — `projectRoot`, `files: string[]`, `language` opcional,
-  `framework`, `task`.
+  `framework`, `task`, `skills` y `contextFiles` opcionales (este último con
+  `path`, `content`, `truncated`).
 - **`ModelRequest`** — `task`, `context`, `availTools: ToolSpec[]`,
   opcionales `instructions`, `feedback` (feedback de verificación de un
   intento fallido anterior — solo reintento del *loop*), `history` (entradas
@@ -185,3 +241,13 @@ long context → retry → default), desactivado salvo que la sección `router` 
 una configuración del *harness* lo habilite. Se sitúa detrás de la interfaz
 `ModelAdapter`, de modo que nada más en este documento cambia. Ver
 [`model-router.md`](./model-router.md).
+
+## Opcional: tope de costo
+
+`BudgetedModelAdapter` es otro `ModelAdapter` opcional detrás de la misma
+interfaz: envuelve a un adaptador con `getUsage()` y, una vez que el costo
+acumulado alcanza `maxCostUsd`, devuelve un error `budget_exceeded` sin llamar
+al modelo. Ver [`model-provider.md`](./model-provider.md).
+El *loop* de C2 trata ese error, y también `http_402` (sin créditos) y
+`http_401` (clave rechazada), como fatales: termina en FAIL sin verificar ni
+reintentar, porque todas las llamadas siguientes fallarían igual.

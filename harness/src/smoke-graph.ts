@@ -22,7 +22,7 @@ async function main(): Promise<void> {
     const guardrails = new PolicyGuardrails(
       {
         workspaceRoot: workspace,
-        allowedTools: ['write_file', 'read_file', 'run_command'],
+        allowedTools: ['write_file', 'read_file', 'search_replace', 'run_command'],
         allowedCommandPrefixes: ['npm', 'node', 'npx', 'git', 'ls', 'cat', 'echo', 'mkdir', 'test'],
         maxFileBytes: 1024 * 1024,
       },

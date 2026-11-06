@@ -26,6 +26,8 @@ para saber qué construir.
 | `e2e-testing` | `e2e-testing/` | affaan-m/ECC | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
 | `api-design` | `api-design/` | affaan-m/ECC | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
 | `error-handling` | `error-handling/` | affaan-m/ECC | MIT (`THIRD_PARTY_LICENSES/ecc-LICENSE`) |
+| `ponytail` | `ponytail/` | dietrichgebert/ponytail, ver abajo | MIT (`THIRD_PARTY_LICENSES/ponytail-LICENSE`) |
+| `nestjs-best-practices` | `nestjs-best-practices/` | Kadajett/agent-nestjs-skills, ver abajo | MIT declarada en el frontmatter (el repo no incluye archivo `LICENSE`) |
 
 El *harness* solo coloca el `name` y la `description` de cada *skill* en
 el contexto del modelo; el cuerpo (y, para las *skills* con archivos
@@ -208,6 +210,37 @@ eliminada:
   Remix docs`) — se conservó porque no es *guía* de RSC, solo una nota de
   que Remix está fuera de alcance, en la misma línea que las viñetas
   vecinas de Next.js/React Native.
+
+---
+
+## Fuente: dietrichgebert/ponytail
+
+Repo: https://github.com/dietrichgebert/ponytail, commit fijado
+`16352ac229eb08a9598dcae48fe9f2b342567d86`. Licencia: MIT
+(`THIRD_PARTY_LICENSES/ponytail-LICENSE`, copiada textual).
+
+Solo se vendorizó `skills/ponytail/SKILL.md`, sin modificar. Las *skills*
+hermanas (`ponytail-audit`, `ponytail-debt`, `ponytail-gain`,
+`ponytail-help`, `ponytail-review`) son comandos de chat interactivo y no se
+vendorizaron. A diferencia de las demás, `ponytail` no enseña prácticas de
+stack sino un **estilo de trabajo** (el cambio más chico que resuelve la
+tarea); su texto menciona comandos de sesión (`/ponytail lite|full|ultra`)
+que el *harness* no implementa.
+
+## Fuente: Kadajett/agent-nestjs-skills
+
+Repo: https://github.com/Kadajett/agent-nestjs-skills, commit fijado
+`3986e0cede33958e000f959031cbee0cd83c2941`. El `SKILL.md` declara
+`license: MIT` en su frontmatter, pero el repo no incluye un archivo
+`LICENSE` con el texto ni la línea de copyright, así que no hay copia bajo
+`THIRD_PARTY_LICENSES/`.
+
+Se vendorizó `skills/nestjs-best-practices/` completo (el `SKILL.md` y sus 42
+archivos complementarios en `rules/`), sin modificar. Se solapa con
+`nestjs-patterns` (ECC); ambas quedan disponibles. Tensión conocida con el
+SPEC: `rules/test-e2e-supertest.md` usa `dataSource.synchronize(true)` en
+tests e2e, mientras que RF-02 exige que el esquema se cree solo con
+migraciones (`rules/db-use-migrations.md` sí lo respeta).
 
 ---
 

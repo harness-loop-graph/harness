@@ -6,6 +6,8 @@ export interface Context {
   task?: string;
   /** Progressive disclosure: name + description only; body via the `load_skill` tool. */
   skills?: Array<{ name: string; description: string }>;
+  /** Project instructions (AGENTS.md, else CLAUDE.md) read from the workspace root only. */
+  contextFiles?: Array<{ path: string; content: string; truncated: boolean }>;
 }
 
 export interface ModelRequest {

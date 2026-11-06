@@ -6,9 +6,11 @@ export * from './components/context-manager.js';
 export * from './components/model-adapter.js';
 export * from './components/openai-compatible-adapter.js';
 export * from './components/routing-model-adapter.js';
+export * from './components/budgeted-model-adapter.js';
 export * from './components/tool-manager.js';
 export * from './components/execution-manager.js';
 export * from './components/verification-manager.js';
+export * from './components/command-segments.js';
 export * from './components/guardrails.js';
 export * from './components/mcp-tool-provider.js';
 export * from './components/skill-catalog.js';
@@ -20,6 +22,7 @@ export * from './harness-config.js';
 // C2 loop
 export * from './loop/contracts.js';
 export * from './loop/agent-loop.js';
+export * from './loop/turn-summary.js';
 
 // C3 graph
 export * from './graph/contracts.js';

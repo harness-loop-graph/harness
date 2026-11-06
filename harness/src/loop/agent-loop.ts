@@ -9,6 +9,16 @@ import type {
   LoopState,
   LoopTurnTrace,
 } from './contracts.js';
+import { summarizeTurn } from './turn-summary.js';
+
+/**
+ * Model errors that every later call would repeat: an exhausted cost cap, no
+ * credits left (402) or a rejected key (401). Retrying them only burns turns.
+ */
+const FATAL_MODEL_ERROR_CODES = new Set(['budget_exceeded', 'http_401', 'http_402']);
+
+/** Error messages recorded in the trace are truncated past this length. */
+const MAX_TRACE_MESSAGE_LENGTH = 300;
 
 export interface LoopDeps {
   harness: Harness;
@@ -51,8 +61,14 @@ export class AgentLoop {
 
       state.phase = 'observing';
 
+      // A fatal model error refuses every later call, so neither verifying
+      // nor retrying can change the outcome.
+      const budgetError =
+        finalResponse.type === 'error' && FATAL_MODEL_ERROR_CODES.has(finalResponse.code) ? finalResponse : undefined;
+      const budgetExhausted = budgetError !== undefined;
+
       let verification: VerificationResult | undefined;
-      if (request.verification) {
+      if (request.verification && !budgetExhausted) {
         state.phase = 'verifying';
         const execution = await this.deps.execution.run({
           command: request.verification.command,
@@ -63,22 +79,35 @@ export class AgentLoop {
       }
 
       state.phase = 'deciding';
-      decision = this.decide(finalResponse, verification, request.maxTurns - turn);
+      decision = budgetExhausted
+        ? { action: 'FAIL', reason: `Model unavailable (${budgetError.code}: ${truncateMessage(budgetError.message)})` }
+        : this.decide(finalResponse, verification, request.maxTurns - turn);
       state.lastAction = decision.action;
 
       trace.push({
         turn,
         phases: ['generating', 'observing', ...(verification ? (['verifying'] as const) : []), 'deciding'],
         response: finalResponse,
+        ...(finalResponse.type === 'error'
+          ? {
+              responseCode: finalResponse.code,
+              responseMessage: truncateMessage(finalResponse.message),
+            }
+          : {}),
         verification,
         decision,
-        ...(decision.action === 'RETRY' ? { feedback } : {}),
+        ...(feedback !== undefined ? { feedback } : {}),
       });
 
       if (decision.action === 'FINISH') break;
 
       if (decision.action === 'RETRY') {
-        feedback = this.buildFeedback(finalResponse, verification);
+        // The next turn is a fresh conversation: verification first, then a
+        // harness-built record of what this turn did so it need not re-explore.
+        const summary = summarizeTurn(run);
+        feedback = [this.buildFeedback(finalResponse, verification), summary]
+          .filter((part): part is string => !!part)
+          .join('\n\n');
         continue;
       }
 
@@ -146,6 +175,18 @@ export class AgentLoop {
           'Fix the workspace so the verification command passes, then finish.',
       );
     }
+    if (verification?.passed && response.type !== 'finish') {
+      // Without this the model never learns the check already passes and keeps working until it runs out of turns.
+      parts.push(
+        'Verification passed: the verification command now succeeds. ' +
+          'If the task is complete (see the definition of done in AGENTS.md, if present), finish now with a final answer; ' +
+          'otherwise finish the remaining work and then give a final answer.',
+      );
+    }
     return parts.join(' ');
   }
+}
+
+function truncateMessage(message: string): string {
+  return message.length <= MAX_TRACE_MESSAGE_LENGTH ? message : message.slice(0, MAX_TRACE_MESSAGE_LENGTH) + '…';
 }
