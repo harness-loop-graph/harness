@@ -34,15 +34,27 @@ trabajo.
 
 ## Política de presupuestos
 
-Los presupuestos de cómputo **difieren entre configuraciones a propósito**:
-cada capa de ingeniería trae su propio costo, y medir ese costo es parte del
-experimento.
+El recurso que se iguala entre configuraciones es **el dinero**: C1, C2 y C3
+tienen el mismo tope de costo (`--max-cost`, USD 6 por defecto). Los límites
+de rondas, turnos y pasos **difieren a propósito** (cada capa de ingeniería
+trae su propia estructura de control, y medir su costo es parte del
+experimento), pero ninguno debe ser el que corte la corrida en la práctica:
+el tope de gasto es el límite que manda.
 
-| Config | Presupuesto de llamadas a herramienta |
-|---|---|
-| C1 | Una interacción con `--tool-rounds` (200 por defecto) |
-| C2 | Hasta `--max-turns` turnos (40 por defecto) × `--tool-rounds` por turno (80 por defecto) |
-| C3 | Hasta `--max-steps` pasos de grafo, cada nodo con su propio *loop* de hasta `--max-turns` turnos (8 por defecto) |
+| Config | Tope de costo | Presupuesto de llamadas a herramienta |
+|---|---|---|
+| C1 | USD 6 | Una interacción con `--tool-rounds` (2000 por defecto: las rondas dejan de ser un límite arbitrario) |
+| C2 | USD 6 | Hasta `--max-turns` turnos (40 por defecto) × `--tool-rounds` por turno (80 por defecto) |
+| C3 | USD 6 | Hasta `--max-steps` pasos de grafo, cada nodo con su propio *loop* de hasta `--max-turns` turnos (8 por defecto) |
+
+Toda corrida declara **por qué terminó** en `stopReason` de `run-report.json`
+(y en la línea `Stopped:` del resumen final); ver `runner/README.md`.
+
+C1 es una sola conversación sin compactación de historial, así que con 2000
+rondas puede llenar la ventana de contexto del modelo antes de agotar el
+dinero. Ese corte se registra como `stopReason: "context_overflow"` y es un
+**resultado del experimento, no un bug**: es el costo de no tener capas que
+gestionen el contexto.
 
 Consecuencias para el análisis:
 
@@ -52,8 +64,9 @@ Consecuencias para el análisis:
 - **Lo que debe ser idéntico entre configuraciones:** modelo, parámetros de
   muestreo (`--temperature`, `--top-p`, `--seed`, `--max-tokens`), el
   proveedor de OpenRouter fijado (`--provider`, por defecto `DeepInfra`), SPEC,
-  *skills*, servidores MCP y el tope de costo (`--max-cost`). El tope es una
-  red de seguridad, no un mecanismo de igualación.
+  *skills*, servidores MCP y el tope de costo (`--max-cost`). El tope es el
+  mecanismo de igualación entre configuraciones, no solo una red de
+  seguridad.
 - **Repeticiones.** Una corrida por configuración es una anécdota; los
   modelos no son deterministas aunque se fije `seed`. Correr cada
   configuración varias veces (N ≥ 3) con los mismos flags y reportar la

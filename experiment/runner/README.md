@@ -64,7 +64,7 @@ Router:
 | `--task-file <path>` | — | Sobrescribe la tarea de generación (corridas de validación económicas). En c3, cada nodo conserva su rol y verificación pero trabaja sobre esta tarea en lugar de la SPEC, y la tarea a nivel de grafo del `GraphEngine` también se fija al valor sobrescrito (los nodos son lo que el motor realmente ejecuta, pero la tarea a nivel de grafo ya no lo contradice). El archivo se valida (existe, es legible, no está vacío ni es solo espacios en blanco) **antes** de crear el espacio de trabajo de la corrida, con un error de uso y salida distinta de cero si falla, para cada `--config` — de modo que un `--task-file` inválido nunca deja un directorio de espacio de trabajo huérfano |
 | `--max-turns <n>` | 40 (c2), 8 por nodo (c3) | Presupuesto de turnos del *loop* (C2, y cada nodo de C3). Debe ser un entero positivo |
 | `--max-steps <n>` | 12 | Presupuesto de pasos del grafo (solo C3). Debe ser un entero positivo |
-| `--tool-rounds <n>` | 200 (c1), 80 (c2), 30 por nodo (c3) | Presupuesto de llamadas a herramienta por interacción. Debe ser un entero positivo |
+| `--tool-rounds <n>` | 2000 (c1), 80 (c2), 30 por nodo (c3) | Presupuesto de llamadas a herramienta por interacción. En c1 el valor por defecto es alto a propósito: las rondas no deben ser un límite arbitrario, el que manda es `--max-cost` (y, si la conversación única se llena, `context_overflow`). Debe ser un entero positivo |
 | `--temperature <n>` | sin valor (default del proveedor) | Temperatura de muestreo, número en [0, 2]. Se aplica a **todos** los adaptadores que crea el runner (el predeterminado y los de cada ruta del *router*), de modo que C1/C2/C3 muestreen igual |
 | `--top-p <n>` | sin valor | `top_p`, número en (0, 1]. Mismo alcance que `--temperature` |
 | `--seed <n>` | sin valor | `seed` de muestreo, entero. Mismo alcance que `--temperature` |
@@ -73,7 +73,7 @@ Router:
 | `--allow-provider-fallbacks` | desactivado | Con `--provider`, envía `allow_fallbacks: true` (OpenRouter puede usar otro proveedor si los listados fallan). Con `--provider none` es un error de uso |
 | `--model-timeout <s>` | 600 | Timeout por solicitud al modelo, en segundos (entero positivo). Cubre la respuesta completa, cuerpo incluido: OpenRouter responde 200 de inmediato y envía el cuerpo no *streaming* recién al terminar la generación, así que con contextos de 20-35k tokens el default del adaptador (120 s) agota el tiempo en cada reintento (`body_read_error ... aborted due to timeout`). Se pasa como `timeoutMs` a **todos** los adaptadores que crea el runner (el predeterminado y los de cada ruta del *router*; un `timeoutMs` explícito en la configuración de una ruta tiene prioridad). No cambia el default de la biblioteca. Un valor inválido termina con un error de uso |
 | `--model-retries <n>` | 8 | Reintentos por llamada al modelo ante 429, 5xx o errores de red (entero positivo). La espera se duplica desde 1 s hasta 30 s (o respeta `Retry-After`), así que 8 reintentos aguantan una saturación del proveedor de unos 2-3 minutos; con 3 (el default del adaptador) una saturación de DeepInfra cortaba la corrida en segundos. Se pasa a todos los adaptadores y queda en `modelRetries` del reporte |
-| `--max-cost <usd>` | sin valor (sin tope) | Tope de gasto en USD, número positivo. Envuelve el modelo de **todas** las configuraciones (c1/c2/c3, plano o con *router*) en un `BudgetedModelAdapter`: antes de cada llamada, si el costo acumulado (`usage.cost` que reporta el proveedor, p. ej. OpenRouter) ya alcanzó el tope, no se llama al modelo y se devuelve un error `budget_exceeded`. El tope se comprueba *antes* de la llamada, así que la última puede sobrepasarlo por su propio costo. Sin este flag la corrida no tiene tope y, si no es `--dry-run`, imprime una advertencia en stderr. Un valor inválido termina con un error de uso |
+| `--max-cost <usd>` | 6 (USD, para c1, c2 y c3) | Tope de gasto en USD, número positivo. Envuelve el modelo de **todas** las configuraciones (c1/c2/c3, plano o con *router*) en un `BudgetedModelAdapter`: antes de cada llamada, si el costo acumulado (`usage.cost` que reporta el proveedor, p. ej. OpenRouter) ya alcanzó el tope, no se llama al modelo y se devuelve un error `budget_exceeded`. El tope se comprueba *antes* de la llamada, así que la última puede sobrepasarlo por su propio costo. El dinero es el recurso que se iguala entre configuraciones, por eso el mismo valor por defecto aplica a las tres. No existe una forma de correr sin tope: para más margen, pasar un valor mayor. Un valor inválido termina con un error de uso |
 | `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf --retry 60 --retry-delay 2 --retry-all-errors http://localhost:3000/health` | Comando de verificación de C2. El `curl` reintenta hasta ~120 s porque `up -d` vuelve cuando arrancan los contenedores, no cuando el backend ya responde |
 | `--with-batteries` | desactivado | Después de la generación, levanta el stack y corre las baterías de aceptación |
 | `--keep` | desactivado | Con `--with-batteries`, **no** desmonta el stack al final |
@@ -96,6 +96,30 @@ acotan el resto de la corrida (en C3, un nodo fallido se reintenta como máximo
 una vez); la corrida queda `FAILED` con `failure` que empieza con
 `budget_exceeded:`. El *loop* corta en el primer turno que recibe
 `budget_exceeded`, sin ejecutar el `--verify-cmd` ni reintentar.
+
+### Motivo de término (`stopReason`)
+
+Cada corrida (salvo `--dry-run`, cuyo plan no lo incluye) escribe
+`stopReason` en `run-report.json` y lo imprime en el resumen final como
+`  Stopped:    <stopReason>`, junto a `Status`. Se deriva de la respuesta final
+(c1), del resultado del *loop* (c2) o del resultado del grafo (c3):
+
+| `stopReason` | Significado |
+|---|---|
+| `finished` | El modelo dio una respuesta final (en c2/c3, además la corrida fue `SUCCESS`) |
+| `budget_exceeded` | El tope `--max-cost` rechazó al menos una llamada al modelo (tiene prioridad sobre el resto, salvo `runner_error`) |
+| `max_tool_rounds` | Se agotaron las rondas de herramienta (`--tool-rounds`) sin respuesta final |
+| `max_turns` | c2: se agotaron los turnos sin éxito. c3: un nodo agotó sus turnos y el grafo falló |
+| `max_steps` | c3: se agotaron los pasos del grafo (`--max-steps`), o el grafo terminó en `FAILED` tras reintentos sin que fallara el *loop* del último nodo (p. ej. el revisor no aceptó) |
+| `context_overflow` | El *prompt* excede la ventana de contexto del modelo (HTTP 400/413 con texto de contexto; ver `harness/docs/model-provider.md`). En c1 (conversación única, sin compactación) es un **resultado**, no un bug |
+| `repeated_tool_call` | El modelo repitió la misma llamada con los mismos argumentos hasta el límite del *harness* |
+| `empty_content` | El modelo respondió sin contenido ni llamada a herramienta, agotados los reintentos con *nudge* |
+| `provider_refused` | El proveedor rechazó la llamada (`http_401` o `http_402`) |
+| `model_error` | Cualquier otro código de error del modelo |
+| `runner_error` | Excepción del runner (o `--harness-config` inválido), no del modelo |
+
+En c2/c3, un `FAILED` causado por un error del modelo en el último turno/nodo
+usa la categoría de ese error (por ejemplo `context_overflow`).
 
 Los flags de muestreo que no se pasan quedan sin definir: el campo se omite
 de la solicitud y rige el default del proveedor. Un valor inválido termina con
@@ -481,9 +505,14 @@ espacio de trabajo, así que también es entrada del modelo). Las corridas anter
 `--model-timeout`; 600000 por defecto) también está presente en toda corrida,
 incluidas las fallidas y el plan de `--dry-run`.
 
+`stopReason` (todo reporte de corrida, salvo el plan de `--dry-run`) es uno de
+`finished`, `budget_exceeded`, `max_tool_rounds`, `max_turns`, `max_steps`,
+`context_overflow`, `repeated_tool_call`, `empty_content`, `provider_refused`,
+`model_error` o `runner_error`; ver "Motivo de término (`stopReason`)".
+
 `budget` (también presente en toda corrida, incluidas las fallidas y el plan de
 `--dry-run`) vale `{ maxCostUsd, exhausted, costReported }`: `maxCostUsd` es
-`null` sin `--max-cost`; `exhausted` es `true` cuando el costo acumulado
+`6` por defecto (sobrescribible con `--max-cost`); `exhausted` es `true` cuando el costo acumulado
 alcanzó el tope; `costReported` es `true`/`false` según el proveedor haya
 informado costo (`null` si aún no hubo llamadas). Si el tope rechazó alguna
 llamada, `status` es `FAILED` y `failure` empieza con `budget_exceeded:` (el
@@ -503,8 +532,9 @@ false` y un tope definido se agrega `budget.warning`.
   "finishedAt": "...",
   "durationMs": 0,
   "status": "SUCCESS|FAILED",
+  "stopReason": "finished|budget_exceeded|max_tool_rounds|max_turns|max_steps|context_overflow|repeated_tool_call|empty_content|provider_refused|model_error|runner_error",
   "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "calls": 0, "providersUsed": { "DeepInfra": 0 } },
-  "budget": { "maxCostUsd": null, "exhausted": false, "costReported": null },
+  "budget": { "maxCostUsd": 6, "exhausted": false, "costReported": null },
   "turns": 0,
   "steps?": 0,
   "totalLoopTurns?": 0,

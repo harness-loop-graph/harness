@@ -13,6 +13,8 @@ import {
   SONAR_EXCLUSIONS,
   parseBatteryReport,
   parseArgs,
+  deriveStopReason,
+  STOP_REASONS,
   buildNodes,
   loadHarnessExtras,
   buildHarness,
@@ -1690,8 +1692,10 @@ test('loadCredentials exports MODEL_* from the .env file without overriding the 
   }
 });
 
-test('parseArgs() --max-cost defaults to unset (null) and parses a positive number', () => {
-  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).maxCostUsd, null);
+test('parseArgs() --max-cost defaults to USD 6 for every config and parses a positive number', () => {
+  for (const config of ['c1', 'c2', 'c3']) {
+    assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', config]).maxCostUsd, 6);
+  }
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--max-cost', '2.5']).maxCostUsd, 2.5);
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c3', '--max-cost', '0.01']).maxCostUsd, 0.01);
 });
@@ -1710,7 +1714,7 @@ test('--max-cost rejects missing, zero, negative and non-numeric values with a u
   }
 });
 
-test('--dry-run plan includes the budget (null cap when --max-cost is unset)', async () => {
+test('--dry-run plan includes the budget (USD 6 cap unless --max-cost is given)', async () => {
   const { spawnSync } = await import('node:child_process');
   const run = (extra) => {
     const res = spawnSync(
@@ -1721,7 +1725,7 @@ test('--dry-run plan includes the budget (null cap when --max-cost is unset)', a
     assert.equal(res.status, 0, res.stderr);
     return JSON.parse(res.stdout);
   };
-  assert.deepEqual(run([]).budget, { maxCostUsd: null, exhausted: false, costReported: null });
+  assert.deepEqual(run([]).budget, { maxCostUsd: 6, exhausted: false, costReported: null });
   assert.deepEqual(run(['--max-cost', '3']).budget, { maxCostUsd: 3, exhausted: false, costReported: null });
 });
 
@@ -1868,10 +1872,69 @@ test('harness instructions pin the repository root to the workspace root', () =>
   assert.match(HARNESS_INSTRUCTIONS, /Stay inside the workspace/);
 });
 
-test('default tool-round budget lets c1 finish the SPEC and keeps c2/c3 per-turn budget', () => {
-  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).toolRounds, 200);
+test('default tool-round budget makes c1 rounds a non-limit (2000) and keeps c2/c3 per-turn budget', () => {
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).toolRounds, 2000);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--tool-rounds', '50']).toolRounds, 50);
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']).toolRounds, 80);
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c3']).toolRounds, 30);
+});
+
+const err = (code) => ({ type: 'error', code, message: 'm' });
+const finish = { type: 'finish', content: 'done' };
+const nodeRun = (status, finalResponse) => ({ nodeId: 'n', role: 'r', status, turns: 1, finalResponse, verifications: [] });
+const graph = (status, failure, nodeResults) => ({ status, failure, decision: { action: status === 'SUCCESS' ? 'FINISH' : 'FAIL', reason: failure ?? 'ok' }, state: { nodeResults } });
+
+test('deriveStopReason() c1: finish is finished and each model error code maps to its category', () => {
+  const c1 = (finalResponse, extra = {}) => deriveStopReason({ finalResponse, ...extra });
+  assert.equal(c1(finish), 'finished');
+  assert.equal(c1(err('max_tool_rounds')), 'max_tool_rounds');
+  assert.equal(c1(err('context_overflow')), 'context_overflow');
+  assert.equal(c1(err('repeated_tool_call')), 'repeated_tool_call');
+  assert.equal(c1(err('empty_content')), 'empty_content');
+  assert.equal(c1(err('budget_exceeded')), 'budget_exceeded');
+  assert.equal(c1(err('http_401')), 'provider_refused');
+  assert.equal(c1(err('http_402')), 'provider_refused');
+  for (const code of ['http_400', 'http_500', 'network_error', 'output_truncated', 'invalid_json', '400']) {
+    assert.equal(c1(err(code)), 'model_error', code);
+  }
+});
+
+test('deriveStopReason() a refused model call or a runner exception beats the final outcome', () => {
+  assert.equal(deriveStopReason({ budgetRefused: true, finalResponse: err('empty_content') }), 'budget_exceeded');
+  assert.equal(deriveStopReason({ budgetRefused: true, loopResult: { status: 'FAILED', finalResponse: finish } }), 'budget_exceeded');
+  assert.equal(deriveStopReason({ runnerError: 'boom', budgetRefused: true, finalResponse: finish }), 'runner_error');
+  assert.equal(deriveStopReason({ runnerError: 'harness-config: bad' }), 'runner_error');
+  assert.equal(deriveStopReason({}), 'runner_error', 'no outcome at all is a runner problem');
+});
+
+test('deriveStopReason() c2: success, last-turn model error category, otherwise max_turns', () => {
+  const c2 = (status, finalResponse) => deriveStopReason({ loopResult: { status, finalResponse } });
+  assert.equal(c2('SUCCESS', finish), 'finished');
+  assert.equal(c2('FAILED', finish), 'max_turns', 'finished but verification kept failing until turns ran out');
+  assert.equal(c2('FAILED', undefined), 'max_turns');
+  assert.equal(c2('FAILED', err('context_overflow')), 'context_overflow');
+  assert.equal(c2('FAILED', err('max_tool_rounds')), 'max_tool_rounds');
+  assert.equal(c2('FAILED', err('http_402')), 'provider_refused');
+  assert.equal(c2('FAILED', err('network_error')), 'model_error');
+});
+
+test('deriveStopReason() c3: success, maxSteps, last-node model error category, otherwise max_turns/max_steps', () => {
+  const c3 = (g) => deriveStopReason({ graphResult: g });
+  assert.equal(c3(graph('SUCCESS', undefined, [nodeRun('SUCCESS', finish)])), 'finished');
+  assert.equal(c3(graph('FAILED', 'maxSteps (12) reached without finishing', [nodeRun('FAILED', err('http_500'))])), 'max_steps');
+  assert.equal(c3(graph('FAILED', 'backend FAILED after max retries', [nodeRun('SUCCESS', finish), nodeRun('FAILED', err('empty_content'))])), 'empty_content');
+  assert.equal(c3(graph('FAILED', 'backend FAILED after max retries', [nodeRun('FAILED', err('repeated_tool_call'))])), 'repeated_tool_call');
+  assert.equal(c3(graph('FAILED', 'backend FAILED after max retries', [nodeRun('FAILED', err('http_401'))])), 'provider_refused');
+  assert.equal(c3(graph('FAILED', 'backend FAILED after max retries', [nodeRun('FAILED', err('http_503'))])), 'model_error');
+  assert.equal(c3(graph('FAILED', 'backend FAILED after max retries', [nodeRun('FAILED', finish)])), 'max_turns');
+  assert.equal(c3(graph('FAILED', 'reviewer returned unacceptable after max retries', [nodeRun('SUCCESS', finish)])), 'max_steps');
+});
+
+test('deriveStopReason() only ever returns a documented STOP_REASONS value', () => {
+  assert.deepEqual([...STOP_REASONS].sort(), [
+    'budget_exceeded', 'context_overflow', 'empty_content', 'finished', 'max_steps', 'max_tool_rounds',
+    'max_turns', 'model_error', 'provider_refused', 'repeated_tool_call', 'runner_error',
+  ]);
 });
 
 test('parseBatteryReport reads the pretty-printed run-all.mjs report', () => {

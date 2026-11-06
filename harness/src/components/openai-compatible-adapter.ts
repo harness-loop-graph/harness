@@ -143,9 +143,25 @@ function isRetryableApiError(error: ApiError): boolean {
   return typeof code === 'number' && (RETRYABLE_STATUSES.has(code) || code === 408);
 }
 
+const CONTEXT_OVERFLOW_PATTERN =
+  /context length|context window|maximum context|too many tokens|context_length_exceeded|prompt is too long/i;
+
+/**
+ * True when a provider rejection means the prompt does not fit the model's
+ * context window: an HTTP 400/413 whose text names the limit. Permanent, so
+ * it is never in RETRYABLE_STATUSES.
+ */
+function isContextOverflow(status: number, text: string): boolean {
+  return (status === 400 || status === 413) && CONTEXT_OVERFLOW_PATTERN.test(text);
+}
+
 /** Maps a payload `error` object to a typed error, keeping message and code diagnosable. */
 function describeApiError(error: ApiError): Extract<ModelResponse, { type: 'error' }> {
   const message = error.message ?? 'Unknown API error';
+  const numericCode = typeof error.code === 'string' && /^\d+$/.test(error.code.trim()) ? Number(error.code) : error.code;
+  if (typeof numericCode === 'number' && isContextOverflow(numericCode, message)) {
+    return { type: 'error', code: 'context_overflow', message: `${message} (code: ${error.code})` };
+  }
   return {
     type: 'error',
     code: String(error.code ?? 'api_error'),
@@ -392,7 +408,9 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
           }
         } else {
           const text = await response.text().catch(() => '');
-          failure = { type: 'error', code: `http_${response.status}`, message: text.slice(0, 2000) };
+          failure = isContextOverflow(response.status, text)
+            ? { type: 'error', code: 'context_overflow', message: text.slice(0, 2000) }
+            : { type: 'error', code: `http_${response.status}`, message: text.slice(0, 2000) };
           if (!RETRYABLE_STATUSES.has(response.status)) return failure;
           retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
         }

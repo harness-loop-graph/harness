@@ -117,6 +117,9 @@ function parseNumberFlag(flag, raw, { describe, valid }) {
   return n;
 }
 
+// Same cost cap for every config; override with --max-cost <usd>.
+const DEFAULT_MAX_COST_USD = 6;
+
 function parseArgs(argv) {
   const args = argv.slice(2);
   const parsed = {
@@ -136,8 +139,8 @@ function parseArgs(argv) {
     keep: false,
     dryRun: false,
     harnessConfig: null,
-    // null = no cost ceiling (a stderr warning is printed on non-dry runs).
-    maxCostUsd: null,
+    // Money is the equalized resource across c1/c2/c3: every config gets the same cost cap.
+    maxCostUsd: DEFAULT_MAX_COST_USD,
     publish: false,
     publishOrg: 'harness-loop-graph',
     sonarOrg: 'harness-loop-graph',
@@ -229,7 +232,7 @@ function parseArgs(argv) {
     parsed.maxTurns = parsed.config === 'c2' ? 40 : 8;
   }
   if (parsed.toolRounds == null) {
-    parsed.toolRounds = parsed.config === 'c1' ? 200 : parsed.config === 'c2' ? 80 : 30;
+    parsed.toolRounds = parsed.config === 'c1' ? 2000 : parsed.config === 'c2' ? 80 : 30;
   }
   return parsed;
 }
@@ -1120,6 +1123,70 @@ function applyBudgetToReport(report, model, maxCostUsd) {
   }
 }
 
+// Why a run ended, in one value. Order matters: a thrown exception wins, then a
+// refused model call (the budget cap), then the shape of the final outcome.
+const STOP_REASONS = [
+  'finished',
+  'budget_exceeded',
+  'max_tool_rounds',
+  'max_turns',
+  'max_steps',
+  'context_overflow',
+  'repeated_tool_call',
+  'empty_content',
+  'provider_refused',
+  'model_error',
+  'runner_error',
+];
+
+/** Category of a model error code (a ModelResponse `error`), shared by c1/c2/c3. */
+function stopReasonForModelError(code) {
+  switch (code) {
+    case 'budget_exceeded':
+    case 'max_tool_rounds':
+    case 'context_overflow':
+    case 'repeated_tool_call':
+    case 'empty_content':
+      return code;
+    case 'http_401':
+    case 'http_402':
+      return 'provider_refused';
+    default:
+      return 'model_error';
+  }
+}
+
+/**
+ * Pure derivation of `report.stopReason` from what the runner already has.
+ * `runnerError`: truthy when the runner itself threw (or the harness config
+ * failed). `budgetRefused`: the cost cap refused at least one model call.
+ * Exactly one outcome applies: `finalResponse` (c1), `loopResult` (c2) or
+ * `graphResult` (c3). A failure caused by a model error in the last turn/node
+ * uses that error's category; otherwise c2 ran out of turns (`max_turns`) and
+ * c3 ran out of steps/retries (`max_steps`).
+ */
+function deriveStopReason({ runnerError = null, budgetRefused = false, finalResponse = null, loopResult = null, graphResult = null } = {}) {
+  if (runnerError) return 'runner_error';
+  if (budgetRefused) return 'budget_exceeded';
+  const fromResponse = (r) => (r?.type === 'error' ? stopReasonForModelError(r.code) : null);
+  if (finalResponse) {
+    if (finalResponse.type === 'finish') return 'finished';
+    return fromResponse(finalResponse) ?? 'model_error';
+  }
+  if (loopResult) {
+    if (loopResult.status === 'SUCCESS') return 'finished';
+    return fromResponse(loopResult.finalResponse) ?? 'max_turns';
+  }
+  if (graphResult) {
+    if (graphResult.status === 'SUCCESS') return 'finished';
+    if (/^maxSteps \(/.test(graphResult.failure ?? graphResult.decision?.reason ?? '')) return 'max_steps';
+    const last = graphResult.state?.nodeResults?.at(-1);
+    if (last?.status === 'FAILED') return fromResponse(last.finalResponse) ?? 'max_turns';
+    return 'max_steps';
+  }
+  return 'runner_error';
+}
+
 function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
   const execution = new LocalExecutionManager({
     workspaceRoot: ws,
@@ -1474,10 +1541,6 @@ async function main() {
     turns: 0,
   };
 
-  if (parsed.maxCostUsd == null) {
-    console.error('Warning: no --max-cost set; this run has no cost ceiling.');
-  }
-
   let harnessExtras = null;
   let configFailure = null;
   try {
@@ -1494,12 +1557,15 @@ async function main() {
 
   let runException = null;
   let runModel = null;
+  // The one outcome object deriveStopReason() reads (set by the config's branch).
+  let stopOutcome = {};
   if (!configFailure) try {
     if (parsed.config === 'c1') {
       const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, reasoningLogFile: path.join(ws, 'reasoning.jsonl'), maxCostUsd: parsed.maxCostUsd });
       runModel = model;
       const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
+      stopOutcome = { finalResponse: result.finalResponse };
       report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
       attachUsageAndRouting(report, model);
       report.turns = result.turns.length;
@@ -1520,6 +1586,7 @@ async function main() {
         verification: { command: parsed.verifyCmd },
         toolRoundsPerTurn: parsed.toolRounds,
       });
+      stopOutcome = { loopResult };
       report.status = loopResult.status;
       attachUsageAndRouting(report, model);
       report.turns = loopResult.turns;
@@ -1548,6 +1615,7 @@ async function main() {
         maxSteps: parsed.maxSteps,
       }, buildRouter(ws));
       const graphResult = await engine.run();
+      stopOutcome = { graphResult };
       report.status = graphResult.status;
       attachUsageAndRouting(report, model);
       report.steps = graphResult.steps;
@@ -1603,6 +1671,11 @@ async function main() {
   // Also reached after a thrown exception or config failure (runModel may be
   // null), so budget is present in every report.
   applyBudgetToReport(report, runModel, parsed.maxCostUsd);
+  report.stopReason = deriveStopReason({
+    runnerError: configFailure || runException,
+    budgetRefused: runModel instanceof BudgetedModelAdapter && runModel.blockedCalls > 0,
+    ...stopOutcome,
+  });
   if (report.budget.maxCostUsd != null && report.budget.costReported === false) {
     report.budget.warning = 'The provider reported no cost (usage.cost), so --max-cost cannot be enforced';
     console.error(`Warning: ${report.budget.warning}.`);
@@ -1646,6 +1719,7 @@ async function main() {
   console.error(`  Model:      ${report.model}`);
   console.error(`  Workspace:  ${ws}`);
   console.error(`  Status:     ${report.status}`);
+  console.error(`  Stopped:    ${report.stopReason}`);
   console.error(`  Duration:   ${report.durationMs}ms`);
   if (report.turns != null) console.error(`  Turns:      ${report.turns}`);
   if (report.steps != null) console.error(`  Steps:      ${report.steps}`);
@@ -1691,6 +1765,9 @@ export {
   summarizeRouting,
   attachUsageAndRouting,
   applyBudgetToReport,
+  deriveStopReason,
+  STOP_REASONS,
+  DEFAULT_MAX_COST_USD,
   compactTraceC2,
   BATTERY_TIMEOUT_MS,
   MAX_TRACE_TEXT_CHARS,

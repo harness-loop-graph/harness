@@ -125,6 +125,16 @@ defecto).
   (tras agotar los reintentos, ver "Política de reintentos").
 - HTTP no 2xx → `{ type: 'error', code: 'http_<status>', message }` (cuerpo
   truncado a 2000 caracteres; tras agotar los reintentos, ver "Política de reintentos").
+- **Desborde de contexto** → `{ type: 'error', code: 'context_overflow', message }`.
+  Se reconoce un HTTP 400 o 413 (o un 200 cuyo `error.code` es 400/413) cuyo
+  texto contiene, sin distinguir mayúsculas, `context length`, `context window`,
+  `maximum context`, `too many tokens`, `context_length_exceeded` o
+  `prompt is too long`. Significa que el *prompt* no cabe en la ventana del
+  modelo: es permanente, **nunca se reintenta** y no cuenta como `http_400`.
+  Con otro texto, un 400 sigue siendo `http_400`. `AgentLoop` no lo trata como
+  fatal (cada turno de C2/C3 arranca una conversación nueva), pero en una
+  conversación única sin compactación (C1) termina la corrida; el runner del
+  experimento lo informa como `stopReason: "context_overflow"`.
 - Cuerpo no JSON → `{ type: 'error', code: 'invalid_json', ... }`.
 - Un campo `error` JSON en el payload → `{ type: 'error', code, message }`.
 - `choices[0].finish_reason` es `length` → `{ type: 'error', code: 'output_truncated', ... }`; es `content_filter` → `{ type: 'error', code: 'content_filtered', ... }`. Se evalúa antes de leer `content`/`tool_calls`, así una respuesta cortada nunca se toma como final ni como llamada a herramienta (el uso de tokens igual se contabiliza).
@@ -159,7 +169,7 @@ la inestabilidad del proveedor (`report.usage.retries`).
   Igual se reintenta un 200 cuyo JSON trae un objeto `error` con `code`
   numérico (o cadena numérica) en 429, 500, 502, 503, 504 o 408: es un fallo
   transitorio del proveedor upstream (p. ej. OpenRouter).
-- **No se reintenta**: cualquier otro 4xx (400, 401, 403, 404, 422) ni un
+- **No se reintenta**: cualquier otro 4xx (400, 401, 403, 404, 422; incluido el desborde de contexto, que se devuelve como `context_overflow`) ni un
   payload exitoso pero semánticamente inválido (JSON válido con `error` de
   otro código, p. ej. 400, 401, 402 sin créditos o 403; `empty_response`, `output_truncated`, etc.); esos se devuelven de
   inmediato. Si el JSON trae un objeto `error`, el mensaje devuelto incluye

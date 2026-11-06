@@ -956,6 +956,55 @@ describe('OpenAICompatibleModelAdapter', () => {
       expect(adapter.getUsage().retries).toBe(0);
     });
 
+    it.each([
+      [400, "This model's maximum context length is 131072 tokens. However, you requested 140000 tokens"],
+      [400, 'Context window exceeded'],
+      [413, 'Request too large: too many tokens in the prompt'],
+      [400, 'Your input exceeds the MAXIMUM CONTEXT of this model'],
+      [400, 'prompt is too long: 210000 tokens > 200000 maximum'],
+      [400, 'Error code: context_length_exceeded'],
+    ])('maps HTTP %i "%s" to context_overflow without retrying', async (status, message) => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(status, { error: { message } }));
+      const { adapter, sleep } = retryAdapter(fetchImpl);
+
+      const result = await adapter.complete(request());
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(result.type).toBe('error');
+      if (result.type === 'error') {
+        expect(result.code).toBe('context_overflow');
+        expect(result.message).toContain(message);
+      }
+      expect(adapter.getUsage().retries).toBe(0);
+    });
+
+    it('maps a 200 payload wrapping a 400 context-length error to context_overflow', async () => {
+      const fetchImpl = vi
+        .fn()
+        .mockImplementation(async () =>
+          jsonResponse(200, { error: { message: 'Input is over the context window', code: 400 } }),
+        );
+      const { adapter, sleep } = retryAdapter(fetchImpl);
+
+      const result = await adapter.complete(request());
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ type: 'error', code: 'context_overflow' });
+    });
+
+    it.each([
+      [400, 'Invalid request: unknown parameter'],
+      [401, 'context length is irrelevant for an auth error'],
+      [422, 'prompt is too long'],
+    ])('keeps http_%i for "%s" (not a context overflow)', async (status, message) => {
+      const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(status, { error: { message } }));
+      const { adapter } = retryAdapter(fetchImpl);
+
+      expect(await adapter.complete(request())).toMatchObject({ type: 'error', code: `http_${status}` });
+    });
+
     it('does not retry a successful-but-invalid payload', async () => {
       const fetchImpl = vi.fn().mockImplementation(async () => jsonResponse(200, { choices: [] }));
       const { adapter } = retryAdapter(fetchImpl);
