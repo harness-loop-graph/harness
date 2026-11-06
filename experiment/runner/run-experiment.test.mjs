@@ -837,7 +837,7 @@ test('initWorkspaceRepo() creates a git repo with one commit, a .gitignore, and 
     assert.ok(!tracked.some((f) => f.startsWith('node_modules/')));
 
     const gitignore = await fs.readFile(path.join(ws, '.gitignore'), 'utf-8');
-    for (const line of ['node_modules/', 'dist/', 'build/', 'coverage/', '.env*']) {
+    for (const line of ['node_modules/', 'dist/', 'build/', 'coverage/', '.env*', 'reasoning.jsonl']) {
       assert.ok(gitignore.includes(line), `expected .gitignore to include '${line}'`);
     }
   } finally {
@@ -1572,6 +1572,38 @@ test('createModel() passes maxRetries to the default adapter and every route ada
     delete process.env.RETRY_ROUTE_KEY;
     if (previousBaseUrl === undefined) delete process.env.MODEL_BASE_URL;
     else process.env.MODEL_BASE_URL = previousBaseUrl;
+  }
+});
+
+test('createModel() passes reasoningLogFile to the default adapter and every route adapter', async () => {
+  const created = [];
+  const makeAdapter = (cfg) => {
+    created.push(cfg);
+    return { async complete() { return { type: 'finish', content: 'stub' }; } };
+  };
+  const previous = { MODEL_API_KEY: process.env.MODEL_API_KEY, MODEL_BASE_URL: process.env.MODEL_BASE_URL };
+  process.env.MODEL_API_KEY = 'env-key';
+  process.env.MODEL_BASE_URL = 'https://test.example/v1';
+  try {
+    const harnessExtras = { router: { routes: { retry: { model: 'retry-model' } } } };
+    await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, makeAdapter, reasoningLogFile: '/ws/reasoning.jsonl' });
+    assert.equal(created[0].reasoningLogFile, '/ws/reasoning.jsonl');
+
+    // Default adapter (plain, no router) receives it too.
+    const plain = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null, reasoningLogFile: '/ws/reasoning.jsonl' });
+    assert.equal(plain.reasoningLogFile, '/ws/reasoning.jsonl');
+
+    // Without it nothing is logged and route configs carry no such key.
+    created.length = 0;
+    const unset = await createModel({ apiKey: 'k', modelId: 'm', harnessExtras: null });
+    assert.equal(unset.reasoningLogFile, null);
+    await createModel({ apiKey: 'k', modelId: 'm', harnessExtras, makeAdapter });
+    assert.ok(!('reasoningLogFile' in created[0]));
+  } finally {
+    for (const [k, v] of Object.entries(previous)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   }
 });
 

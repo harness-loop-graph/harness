@@ -209,7 +209,7 @@ convierte en su propio repositorio git:
 
 1. `git init -b main`.
 2. Se agrega (o extiende) un `.gitignore` con `node_modules/`, `dist/`,
-   `build/`, `coverage/` y `.env*`.
+   `build/`, `coverage/`, `.env*` y `reasoning.jsonl`.
 3. Todo se commitea (incluyendo `run-report.json` y los logs
    `audit*.jsonl`) con el mensaje `run: <model> <config> (<status>)`, usando
    una identidad local fija de git (`pi-runner
@@ -429,6 +429,31 @@ Si tenés `jq` (el runner no lo requiere), una vista compacta:
 ```sh
 tail -f <espacio-de-trabajo>/audit.jsonl | jq -r '"\(.at[11:19]) \(.decision) \(.tool // "cmd") \(.path // .command // .name // "")"'
 ```
+
+### Ver el razonamiento del modelo
+
+Para ver, al menos a grandes rasgos, *por qué* el modelo hace cada acción, el
+runner agrega a `<espacio-de-trabajo>/reasoning.jsonl` una línea por respuesta
+del modelo que traiga texto de razonamiento (el que OpenRouter devuelve en
+`message.reasoning`/`reasoning_details` para modelos de razonamiento): `at`,
+`model`, `provider`, `reasoningChars`, `reasoning` (recortado a 2000 caracteres
+con `…`) y `action` (`tool_call <herramienta> <path|name|comando>`, `finish` o
+`error <código>`). Las respuestas sin razonamiento no escriben nada. En C3 todos
+los nodos comparten el mismo archivo; con `--dry-run` no se crea.
+
+```sh
+tail -f <espacio-de-trabajo>/reasoning.jsonl
+```
+
+Con `jq` (opcional), hora, acción y los primeros ~200 caracteres del razonamiento:
+
+```sh
+tail -f <espacio-de-trabajo>/reasoning.jsonl | jq -r '"\(.at[11:19]) \(.action)\n    \(.reasoning[:200] | gsub("\n"; " "))"'
+```
+
+Este archivo es **solo local**: está en el `.gitignore` del espacio de trabajo
+(`reasoning.jsonl`), así que no se commitea ni se publica con el repositorio de
+la corrida.
 
 ## Referencia de `run-report.json`
 
@@ -695,7 +720,7 @@ crea nada (también ejercitado de punta a punta vía un lanzamiento real de la
 CLI con `--dry-run`); `initWorkspaceRepo()` contra un repositorio git local
 real en un directorio temporal (rama `main`, un commit con la identidad fija
 `pi-runner`, `.gitignore` cubriendo
-`node_modules/`/`dist/`/`build/`/`coverage/`/`.env*`);
+`node_modules/`/`dist/`/`build/`/`coverage/`/`.env*`/`reasoning.jsonl`);
 `scanWorkspaceForSecrets()`/`collectSecretValues()` detectando una clave
 plantada (y el `apiKeyEnv` de una ruta configurada) sin nunca hacer
 aserciones sobre el valor en sí; `findAcceptancePathInWorkspace()`; y

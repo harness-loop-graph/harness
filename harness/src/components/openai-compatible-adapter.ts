@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs';
 import type { ModelRequest, ModelResponse } from '../contracts/core.js';
 import type { ModelAdapter } from './model-adapter.js';
 import { truncateMiddle } from './truncate.js';
@@ -13,6 +14,10 @@ const MAX_BACKOFF_MS = 30_000;
 const MAX_BODY_SNIPPET_CHARS = 300;
 /** Cap for a provider-supplied Retry-After delay. */
 const MAX_RETRY_AFTER_MS = 60_000;
+/** Max chars of reasoning text kept per line of the reasoning log. */
+const MAX_REASONING_LOG_CHARS = 2000;
+/** Max chars of a `command` argument quoted in a reasoning log action. */
+const MAX_ACTION_COMMAND_CHARS = 200;
 
 export interface OpenAICompatibleAdapterConfig {
   /** API key. Falls back to process.env.MODEL_API_KEY. */
@@ -59,6 +64,13 @@ export interface OpenAICompatibleAdapterConfig {
    * only when set, pinning every call to the listed upstream providers.
    */
   provider?: ProviderRoutingConfig;
+  /**
+   * JSONL file that receives, after each successful completion, the model's
+   * reasoning text (clipped) with a short description of the action it chose.
+   * Completions without reasoning text write nothing; write failures are
+   * swallowed. Unset (default) logs nothing. Never changes the request body.
+   */
+  reasoningLogFile?: string;
 }
 
 /** OpenRouter provider routing: tried in `order`; with `allowFallbacks` false, no other provider is used. */
@@ -99,6 +111,9 @@ interface ChatCompletionResponse {
         type: 'function';
         function: { name: string; arguments: string };
       }>;
+      /** Reasoning text, as returned by OpenRouter for reasoning models. */
+      reasoning?: string | null;
+      reasoning_details?: Array<{ type?: string; text?: string; summary?: string }>;
     };
   }>;
   error?: { code?: string | number; message?: string };
@@ -138,6 +153,30 @@ function describeApiError(error: ApiError): Extract<ModelResponse, { type: 'erro
   };
 }
 
+/** Reasoning text of a completion: `message.reasoning`, else the joined `reasoning_details` texts/summaries. */
+function extractReasoning(message: NonNullable<NonNullable<ChatCompletionResponse['choices']>[number]['message']> | undefined): string {
+  if (!message) return '';
+  if (typeof message.reasoning === 'string' && message.reasoning.trim() !== '') return message.reasoning;
+  if (!Array.isArray(message.reasoning_details)) return '';
+  return message.reasoning_details
+    .map((d) => d?.text ?? d?.summary ?? '')
+    .filter((t) => typeof t === 'string' && t.trim() !== '')
+    .join('\n');
+}
+
+/** Short description of what the model returned, for the reasoning log. */
+function describeAction(response: ModelResponse): string {
+  if (response.type === 'finish') return 'finish';
+  if (response.type === 'error') return `error ${response.code}`;
+  const { path, name, command } = response.args;
+  const detail =
+    typeof path === 'string' ? path
+    : typeof name === 'string' ? name
+    : typeof command === 'string' ? command.slice(0, MAX_ACTION_COMMAND_CHARS)
+    : '';
+  return detail === '' ? `tool_call ${response.tool}` : `tool_call ${response.tool} ${detail}`;
+}
+
 /**
  * OpenAI-compatible chat-completions adapter. The only harness component
  * that knows how to talk to a provider; swapping providers means pointing
@@ -157,6 +196,7 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
   private readonly random: () => number;
   private readonly sampling: SamplingConfig;
   private readonly provider: ProviderRoutingConfig | null;
+  private readonly reasoningLogFile: string | null;
   private retries = 0;
   private promptTokens = 0;
   private completionTokens = 0;
@@ -187,6 +227,7 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     this.provider = config.provider
       ? { order: [...config.provider.order], allowFallbacks: config.provider.allowFallbacks }
       : null;
+    this.reasoningLogFile = config.reasoningLogFile ?? null;
 
     if (this.apiKey === '') {
       throw new Error('MODEL_API_KEY is not set. Export it before constructing OpenAICompatibleModelAdapter.');
@@ -233,6 +274,13 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       this.cost += payload.usage.cost ?? 0;
     }
 
+    const result = this.interpretPayload(payload);
+    this.logReasoning(payload, result);
+    return result;
+  }
+
+  /** Maps a parsed 2xx payload to a ModelResponse. Usage accounting happens before, in complete(). */
+  private interpretPayload(payload: ChatCompletionResponse): ModelResponse {
     if (payload.error) return describeApiError(payload.error);
 
     // A cut-off or blocked completion is never a valid answer or tool call.
@@ -277,6 +325,27 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
     }
 
     return { type: 'error', code: 'empty_content', message: 'The model returned neither content nor a tool call' };
+  }
+
+  /** Appends one JSONL line with the clipped reasoning and the chosen action; never throws. */
+  private logReasoning(payload: ChatCompletionResponse, result: ModelResponse): void {
+    if (this.reasoningLogFile === null) return;
+    try {
+      const reasoning = extractReasoning(payload.choices?.[0]?.message);
+      if (reasoning === '') return;
+      const clipped = reasoning.length > MAX_REASONING_LOG_CHARS ? `${reasoning.slice(0, MAX_REASONING_LOG_CHARS)}…` : reasoning;
+      const line = {
+        at: new Date().toISOString(),
+        model: payload.model ?? this.model,
+        ...(payload.provider && { provider: payload.provider }),
+        reasoningChars: reasoning.length,
+        reasoning: clipped,
+        action: describeAction(result),
+      };
+      appendFileSync(this.reasoningLogFile, `${JSON.stringify(line)}\n`);
+    } catch {
+      // Observability only: a failed write must never break the model call.
+    }
   }
 
   /**

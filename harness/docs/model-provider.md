@@ -42,6 +42,7 @@ qué el diseño en sí se mantiene agnóstico de proveedor.
 | `topP` | argumento del constructor | sin valor (default del proveedor); se envía como `top_p` |
 | `seed` | argumento del constructor | sin valor (default del proveedor); se envía como `seed` |
 | `maxTokens` | argumento del constructor | sin valor (default del proveedor); se envía como `max_tokens` |
+| `reasoningLogFile` | argumento del constructor | sin valor (no registra nada); ruta de un archivo JSONL, ver abajo |
 
 Los cuatro campos de muestreo son opcionales: cada uno se incluye en el cuerpo
 de la solicitud **solo si está definido** (el `0` cuenta como definido); si no,
@@ -183,6 +184,35 @@ Configuración en `OpenAICompatibleAdapterConfig` (todo opcional):
 | `retryBaseDelayMs` | `1000` | Base del *backoff* exponencial. |
 | `sleep` | `setTimeout` | `(ms) => Promise<void>` inyectable para que los tests no esperen. |
 | `random` | `Math.random` | Fuente `[0, 1)` inyectable para el *jitter*. |
+
+## Opcional: registro del razonamiento — `reasoningLogFile`
+
+Los modelos de razonamiento (p. ej. `deepseek/deepseek-v4.1-flash-1017` vía
+OpenRouter) devuelven su texto de razonamiento en `choices[0].message.reasoning`
+y/o en `message.reasoning_details` (entradas `reasoning.text` con `text` o
+`reasoning.summary` con `summary`; las `reasoning.encrypted` no traen texto). Con
+`reasoningLogFile` definido, tras cada respuesta del modelo el adaptador agrega
+una línea JSONL a ese archivo:
+
+```json
+{"at":"2026-11-06T04:10:02.511Z","model":"deepseek/deepseek-v4.1-flash-1017","provider":"DeepInfra","reasoningChars":119,"reasoning":"We need answer one line…","action":"tool_call write_file src/a.ts"}
+```
+
+- `reasoning` es `message.reasoning` o, si falta, los textos/resúmenes de
+  `reasoning_details` unidos con saltos de línea; se recorta a 2000 caracteres
+  con `…` al final (`reasoningChars` conserva el tamaño original).
+- `action` describe lo que devolvió el modelo: `tool_call <herramienta>` más el
+  argumento `path` o `name` o, si no hay, los primeros 200 caracteres de
+  `command`; `finish`; o `error <código>`.
+- Si la respuesta no trae texto de razonamiento, no se escribe ninguna línea.
+- Es solo observabilidad: un fallo al escribir (directorio inexistente, disco
+  lleno) se ignora y nunca afecta la llamada. No cambia el cuerpo de la
+  solicitud, el `ModelResponse` ni el conteo de uso.
+
+Varios adaptadores (p. ej. los de un *router*) pueden apuntar al mismo archivo;
+cada uno agrega sus líneas. Con el runner del experimento el archivo es
+`<espacio-de-trabajo>/reasoning.jsonl`, ignorado por git y por tanto nunca
+publicado.
 
 ## Opcional: tope de costo — `BudgetedModelAdapter`
 
