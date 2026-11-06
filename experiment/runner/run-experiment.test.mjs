@@ -23,6 +23,7 @@ import {
   attachUsageAndRouting,
   applyBudgetToReport,
   compactTraceC2,
+  BATTERY_TIMEOUT_MS,
   MAX_TRACE_TEXT_CHARS,
   compactTraceC3,
   slugifyModelId,
@@ -2446,4 +2447,8 @@ test('default loop turn budget is 40 for c2 and 8 per node for c3; --max-turns o
   assert.equal(parse('--config', 'c3').maxTurns, 8);
   assert.equal(parse('--config', 'c2', '--max-turns', '5').maxTurns, 5);
   assert.equal(parse('--config', 'c3', '--max-turns', '5').maxTurns, 5);
+});
+
+test('the battery phase allows at least 20 minutes (logins are paced to respect RF-14)', () => {
+  assert.ok(BATTERY_TIMEOUT_MS >= 20 * 60_000, `got ${BATTERY_TIMEOUT_MS}`);
 });

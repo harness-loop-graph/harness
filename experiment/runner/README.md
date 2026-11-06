@@ -397,7 +397,9 @@ publicado.
 3. Corre `node run-all.mjs` **con `experiment/acceptance/` como directorio de
    trabajo** (el banco oculto, nunca copiado al espacio de trabajo) contra la
    app generada, con `WORKSPACE` fijado a la ruta del espacio de trabajo más
-   `BACKEND_URL`/`FRONTEND_URL`/`DB_URL` para el stack en ejecución. Se corre
+   `BACKEND_URL`/`FRONTEND_URL`/`DB_URL` para el stack en ejecución, con un
+   timeout de 30 minutos (`BATTERY_TIMEOUT_MS`): las baterías espacian sus
+   logins ~61 s para respetar el límite de autenticación de RF-14. Se corre
    siempre, aunque el stack no haya levantado: las baterías 1-3 registran sus
    propios fallos de conexión y la batería 4 (coherencia) es estática. Así un
    sistema que ni arranca no se ve mejor que uno que arranca y falla

@@ -588,6 +588,10 @@ jobs:
           SONAR_HOST_URL: https://sonarcloud.io
 `;
 
+// The batteries pace their logins (~61 s apart) to respect the SPEC's auth rate limit (RF-14),
+// so ~12 logins alone take ~12 minutes.
+const BATTERY_TIMEOUT_MS = 30 * 60_000;
+
 const SONAR_EXCLUSIONS = '**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,run-report.json,batteries-report.json,audit*.jsonl,SPEC.md,AGENTS.md,.github/**';
 const SONARCLOUD_CREATE_URL = 'https://sonarcloud.io/api/projects/create';
 const SONARCLOUD_RENAME_BRANCH_URL = 'https://sonarcloud.io/api/project_branches/rename';
@@ -924,7 +928,7 @@ async function runBatteries(ws, keep, scrubNames = [], deps = {}) {
           DB_URL: `postgres://medapp:medapp@${host}:${dbPort}/medapp`,
           WORKSPACE: ws,
         },
-        timeoutMs: 600_000,
+        timeoutMs: BATTERY_TIMEOUT_MS,
       });
       batteryReport = parseBatteryReport(result.stdout);
     } catch (err) {
@@ -1688,6 +1692,7 @@ export {
   attachUsageAndRouting,
   applyBudgetToReport,
   compactTraceC2,
+  BATTERY_TIMEOUT_MS,
   MAX_TRACE_TEXT_CHARS,
   compactTraceC3,
   slugifyModelId,
