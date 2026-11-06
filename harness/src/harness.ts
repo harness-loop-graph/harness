@@ -25,6 +25,12 @@ export interface HarnessComponents {
 /** Identical consecutive tool calls tolerated before the run is stopped. */
 export const DEFAULT_MAX_REPEATED_TOOL_CALLS = 3;
 
+/** Consecutive `empty_content` replies the harness re-asks (with a nudge) before ending the run. */
+export const MAX_EMPTY_RESPONSE_RETRIES = 2;
+
+const EMPTY_RESPONSE_NUDGE =
+  'Your previous reply contained no content and no tool call. Continue the task now: call a tool, or give your final answer if the task is complete.';
+
 export interface HarnessOptions {
   workspaceRoot: string;
   availTools: ToolSpec[];
@@ -93,6 +99,8 @@ export class Harness {
     let response: ModelResponse | undefined;
     let lastCallKey: string | undefined;
     let repeatedCalls = 0;
+    let emptyRetries = 0;
+    let nudge: string | undefined;
 
     for (let round = 0; round <= maxToolRounds; round++) {
       const request: ModelRequest = {
@@ -104,11 +112,27 @@ export class Harness {
         // Feedback belongs to the previous ATTEMPT: only on the first
         // request of the turn; later requests carry the tool history.
         ...(round === 0 && runOptions.feedback ? { feedback: runOptions.feedback } : {}),
+        ...(nudge ? { nudge } : {}),
       };
+      nudge = undefined;
 
       response = await model.complete(request);
       const turn: InteractionTurn = { request, response };
       turns.push(turn);
+
+      // A reasoning model can spend its budget thinking and reply with nothing:
+      // re-ask (each retry spends a round) instead of ending the run.
+      if (
+        response.type === 'error' &&
+        response.code === 'empty_content' &&
+        emptyRetries < MAX_EMPTY_RESPONSE_RETRIES &&
+        round < maxToolRounds
+      ) {
+        emptyRetries++;
+        nudge = EMPTY_RESPONSE_NUDGE;
+        continue;
+      }
+      emptyRetries = 0;
 
       if (response.type !== 'tool_call') break;
 

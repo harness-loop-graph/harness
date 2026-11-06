@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { ModelRequest, ModelResponse } from '../src/index.js';
 import {
   DEFAULT_MAX_REPEATED_TOOL_CALLS,
+  MAX_EMPTY_RESPONSE_RETRIES,
   Harness,
   FsContextManager,
   LocalExecutionManager,
@@ -18,10 +19,12 @@ import type { HarnessOptions, ModelAdapter } from '../src/index.js';
 /** Scripted model: replays a fixed sequence of responses. */
 class ScriptedModelAdapter implements ModelAdapter {
   private calls = 0;
+  readonly requests: ModelRequest[] = [];
 
   constructor(private readonly responses: ModelResponse[]) {}
 
-  async complete(_request: ModelRequest): Promise<ModelResponse> {
+  async complete(request: ModelRequest): Promise<ModelResponse> {
+    this.requests.push(request);
     const response = this.responses[this.calls];
     this.calls += 1;
     if (!response) {
@@ -176,6 +179,111 @@ describe('C1 harness end-to-end', () => {
     if (result.finalResponse.type === 'error') {
       expect(result.finalResponse.code).toBe('max_tool_rounds');
     }
+  });
+
+  describe('empty response retry', () => {
+    const empty: ModelResponse = {
+      type: 'error',
+      code: 'empty_content',
+      message: 'The model returned neither content nor tool calls',
+    };
+    const write = { type: 'tool_call', tool: 'write_file', args: { path: 'e.txt', content: 'x' } } as const;
+    const write2 = { type: 'tool_call', tool: 'write_file', args: { path: 'f.txt', content: 'y' } } as const;
+    const NUDGE =
+      'Your previous reply contained no content and no tool call. Continue the task now: call a tool, or give your final answer if the task is complete.';
+
+    it('retries up to 2 consecutive empty replies', () => {
+      expect(MAX_EMPTY_RESPONSE_RETRIES).toBe(2);
+    });
+
+    it('nudges once after an empty reply, then continues normally', async () => {
+      const model = new ScriptedModelAdapter([empty, write, { type: 'finish', content: 'done' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('flaky model', { maxToolRounds: 5 });
+
+      expect(result.finalResponse).toEqual({ type: 'finish', content: 'done' });
+      expect(model.requests).toHaveLength(3);
+      expect(model.requests[0].nudge).toBeUndefined();
+      expect(model.requests[1].nudge).toBe(NUDGE);
+      expect(model.requests[2].nudge).toBeUndefined();
+      expect(result.turns[0].response).toEqual(empty);
+      expect(model.requests[1].history).toEqual([]);
+    });
+
+    it('ends with empty_content after 3 consecutive empty replies', async () => {
+      const model = new ScriptedModelAdapter([empty, empty, empty, { type: 'finish', content: 'never reached' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('hopeless model', { maxToolRounds: 10 });
+
+      expect(result.finalResponse).toEqual(empty);
+      expect(model.requests).toHaveLength(3);
+      expect(model.requests.map((r) => r.nudge)).toEqual([undefined, NUDGE, NUDGE]);
+      expect(result.turns).toHaveLength(3);
+    });
+
+    it('resets the retry counter after a non-empty reply', async () => {
+      const model = new ScriptedModelAdapter([empty, write, empty, { type: 'finish', content: 'done' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('flaky twice', { maxToolRounds: 10 });
+
+      expect(result.finalResponse).toEqual({ type: 'finish', content: 'done' });
+      expect(model.requests.map((r) => r.nudge)).toEqual([undefined, NUDGE, undefined, NUDGE]);
+    });
+
+    it('does not retry other errors', async () => {
+      const apiError: ModelResponse = { type: 'error', code: 'http_500', message: 'boom' };
+      const model = new ScriptedModelAdapter([apiError, { type: 'finish', content: 'never reached' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('api failure', { maxToolRounds: 10 });
+
+      expect(result.finalResponse).toEqual(apiError);
+      expect(model.requests).toHaveLength(1);
+    });
+
+    it('spends a tool round on each retry: maxToolRounds 1 allows a single retry', async () => {
+      const model = new ScriptedModelAdapter([empty, empty, { type: 'finish', content: 'never reached' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('tight budget', { maxToolRounds: 1 });
+
+      expect(result.finalResponse).toEqual(empty);
+      expect(model.requests).toHaveLength(2);
+    });
+
+    it('does not retry at all when maxToolRounds is 0', async () => {
+      const model = new ScriptedModelAdapter([empty, { type: 'finish', content: 'never reached' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('no rounds', { maxToolRounds: 0 });
+
+      expect(result.finalResponse).toEqual(empty);
+      expect(model.requests).toHaveLength(1);
+    });
+
+    it('lets the retry recover within the budget but reports max_tool_rounds if it then calls a tool', async () => {
+      const model = new ScriptedModelAdapter([empty, write2, { type: 'finish', content: 'never reached' }]);
+      const harness = buildHarness(model);
+
+      const result = await harness.run('tight budget', { maxToolRounds: 1 });
+
+      expect(result.finalResponse.type === 'error' && result.finalResponse.code).toBe('max_tool_rounds');
+      expect(model.requests).toHaveLength(2);
+    });
+
+    it('sends feedback only on the first request, not on the nudged one', async () => {
+      const model = new ScriptedModelAdapter([empty, { type: 'finish', content: 'done' }]);
+      const harness = buildHarness(model);
+
+      await harness.run('retry with feedback', { maxToolRounds: 5, feedback: 'previous attempt failed' });
+
+      expect(model.requests[0].feedback).toBe('previous attempt failed');
+      expect(model.requests[1].feedback).toBeUndefined();
+      expect(model.requests[1].nudge).toBe(NUDGE);
+    });
   });
 
   describe('repeated tool call cap', () => {

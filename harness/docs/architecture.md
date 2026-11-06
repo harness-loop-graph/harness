@@ -190,6 +190,16 @@ constructor lanza un error).
    acción sin avanzar.
 5. Si se alcanza el límite de rondas sin una respuesta que no sea `tool_call`,
    el *harness* sintetiza una respuesta `error` con código `max_tool_rounds`.
+6. Si el modelo responde `error` con código `empty_content` (ni contenido ni
+   llamada a herramienta), el *harness* vuelve a preguntar hasta
+   `MAX_EMPTY_RESPONSE_RETRIES` (2) veces consecutivas, agregando a esa
+   siguiente solicitud (y solo a esa) un `nudge` que pide continuar con una
+   herramienta o dar la respuesta final. Cada reintento consume una ronda, así
+   que respeta `maxToolRounds`; el contador se reinicia con cualquier
+   respuesta no vacía, y si se agotan los reintentos la corrida termina con el
+   error `empty_content`. Motivo: en el piloto de C1, `deepseek-v4.1-flash`
+   razonó 141k caracteres y devolvió una respuesta vacía, lo que con una sola
+   interacción cortaba toda la corrida.
 
 El valor de retorno (`HarnessRunResult`) es `{ finalResponse, turns, audit,
 verifications }`: `turns` es la traza completa por ronda (`InteractionTurn[]`),

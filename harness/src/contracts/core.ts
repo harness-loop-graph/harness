@@ -19,6 +19,8 @@ export interface ModelRequest {
   feedback?: string;
   /** Prior responses of this interaction, including tool results fed back. */
   history?: Array<ModelResponse | ToolResult>;
+  /** A one-off instruction for this request only, sent after the history. */
+  nudge?: string;
 }
 
 export type ModelResponse = ToolCallResponse | ErrorResponse | FinishResponse;

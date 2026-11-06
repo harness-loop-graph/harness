@@ -367,6 +367,49 @@ describe('OpenAICompatibleModelAdapter', () => {
     expect(body.messages[3].tool_call_id).toBe('call_write_file');
   });
 
+  it('appends request.nudge as the last user message, after the history', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }],
+      }),
+    );
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await adapter.complete({
+      ...request([
+        { type: 'tool_call', tool: 'write_file', args: { path: 'x.txt', content: 'hi' } },
+        { type: 'tool_result', tool: 'write_file', success: true, result: { bytes: 2 } },
+      ]),
+      nudge: 'Keep going.',
+    });
+
+    const init = (fetchImpl.mock.calls[0] as unknown[])[1] as RequestInit;
+    const messages = JSON.parse(String(init.body)).messages;
+    expect(messages.map((m: { role: string }) => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'user']);
+    expect(messages.at(-1)).toEqual({ role: 'user', content: 'Keep going.' });
+  });
+
+  it('adds no extra message when request.nudge is unset', async () => {
+    process.env.MODEL_API_KEY = 'test-key';
+    process.env.MODEL_ID = 'test-model';
+    process.env.MODEL_BASE_URL = 'https://test.example/v1';
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }],
+      }),
+    );
+    const adapter = new OpenAICompatibleModelAdapter({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await adapter.complete(request());
+
+    const init = (fetchImpl.mock.calls[0] as unknown[])[1] as RequestInit;
+    const messages = JSON.parse(String(init.body)).messages;
+    expect(messages.map((m: { role: string }) => m.role)).toEqual(['system', 'user']);
+  });
+
   it('puts project instructions first in the system message, before request.instructions', async () => {
     process.env.MODEL_API_KEY = 'test-key';
     process.env.MODEL_ID = 'test-model';

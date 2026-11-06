@@ -533,6 +533,8 @@ export class OpenAICompatibleModelAdapter implements ModelAdapter {
       }
     }
 
+    if (request.nudge) messages.push({ role: 'user', content: request.nudge });
+
     return messages;
   }
 
