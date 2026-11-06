@@ -126,6 +126,27 @@ function skipWrapperArguments(wrapper: string, words: string[], from: number): n
   return words.length;
 }
 
+const AUDIT_COMMAND_MAX_CHARS = 300;
+
+function clip(text: string): string {
+  return text.length > AUDIT_COMMAND_MAX_CHARS ? text.slice(0, AUDIT_COMMAND_MAX_CHARS) + '…' : text;
+}
+
+/** Compact, bounded description of an action for the audit file: never file contents or other args. */
+function summarizeAction(action: GuardrailAction): Record<string, string> {
+  if (action.kind === 'command') return { command: clip(action.command) };
+  const summary: Record<string, string> = { tool: action.tool };
+  const { args } = action;
+  if (action.tool === 'run_command') {
+    if (typeof args.command === 'string') summary.command = clip(args.command);
+  } else if (action.tool === 'load_skill') {
+    if (typeof args.name === 'string') summary.name = args.name;
+  } else if (['read_file', 'write_file', 'search_replace'].includes(action.tool)) {
+    if (typeof args.path === 'string') summary.path = args.path;
+  }
+  return summary;
+}
+
 /** Policy guardrails: path confinement, tool/command whitelists, size limits, audit trail. */
 export class PolicyGuardrails implements Guardrails {
   private readonly audit: GuardrailDecision[] = [];
@@ -138,7 +159,7 @@ export class PolicyGuardrails implements Guardrails {
   async evaluate(action: GuardrailAction): Promise<GuardrailDecision> {
     const decision = this.decide(action);
     this.audit.push(decision);
-    this.appendAudit(decision);
+    this.appendAudit(action, decision);
     return decision;
   }
 
@@ -257,9 +278,10 @@ export class PolicyGuardrails implements Guardrails {
     return { decision: 'allowed', reason: `Path '${target}' is inside the workspace` };
   }
 
-  private appendAudit(decision: GuardrailDecision): void {
+  private appendAudit(action: GuardrailAction, decision: GuardrailDecision): void {
     if (!this.auditFile) return;
-    fs.appendFileSync(this.auditFile, JSON.stringify({ ...decision, at: new Date().toISOString() }) + '\n');
+    const entry = { ...decision, ...summarizeAction(action), at: new Date().toISOString() };
+    fs.appendFileSync(this.auditFile, JSON.stringify(entry) + '\n');
   }
 }
 

@@ -410,6 +410,26 @@ publicado.
 > **Advertencia:** los puertos 5432, 3000 y 8080 están fijos. Correr un
 > experimento a la vez; corridas concurrentes entrarán en conflicto.
 
+## Seguir una corrida en vivo
+
+Cada decisión de *guardrails* se agrega a `<espacio-de-trabajo>/audit.jsonl`
+(`audit-<nodo>.jsonl` en C3) apenas se toma, de modo que se puede seguir lo que
+hace el modelo con `tail -f`. Cada línea trae `decision`, `reason`, `at` y la
+acción evaluada: `tool` más `path` (`read_file`/`write_file`/`search_replace`) o
+`name` (`load_skill`), o `command` (`run_command`, recortado a 300 caracteres
+con `…`). Nunca incluye contenido de archivos ni los cuerpos de
+`search`/`replace`.
+
+```sh
+tail -f <espacio-de-trabajo>/audit.jsonl
+```
+
+Si tenés `jq` (el runner no lo requiere), una vista compacta:
+
+```sh
+tail -f <espacio-de-trabajo>/audit.jsonl | jq -r '"\(.at[11:19]) \(.decision) \(.tool // "cmd") \(.path // .command // .name // "")"'
+```
+
 ## Referencia de `run-report.json`
 
 Cada corrida escribe `run-report.json` en el espacio de trabajo. `sampling`

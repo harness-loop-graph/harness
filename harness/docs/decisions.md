@@ -105,7 +105,10 @@ decisión de permitir/denegar:
 - **Rastro de auditoría de solo-append** — cada decisión se agrega a un
   registro en memoria y, cuando se configura con una ruta `auditFile`, se
   agrega también como JSONL — el archivo nunca se trunca ni se reescribe,
-  solo se le agrega contenido.
+  solo se le agrega contenido. Cada línea del archivo incluye además un
+  resumen acotado de la acción (herramienta, ruta, nombre de skill o comando
+  recortado, nunca contenidos) para poder seguir la corrida con `tail -f`; el
+  registro en memoria sigue siendo solo `{ decision, reason }`.
 
 **Consecuencias.** `Harness.run` expone cada decisión de *guardrails* tomada
 durante una corrida a través de `HarnessRunResult.audit`, de modo que el

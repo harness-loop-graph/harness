@@ -147,7 +147,13 @@ Para `run_command`, cada tramo de la línea se verifica por separado con
 comandos y sus límites están en la ADR 6.
 `getAuditLog()` devuelve cada decisión tomada hasta el momento, en orden;
 cuando se construye con una ruta `auditFile`, las decisiones también se
-agregan a ese archivo como JSONL con una marca de tiempo `at`.
+agregan a ese archivo como JSONL con una marca de tiempo `at` y un resumen
+acotado de la acción evaluada: `tool` más `path` (`read_file`, `write_file`,
+`search_replace`) o `name` (`load_skill`), o `command` (`run_command` y acciones
+`kind: 'command'`, recortado a 300 caracteres con `…`). Nunca se escribe
+contenido de archivos ni los cuerpos de `search`/`replace`. Solo cambia la
+línea del archivo: `getAuditLog()` y la `GuardrailDecision` devuelta siguen
+siendo `{ decision, reason }`.
 
 ## El harness — `src/harness.ts`
 
