@@ -48,7 +48,7 @@ only in application code:
 - Partial unique index on `(profesional_id, franja_inicio)` for
   appointments not in state `cancelled` (one active booking per slot).
 - CHECK constraint on `cita.estado IN ('scheduled','attended','cancelled','no_show')`.
-- CHECK constraint on `encounter.version > 0`.
+- CHECK constraint on `encuentro.version > 0`.
 
 **RF-04 — Indexes.** On every column used for filtering or ordering in
 the endpoint catalog (dates, professional, patient, estado).
@@ -62,6 +62,9 @@ availability in every run:
   `gomez@seed.local`, `lopez@seed.local` (professionals).
 - Availability: weekdays 08:00–16:00, 30-minute slots, for the 14 days
   following deployment; `lopez` has no slots on Fridays.
+- Ids: every entity id is an integer assigned in insertion order, so
+  `paciente1`..`paciente3` are patients 1..3 and `gomez`, `lopez` are
+  professionals 1, 2.
 
 **RF-06 — Append-only clinical data.** `encuentro` and `auditoria`
 admit no physical delete and no destructive update. Every correction
@@ -210,14 +213,53 @@ depends on them; they are part of the fixed spec like the stack):
 
 - Auth (SCR-01): `login-email`, `login-password`, `login-submit`
 - Navigation (visible per role, RF-20): `nav-bookings`, `nav-search`,
-  `nav-agenda`, `nav-history`, `nav-admin`, `nav-audit`
-- Availability search (SCR-03): `search-professional`, `search-from`,
-  `search-to`, `search-submit`
+  `nav-agenda`, `nav-history`, `nav-admin`, `nav-audit`. Each role sees
+  exactly the items below and no other `nav-*` item:
+
+  | Role | Navigation items |
+  | --- | --- |
+  | `patient` | `nav-bookings` (SCR-02), `nav-search` (SCR-03), `nav-history` (SCR-06, own) |
+  | `professional` | `nav-agenda` (SCR-04), `nav-history` (SCR-06, assigned patients) |
+  | `staff` | `nav-agenda`, `nav-search` (scheduling data only; never `nav-history`) |
+  | `admin` | `nav-admin` (SCR-07), `nav-audit` (SCR-08) |
+
+- Availability search (SCR-03): `search-professional` (a `<select>`
+  whose option label contains the professional's surname, e.g. "Gómez",
+  and whose option value is the professional id), `search-from` and
+  `search-to` (`<input type="date">`, value `YYYY-MM-DD`),
+  `search-submit`
 - Booking: `slot-item` (one per available slot, with
-  `data-slot-start` attribute), `book-submit`
-- Appointments list: `appointment-item` (with `data-appointment-id`)
-- Cancel: `cancel-appointment`
+  `data-slot-start` attribute; clicking it selects the slot),
+  `book-submit` (books the selected slot)
+- Appointments list: `appointment-item` (with `data-appointment-id`);
+  in SCR-04 it lists the professional's appointments from today through
+  the next 7 days on first render, and clicking it opens SCR-05
+- Cancel: `cancel-appointment` (rendered inside each `appointment-item`
+  of SCR-02)
 - Encounter (SCR-05): `encounter-notes`, `encounter-diagnosis`,
   `encounter-submit`
-- History (SCR-06): `history-timeline`
+- History (SCR-06): `history-timeline` (its text contains each
+  encounter's notes and diagnosis)
 - States (RF-24): `loading-indicator`, `error-banner`, `empty-state`
+
+Fixed OAuth client and wire formats (the SPA and the acceptance
+batteries use exactly these):
+
+- Public client: `client_id` = `medapp-spa`; `redirect_uri` =
+  `http://localhost:8080/auth/callback`. No other client or redirect URI
+  is registered.
+- EP-01 query: `response_type=code`, `client_id`, `redirect_uri`,
+  `code_challenge`, `code_challenge_method=S256`, `state`. It redirects
+  (302) to the login form, which is a standard HTML form whose hidden
+  fields carry the authorization request; there is no separate consent
+  step. Submitting valid credentials redirects (302) to `redirect_uri`
+  with `code` and `state` query parameters.
+- EP-02: JSON body `{ code, code_verifier, client_id, redirect_uri }`;
+  the 200 body contains `access_token` and `refresh_token`.
+- Dates in requests are `YYYY-MM-DD`; timestamps are ISO-8601 UTC strings.
+  EP-06 returns a JSON array of `{ start, end }`; EP-07 201 returns an
+  object with `id`.
+- Schema column names: `cita.paciente_id`, `cita.profesional_id`,
+  `cita.franja_inicio`, `cita.estado`, `encuentro.cita_id`,
+  `encuentro.version`, `adjunto.encuentro_id`, `auditoria.usuario_id`,
+  all tables in the `public` schema.
