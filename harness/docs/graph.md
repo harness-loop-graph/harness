@@ -36,6 +36,7 @@ construye componentes del *harness*.
    con un `LoopRequest` derivado del nodo: `task`,
    `maxTurns: node.maxTurns ?? 3`, `verification: node.verification`,
    `toolRoundsPerTurn: node.toolRoundsPerTurn ?? 8`,
+   `finishOnVerificationPass: node.finishOnVerificationPass`,
    `instructions: node.instructions`.
 5. Registra una `NodeExecution` (`nodeId`, `role`, `status`, `turns`,
    `finalResponse`, `verifications`) y, si la respuesta final del *loop* fue
@@ -76,6 +77,20 @@ enrutamiento necesita inspeccionar el contenido de `state.shared` en lugar de
 solo éxito/fallo (verificado por el caso "routes through a custom router" de
 `tests/graph.spec.ts`).
 
+### Criterio de "hecho" por nodo
+
+Cada nodo define su "hecho" con una verificación concreta a cargo del
+operador, y con `finishOnVerificationPass: true` su *loop* termina apenas esa
+verificación pasa, aunque el modelo no haya dicho `finish`. Así un modelo que
+sigue puliendo no gasta todos sus turnos en cada nodo. Los nodos que no
+activan la bandera siguen exigiendo `finish` más verificación aprobada. Como
+consecuencia, `state.shared[node.id]` solo se llena si la respuesta final del
+nodo fue un `finish`; un nodo terminado por evidencia puede no dejar nada ahí.
+El grafo de C3 del runner usa estos criterios (architect: `docs/architecture.md`
+existe; data: migraciones presentes y `npm run build` del backend; backend:
+`npm run build && npm test`; frontend: `npm run build` del frontend; el
+reviewer no usa la bandera). Ver ADR 7 en `decisions.md`.
+
 ## `maxSteps` — prevención de bucles
 
 `GraphRequest.maxSteps` (10 por defecto) es un tope estricto sobre el número
@@ -91,7 +106,9 @@ independientemente de los resultados de los nodos individuales.
 - **`GraphNode`** — `id`, `role`, `task`, `instructions` opcional,
   `verification: { command }` opcional (a cargo del operador, nunca mostrado
   al modelo), `maxTurns` opcional (3 por defecto), `toolRoundsPerTurn`
-  opcional (8 por defecto).
+  opcional (8 por defecto), `finishOnVerificationPass` opcional (`false` por
+  defecto): el nodo termina en cuanto su verificación pasa, sin esperar el
+  `finish` del modelo.
 - **`GraphEdge`** — `{ from, to, condition: 'on_success' | 'on_failure' | 'always' }`.
 - **`GraphRequest`** — `task`, `nodes: GraphNode[]`, `edges: GraphEdge[]`,
   `initialNode`, `maxSteps` opcional (10 por defecto).
@@ -124,4 +141,7 @@ estáticas cuando no se provee router; un `FAIL` inmediato cuando
 `initialNode` no coincide con ningún nodo declarado; la entrada de trace de un
 paso fallido llevando `loopFailure` (incluyendo el código/mensaje de error del
 modelo y su truncamiento cuando la respuesta final fue un `error`); y la
-entrada de trace de un paso exitoso sin ningún campo `loopFailure`.
+entrada de trace de un paso exitoso sin ningún campo `loopFailure`; y
+`finishOnVerificationPass` llegando al *loop* del nodo (un nodo cuyo modelo
+nunca termina pero cuya verificación pasa completa en un turno y el grafo
+avanza).

@@ -1253,6 +1253,51 @@ test('c3 nodes keep topology and verifications but use the --task-file task', ()
   assert.deepEqual(buildNodes(parsed, null), spec);
 });
 
+const C3_NODE_DONE = {
+  architect: 'test -f docs/architecture.md',
+  data: 'test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build',
+  backend: 'cd backend && npm run build && npm test',
+  frontend: 'cd frontend && npm run build',
+};
+
+test('c3 build nodes finish on their verification; the reviewer still needs the model finish', () => {
+  const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 });
+  for (const [id, command] of Object.entries(C3_NODE_DONE)) {
+    const node = nodes.find((n) => n.id === id);
+    assert.deepEqual(node.verification, { command }, id);
+    assert.equal(node.finishOnVerificationPass, true, id);
+    assert.match(node.task, /done when/, id);
+  }
+  const reviewer = nodes.find((n) => n.id === 'reviewer');
+  assert.deepEqual(reviewer.verification, { command: 'test -f review-verdict.json' });
+  assert.notEqual(reviewer.finishOnVerificationPass, true);
+});
+
+test('c3 --task-file override keeps the per-node verification and finishOnVerificationPass', () => {
+  const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 }, 'Create notes/summary.txt\n');
+  for (const [id, command] of Object.entries(C3_NODE_DONE)) {
+    const node = nodes.find((n) => n.id === id);
+    assert.deepEqual(node.verification, { command }, id);
+    assert.equal(node.finishOnVerificationPass, true, id);
+  }
+});
+
+test('c3 --dry-run plan.nodes lists each node verification and finishOnVerificationPass', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const res = spawnSync(process.execPath, [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c3', '--dry-run'], {
+    encoding: 'utf8',
+    env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  const plan = JSON.parse(res.stdout);
+  for (const [id, command] of Object.entries(C3_NODE_DONE)) {
+    const node = plan.nodes.find((n) => n.id === id);
+    assert.deepEqual(node.verification, { command }, id);
+    assert.equal(node.finishOnVerificationPass, true, id);
+  }
+  assert.notEqual(plan.nodes.find((n) => n.id === 'reviewer').finishOnVerificationPass, true);
+});
+
 // --- T3b: review fixes ---
 
 test('a thrown exception during the run phase (e.g. createModel() with a missing router apiKeyEnv) still writes run-report.json, creates the workspace git repo, and exits non-zero', async () => {

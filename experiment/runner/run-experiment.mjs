@@ -1309,34 +1309,63 @@ function buildNodes(parsed, taskOverride = null) {
   return nodes.map((n) => ({ ...n, task: tasks[n.id] }));
 }
 
+// A build node is done when its verification passes: the loop then ends the
+// node on that evidence (finishOnVerificationPass) instead of waiting for the
+// model to declare it, so a model that keeps polishing cannot burn all its turns.
+function doneInstructions(scope, command) {
+  return (
+    ` Work only in ${scope}. Your part is done when \`${command}\` passes; the harness then ends your work automatically.` +
+    ' Do not review or polish other parts of the system: the reviewer node checks the whole system.'
+  );
+}
+
 function buildSpecNodes(parsed) {
+  const dataCommand =
+    'test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build';
+  const backendCommand = 'cd backend && npm run build && npm test';
+  const frontendCommand = 'cd frontend && npm run build';
   return [
     {
       id: 'architect',
       role: 'architect',
-      task: 'Write docs/architecture.md: entity model, endpoint-to-screen contract mapping, repo layout. Consult SPEC.md.',
+      task:
+        'Write docs/architecture.md: entity model, endpoint-to-screen contract mapping, repo layout. Consult SPEC.md.' +
+        doneInstructions('docs/', 'test -f docs/architecture.md'),
       verification: { command: 'test -f docs/architecture.md' },
+      finishOnVerificationPass: true,
       maxTurns: parsed.maxTurns,
       toolRoundsPerTurn: parsed.toolRounds,
     },
     {
       id: 'data',
       role: 'data',
-      task: 'Implement the data layer per SPEC: migrations + deterministic seed. Consult SPEC.md.',
+      task:
+        'Implement the data layer per SPEC: migrations + deterministic seed. Consult SPEC.md.' +
+        doneInstructions('backend/src/database/ (migrations and seed) and the wiring that runs them on start', dataCommand),
+      verification: { command: dataCommand },
+      finishOnVerificationPass: true,
       maxTurns: parsed.maxTurns,
       toolRoundsPerTurn: parsed.toolRounds,
     },
     {
       id: 'backend',
       role: 'backend',
-      task: 'Implement the NestJS backend per SPEC (endpoint catalog EP-01..EP-20). Consult SPEC.md.',
+      task:
+        'Implement the NestJS backend per SPEC (endpoint catalog EP-01..EP-20). Consult SPEC.md.' +
+        doneInstructions('backend/ (plus root files the backend needs)', backendCommand),
+      verification: { command: backendCommand },
+      finishOnVerificationPass: true,
       maxTurns: parsed.maxTurns,
       toolRoundsPerTurn: parsed.toolRounds,
     },
     {
       id: 'frontend',
       role: 'frontend',
-      task: 'Implement the React SPA per SPEC (SCR-01..SCR-08, testability contract). Consult SPEC.md.',
+      task:
+        'Implement the React SPA per SPEC (SCR-01..SCR-08, testability contract). Consult SPEC.md.' +
+        doneInstructions('frontend/', frontendCommand),
+      verification: { command: frontendCommand },
+      finishOnVerificationPass: true,
       maxTurns: parsed.maxTurns,
       toolRoundsPerTurn: parsed.toolRounds,
     },
@@ -1509,6 +1538,7 @@ async function main() {
         role: n.role,
         task: n.task,
         verification: n.verification,
+        finishOnVerificationPass: n.finishOnVerificationPass,
         maxTurns: n.maxTurns,
         toolRoundsPerTurn: n.toolRoundsPerTurn,
       }));

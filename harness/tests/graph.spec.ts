@@ -367,4 +367,37 @@ describe('C3 multi-agent graph', () => {
     expect(result.steps).toBe(0);
     expect(result.failure).toContain("Unknown node 'ghost'");
   });
+
+  it('passes finishOnVerificationPass to the node loop: a node whose model never finishes completes on evidence and the graph moves on', async () => {
+    const { factory, attempts } = makeLoopFactory();
+    const write = (file: string): ModelResponse => ({ type: 'tool_call', tool: 'write_file', args: { path: file, content: 'x' } });
+    attempts.architect = [[write('a.txt'), write('a.txt'), write('a.txt')]];
+    attempts.builder = [[write('b.txt'), { type: 'finish', content: 'built' }]];
+
+    const engine = new GraphEngine(factory, {
+      task: 'Two nodes',
+      initialNode: 'architect',
+      nodes: [
+        {
+          id: 'architect',
+          role: 'architect',
+          task: 'Create a.txt',
+          verification: { command: 'test -f a.txt' },
+          finishOnVerificationPass: true,
+          toolRoundsPerTurn: 1,
+          maxTurns: 3,
+        },
+        { id: 'builder', role: 'backend', task: 'Create b.txt', verification: { command: 'test -f b.txt' }, maxTurns: 2 },
+      ],
+      edges: [{ from: 'architect', to: 'builder', condition: 'on_success' }],
+      maxSteps: 4,
+    });
+
+    const result = await engine.run();
+
+    expect(result.status).toBe('SUCCESS');
+    expect(result.steps).toBe(2);
+    expect(result.state.nodeResults[0]).toMatchObject({ nodeId: 'architect', status: 'SUCCESS', turns: 1 });
+    expect(result.state.nodeResults[1].nodeId).toBe('builder');
+  });
 });

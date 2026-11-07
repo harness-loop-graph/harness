@@ -84,6 +84,7 @@ export class GraphEngine {
         maxTurns: node.maxTurns ?? 3,
         verification: node.verification,
         toolRoundsPerTurn: node.toolRoundsPerTurn ?? 8,
+        finishOnVerificationPass: node.finishOnVerificationPass,
         instructions: node.instructions,
       });
       totalLoopTurns += loopResult.turns;

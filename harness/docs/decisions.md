@@ -202,3 +202,27 @@ un sandbox:
 contenedor o sandbox del sistema operativo; queda como decisión aparte. Hasta
 entonces, las corridas deben hacerse en una máquina o cuenta sin credenciales
 ni datos sensibles más allá de los que el *runner* ya filtra del entorno.
+
+## ADR 7 — Los nodos de C3 terminan por evidencia; C2 sigue exigiendo el `finish` del modelo
+
+**Contexto.** En C3 los nodos data, backend y frontend no tenían verificación,
+así que su *loop* terminaba solo cuando el modelo decía `finish`. Un modelo de
+razonamiento perfeccionista (DeepSeek) nunca da por terminado el trabajo y
+sigue puliendo: cada nodo agotaba todos sus turnos y el grafo tardaba una
+eternidad, revisando una y otra vez partes del sistema que no le tocaban.
+
+**Decisión.** Cada nodo de C3 recibe una verificación concreta que es su
+definición de "hecho", y `LoopRequest.finishOnVerificationPass` /
+`GraphNode.finishOnVerificationPass` hace que el *loop* decida `FINISH` en
+cuanto esa verificación pasa, sin esperar el `finish` del modelo. Es la misma
+idea del ADR 3 llevada un paso más lejos: la evidencia decide, también para
+cerrar. Los errores fatales del modelo siguen siendo FAIL, y el reviewer no
+usa la bandera. El texto de la tarea de cada nodo indica su alcance y su
+criterio de hecho, y avisa que el reviewer revisa el sistema completo.
+
+**Consecuencias.** C2 no cambia: la bandera es `false` por defecto y allí se
+sigue exigiendo `finish` **y** verificación aprobada. Un nodo puede terminar
+con la verificación aprobada sin haber dejado `finish`, por lo que su entrada
+en `state.shared` queda vacía. Una verificación débil ahora cierra el nodo
+antes, así que la calidad del criterio de hecho pasa a ser responsabilidad del
+operador (y del reviewer, que sigue devolviendo el flujo al nodo responsable).

@@ -81,7 +81,7 @@ export class AgentLoop {
       state.phase = 'deciding';
       decision = budgetExhausted
         ? { action: 'FAIL', reason: `Model unavailable (${budgetError.code}: ${truncateMessage(budgetError.message)})` }
-        : this.decide(finalResponse, verification, request.maxTurns - turn);
+        : this.decide(finalResponse, verification, request.maxTurns - turn, request.finishOnVerificationPass === true);
       state.lastAction = decision.action;
 
       trace.push({
@@ -137,13 +137,19 @@ export class AgentLoop {
 
   /**
    * finish + passed (or no) verification -> FINISH; anything failed with
-   * turns left -> RETRY; anything with no turns left -> FAIL.
+   * turns left -> RETRY; anything with no turns left -> FAIL. With
+   * finishOnVerificationPass, a passed verification -> FINISH regardless of
+   * the response.
    */
   private decide(
     response: ModelResponse,
     verification: VerificationResult | undefined,
     turnsLeft: number,
+    finishOnVerificationPass: boolean,
   ): LoopDecision {
+    if (finishOnVerificationPass && verification?.passed) {
+      return { action: 'FINISH', reason: 'Verification passed; finishing on evidence without waiting for the model' };
+    }
     if (response.type !== 'finish') {
       const label = response.type === 'error' ? `${response.type} (${response.code})` : response.type;
       return turnsLeft > 0

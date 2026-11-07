@@ -395,4 +395,93 @@ describe('C2 corrective loop', () => {
     expect(feedback).toMatch(/finish/i);
     expect(feedback).not.toContain('Verification failed');
   });
+  describe('finishOnVerificationPass', () => {
+    const writeOut: ModelResponse = { type: 'tool_call', tool: 'write_file', args: { path: 'out.txt', content: 'ok' } };
+
+    it('FINISHes in one turn when verification passes although the model never finishes', async () => {
+      const model = new TurnScriptedModelAdapter([[writeOut, writeOut, writeOut]]);
+      const loop = buildLoop(model);
+
+      const result = await loop.run({
+        task: 'Create out.txt',
+        maxTurns: 3,
+        toolRoundsPerTurn: 1,
+        verification: { command: 'test -f out.txt' },
+        finishOnVerificationPass: true,
+      });
+
+      expect(result.status).toBe('SUCCESS');
+      expect(result.turns).toBe(1);
+      expect(result.trace[0].response.type).toBe('error');
+      expect(result.decision.action).toBe('FINISH');
+      expect(result.decision.reason).toMatch(/verification passed/i);
+    });
+
+    it('FINISHes on a passing verification whatever the response type (model error)', async () => {
+      const model = new TurnScriptedModelAdapter([[{ type: 'error', code: 'http_500', message: 'boom' }]]);
+      const loop = buildLoop(model);
+
+      const result = await loop.run({
+        task: 't',
+        maxTurns: 3,
+        verification: { command: 'true' },
+        finishOnVerificationPass: true,
+      });
+
+      expect(result.status).toBe('SUCCESS');
+      expect(result.turns).toBe(1);
+      expect(result.decision.action).toBe('FINISH');
+    });
+
+    it('RETRYs when the verification fails, even if the model says finish', async () => {
+      const model = new TurnScriptedModelAdapter([[{ type: 'finish', content: 'done' }], [{ type: 'finish', content: 'done' }]]);
+      const loop = buildLoop(model);
+
+      const result = await loop.run({
+        task: 't',
+        maxTurns: 2,
+        verification: { command: 'test -f missing.txt' },
+        finishOnVerificationPass: true,
+      });
+
+      expect(result.trace[0].decision.action).toBe('RETRY');
+      expect(result.turns).toBe(2);
+      expect(result.status).toBe('FAILED');
+    });
+
+    it('keeps requiring the model finish when the flag is false or absent', async () => {
+      const model = new TurnScriptedModelAdapter([[writeOut, writeOut]]);
+      const loop = buildLoop(model);
+
+      const result = await loop.run({
+        task: 'Create out.txt',
+        maxTurns: 1,
+        toolRoundsPerTurn: 1,
+        verification: { command: 'test -f out.txt' },
+        finishOnVerificationPass: false,
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.trace[0].verification?.passed).toBe(true);
+      expect(result.trace[0].decision.action).toBe('FAIL');
+    });
+
+    it('still FAILs on a fatal model error without verifying', async () => {
+      const budgetError: ModelResponse = { type: 'error', code: 'budget_exceeded', message: 'spent' };
+      const model = new TurnScriptedModelAdapter([[budgetError]]);
+      const loop = buildLoop(model);
+
+      const result = await loop.run({
+        task: 't',
+        maxTurns: 3,
+        verification: { command: 'true' },
+        finishOnVerificationPass: true,
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.decision.action).toBe('FAIL');
+      expect(result.decision.reason).toContain('budget_exceeded');
+      expect(result.verifications).toHaveLength(0);
+    });
+  });
 });

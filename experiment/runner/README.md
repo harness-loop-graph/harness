@@ -38,10 +38,21 @@ sobre `experiment/SPEC.md` por defecto.
 | Nodo | Rol | Esencia de la tarea | Verificación |
 |------|------|--------------|--------------|
 | architect | architect | Escribir `docs/architecture.md` | `test -f docs/architecture.md` |
-| data | data | Implementar la capa de datos (migraciones + seed) | ninguna |
-| backend | backend | Implementar el backend NestJS (EP-01..EP-20) | ninguna |
-| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) | ninguna |
+| data | data | Implementar la capa de datos (migraciones + seed) | `test -d backend/src/database/migrations && ls backend/src/database/migrations \| grep -q . && cd backend && npm run build` |
+| backend | backend | Implementar el backend NestJS (EP-01..EP-20) | `cd backend && npm run build && npm test` |
+| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) | `cd frontend && npm run build` |
 | reviewer | reviewer | Revisar el sistema, escribir `review-verdict.json` | `test -f review-verdict.json` |
+
+Los cuatro nodos de construcción (architect, data, backend, frontend) usan
+`finishOnVerificationPass: true`: su verificación es su definición de "hecho" y
+el nodo termina en cuanto pasa, aunque el modelo no haya dicho `finish`
+(evita que un modelo perfeccionista gaste todos los turnos puliendo). El texto
+de cada tarea conserva su descripción y añade el alcance (`docs/`,
+`backend/src/database/`, `backend/`, `frontend/`) y el comando que cierra el
+nodo; `--task-file` reemplaza solo la descripción de la tarea, no la
+verificación ni la bandera. El reviewer no usa la bandera. `--dry-run` lista
+`verification` y `finishOnVerificationPass` de cada nodo en `plan.nodes`. C2
+no cambia: sigue exigiendo `finish` más verificación aprobada.
 
 Router:
 - Los nodos no-revisores fluyen linealmente: architect → data → backend → frontend → reviewer.

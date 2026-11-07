@@ -14,6 +14,8 @@ export interface GraphNode {
   maxTurns?: number;
   /** Default 8. */
   toolRoundsPerTurn?: number;
+  /** End the node as soon as its verification passes, without the model's finish. Default false. */
+  finishOnVerificationPass?: boolean;
 }
 
 /**

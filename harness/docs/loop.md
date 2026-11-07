@@ -77,6 +77,24 @@ repitió la misma llamada a herramienta `maxRepeatedToolCalls` veces seguidas)
 es un `error` más: C2 lo trata como un intento fallido y hace RETRY con feedback
 que nombra el código, mientras queden turnos.
 
+### `finishOnVerificationPass` — terminar por evidencia
+
+`LoopRequest.finishOnVerificationPass` (opcional, por defecto `false`) cambia
+una sola regla de la política: cuando es `true` y la verificación corrió y
+pasó, la decisión es `FINISH` (`"Verification passed; finishing on evidence
+without waiting for the model"`) **sea cual sea el tipo de respuesta** —
+`finish`, `tool_call` por `max_tool_rounds`, o un `error` no fatal. Si la
+verificación falla se mantiene el RETRY/FAIL de siempre. Los errores fatales
+del modelo (`budget_exceeded`, `http_401`, `http_402`) terminan el *loop* con
+FAIL antes de decidir ni verificar, así que la bandera no los afecta. Sin
+`verification` la bandera no hace nada.
+
+Existe para los modelos de razonamiento "perfeccionistas" que nunca declaran
+terminado y pulen hasta agotar los turnos. Con la bandera en `false` (C2, y
+cualquier nodo que no la pida) el comportamiento es idéntico al de la tabla
+anterior: se exige `finish` **y** verificación aprobada. Ver ADR 7 en
+`decisions.md`.
+
 ## Feedback — `AgentLoop.buildFeedback`
 
 Se construye solo cuando la decisión es RETRY. Tres partes independientes,
@@ -151,7 +169,9 @@ Previous turn summary (what your last attempt did, recorded by the harness):
   `verification: { command }` opcional (a cargo del operador; una respuesta
   finish se acepta sin verificar cuando está ausente), `toolRoundsPerTurn`
   opcional (por defecto 8, aplicado por `AgentLoop` al llamar a
-  `harness.run`), `instructions` opcional.
+  `harness.run`), `finishOnVerificationPass` opcional (por defecto `false`;
+  si es `true`, una verificación aprobada termina el *loop* sin esperar el
+  `finish` del modelo), `instructions` opcional.
 - **`LoopState`** — `task`, `turn` (1-based), `phase`, `lastAction` (refleja
   el `action` de la última decisión), `verifications` (del más antiguo al más
   nuevo).
@@ -178,4 +198,8 @@ RETRY-luego-SUCCESS después de que el propio *harness* devuelve una respuesta
 `error`; el turno 2 recibiendo feedback de verificación más el resumen del
 turno 1; `responseCode`/`responseMessage` en el trace de turnos con error; y
 aceptación de una respuesta `finish` simple como SUCCESS cuando no
-hay ninguna `verification` configurada.
+hay ninguna `verification` configurada; y `finishOnVerificationPass`: FINISH
+en un turno con verificación aprobada aunque el modelo nunca termine
+(`max_tool_rounds` o `error`), RETRY si la verificación falla, la exigencia
+del `finish` cuando la bandera es `false`, y FAIL inmediato ante un error
+fatal del modelo.

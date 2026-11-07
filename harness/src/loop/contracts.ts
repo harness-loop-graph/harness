@@ -14,6 +14,13 @@ export interface LoopRequest {
   verification?: { command: string };
   /** Default 8. */
   toolRoundsPerTurn?: number;
+  /**
+   * When true, a passing verification ends the loop with FINISH whatever the
+   * model answered (the evidence decides, not the model's "finish"). A failing
+   * verification still RETRYs. Needs `verification`. Default false: the model
+   * must also finish (C2).
+   */
+  finishOnVerificationPass?: boolean;
   instructions?: string;
 }
 
