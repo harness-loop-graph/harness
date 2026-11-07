@@ -53,6 +53,8 @@ import {
   loadSonarToken,
   loadPublishableWorkspace,
   publishExistingWorkspace,
+  loadUpdatableWorkspace,
+  updateStaticAnalysis,
 } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2172,8 +2174,11 @@ test('publishWorkspace() injects the runner-owned workflow and sonar-project.pro
     assert.match(props, /^sonar\.sources=\.$/m);
     assert.match(
       props,
-      /^sonar\.exclusions=\*\*\/node_modules\/\*\*,\*\*\/dist\/\*\*,\*\*\/build\/\*\*,\*\*\/coverage\/\*\*,run-report\.json,batteries-report\.json,audit\*\.jsonl,SPEC\.md,AGENTS\.md,\.github\/\*\*$/m,
+      /^sonar\.exclusions=\*\*\/node_modules\/\*\*,\*\*\/dist\/\*\*,\*\*\/build\/\*\*,\*\*\/coverage\/\*\*,run-report\.json,batteries-report\.json,audit\*\.jsonl,SPEC\.md,AGENTS\.md,\.github\/\*\*,\*\*\/\*\.spec\.ts,\*\*\/\*\.test\.ts,\*\*\/\*\.spec\.tsx,\*\*\/\*\.test\.tsx,e2e\/\*\*$/m,
     );
+    assert.match(props, /^sonar\.tests=\.$/m);
+    assert.match(props, /^sonar\.test\.inclusions=\*\*\/\*\.spec\.ts,\*\*\/\*\.test\.ts,\*\*\/\*\.spec\.tsx,\*\*\/\*\.test\.tsx,e2e\/\*\*$/m);
+    assert.match(props, /^sonar\.javascript\.lcov\.reportPaths=backend\/coverage\/lcov\.info,frontend\/coverage\/lcov\.info$/m);
 
     const { createHash } = await import('node:crypto');
     assert.deepEqual(report.staticAnalysis, {
@@ -2451,6 +2456,286 @@ test('--publish-only never demands MODEL_API_KEY/MODEL_ID and exits non-zero on 
     assert.notEqual(res.status, 0);
     assert.match(res.stderr, /Usage: --publish-only/);
     assert.match(res.stderr, /already published/);
+    assert.doesNotMatch(res.stderr, /MODEL_API_KEY/);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+// ---- coverage + quality criteria workflow ------------------------------------------------------
+
+function workflowJob(name) {
+  const start = STATIC_ANALYSIS_WORKFLOW.indexOf(`\n  ${name}:\n`);
+  assert.notEqual(start, -1, `job ${name} missing`);
+  const rest = STATIC_ANALYSIS_WORKFLOW.slice(start + 1);
+  const next = rest.slice(1).search(/\n {2}[a-z]+:\n/);
+  return next === -1 ? rest : rest.slice(0, next + 1);
+}
+
+test('the workflow has semgrep, coverage and sonarcloud jobs, in that order', () => {
+  const jobs = [...STATIC_ANALYSIS_WORKFLOW.slice(STATIC_ANALYSIS_WORKFLOW.indexOf('\njobs:\n')).matchAll(/^ {2}([a-z]+):$/gm)].map((m) => m[1]);
+  assert.deepEqual(jobs, ['semgrep', 'coverage', 'sonarcloud']);
+});
+
+test('the coverage job runs generated code with no secrets and read-only contents', () => {
+  const job = workflowJob('coverage');
+  assert.match(job, /^ {2}coverage:\n {4}runs-on: ubuntu-latest\n {4}timeout-minutes: 45\n {4}permissions:\n {6}contents: read\n {4}steps:/);
+  assert.doesNotMatch(job, /secrets\.|SONAR_TOKEN|GITHUB_TOKEN/);
+  assert.match(job, /actions\/checkout@v4\n {8}with:\n {10}persist-credentials: false/);
+  assert.match(job, /actions\/setup-node@v4\n {8}with:\n {10}node-version: 20/);
+  for (const dir of ['backend', 'frontend']) {
+    assert.match(job, new RegExp(`name: Coverage \\(${dir}\\)`));
+    assert.match(job, new RegExp(`cd ${dir}`));
+  }
+  assert.match(job, /package\.json/);
+  assert.match(job, /scripts\?\.test/);
+  assert.match(job, /npm ci \|\| npm install/);
+  assert.match(job, /node_modules\/vitest\/package\.json/);
+  assert.match(job, /npm i --no-save @vitest\/coverage-v8@\$major/);
+  assert.match(job, /npx vitest run --coverage --coverage\.provider=v8 --coverage\.reporter=lcov --coverage\.reportsDirectory=coverage/);
+  assert.match(job, /CI: true/);
+  assert.equal((job.match(/continue-on-error: true/g) ?? []).length, 2);
+  assert.equal((job.match(/timeout-minutes: 20/g) ?? []).length, 2);
+  assert.match(job, /actions\/upload-artifact@v4/);
+  assert.match(job, /if-no-files-found: ignore/);
+  assert.match(job, /backend\/coverage\/lcov\.info/);
+  assert.match(job, /frontend\/coverage\/lcov\.info/);
+});
+
+test('the sonarcloud job waits for coverage, downloads it, waits for the compute task and reports criteria', () => {
+  const job = workflowJob('sonarcloud');
+  assert.match(job, /^ {2}sonarcloud:\n {4}needs: coverage\n {4}if: always\(\)\n/);
+  assert.match(job, /actions\/download-artifact@v4/);
+  assert.ok(job.indexOf('download-artifact') < job.indexOf('sonarqube-scan-action'), 'coverage is downloaded before the scan');
+  assert.ok(job.indexOf('sonarqube-scan-action') < job.indexOf('ceTaskUrl'), 'the wait step runs after the scan');
+  assert.ok(job.indexOf('ceTaskUrl') < job.indexOf('Criterio'), 'criteria are checked after the wait step');
+  // The token only reaches the scan, wait and criteria steps (never the artifact download).
+  assert.equal((job.match(/secrets\.SONAR_TOKEN/g) ?? []).length, 3);
+  assert.match(job, /\.scannerwork\/report-task\.txt/);
+  assert.match(job, /api\/ce\/task/);
+  assert.match(job, /SUCCESS\|FAILED\|CANCELED/);
+  assert.match(job, /seq 1 30/);
+  assert.match(job, /sleep 5/);
+  assert.match(job, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
+  assert.match(job, /PROJECT_KEY=\$\(sed -n 's\/\^sonar\.projectKey=\/\/p' sonar-project\.properties\)/);
+  assert.match(job, /api\/measures\/component\?component=\$PROJECT_KEY&branch=main&metricKeys=coverage,sqale_index,complexity/);
+  assert.match(job, /api\/issues\/search\?componentKeys=\$PROJECT_KEY&branch=main&types=VULNERABILITY&severities=CRITICAL,BLOCKER&resolved=false&ps=1/);
+  assert.match(job, /MIN_COVERAGE: 65\n/);
+  assert.match(job, /MAX_DEBT_MIN: 960\n/);
+  assert.match(job, /MAX_COMPLEXITY: 50\n/);
+  assert.match(job, /MAX_VULNERABILITIES: 0\n/);
+  assert.match(job, /\| Criterio \| Valor \| Meta \| Estado \|/);
+  assert.match(job, /✅/);
+  assert.match(job, /❌/);
+  assert.match(job, /GITHUB_STEP_SUMMARY/);
+  assert.match(job, /::warning/);
+  // Informative only: neither step can fail the job.
+  assert.equal((job.match(/continue-on-error: true/g) ?? []).length, 3);
+});
+
+test('the workflow is a template literal with no accidental JS interpolation left in shell code', () => {
+  assert.doesNotMatch(STATIC_ANALYSIS_WORKFLOW, /\$\{(?!\{ secrets\.SONAR_TOKEN \}\})/);
+  assert.doesNotMatch(STATIC_ANALYSIS_WORKFLOW, /undefined|\[object/);
+});
+
+// ---- --update-analysis -------------------------------------------------------------------------
+
+const PUBLISHED_REPORT = {
+  model: 'm', config: 'c1', repository: { name: 'harness-loop-graph/run-x', url: 'https://github.com/harness-loop-graph/run-x' },
+  staticAnalysis: { sonarOrganization: 'harness-loop-graph', sonarProjectKey: 'harness-loop-graph_run-x', workflowSha256: 'old' },
+};
+
+async function seedPublishedWorkspace(prefix, files = {}) {
+  const ws = await seedWorkspace(prefix, files);
+  await fs.writeFile(path.join(ws, 'run-report.json'), JSON.stringify(PUBLISHED_REPORT));
+  return ws;
+}
+
+// git runs for real except push, so the staged paths and commit are observable.
+function makeUpdateRun() {
+  const run = makeRecordingRun();
+  return run;
+}
+
+test('parseArgs() --update-analysis takes a workspace dir and does not need --config', () => {
+  const parsed = parseArgs(['node', 'run-experiment.mjs', '--update-analysis', 'some/ws']);
+  assert.equal(parsed.updateAnalysis, path.resolve('some/ws'));
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).updateAnalysis, null);
+});
+
+test('loadUpdatableWorkspace() refuses a report without repository, a dir that is not a git repo and a missing report', async () => {
+  const unpublished = await seedWorkspace('runner-ua-unpub-');
+  const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-ua-nogit-'));
+  const noReport = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-ua-noreport-'));
+  const ok = await seedPublishedWorkspace('runner-ua-ok-');
+  try {
+    await assert.rejects(loadUpdatableWorkspace(unpublished), /not published/);
+    await fs.writeFile(path.join(plain, 'run-report.json'), JSON.stringify(PUBLISHED_REPORT));
+    await assert.rejects(loadUpdatableWorkspace(plain), /not a git repository/);
+    await assert.rejects(loadUpdatableWorkspace(noReport), /run-report\.json/);
+    assert.equal((await loadUpdatableWorkspace(ok)).repository.name, 'harness-loop-graph/run-x');
+  } finally {
+    for (const d of [unpublished, plain, noReport, ok]) await fs.rm(d, { recursive: true, force: true });
+  }
+});
+
+test('updateStaticAnalysis() rewrites only the two runner-owned files, commits and pushes them to main', async () => {
+  const ws = await seedPublishedWorkspace('runner-ua-run-', {
+    'backend/src/app.ts': 'export const a = 1;\n',
+    'sonar-project.properties': 'sonar.exclusions=**/*\n', // model tampering attempt
+    '.github/workflows/static-analysis.yml': 'name: old\n',
+  });
+  try {
+    const before = await gitOut(ws, 'rev-list', '--count', 'HEAD');
+    await fs.writeFile(path.join(ws, 'backend/src/app.ts'), 'export const a = 2; // uncommitted model edit\n');
+    const run = makeUpdateRun();
+    const report = await updateStaticAnalysis({
+      wsDir: ws, sonarOrg: 'other-org', sonarToken: 'sonar-secret-token', secrets: [], run, now: new Date('2026-03-04T05:06:07.000Z'),
+    });
+    assert.equal(report.updateError, undefined, report.updateError);
+
+    assert.equal(await fs.readFile(path.join(ws, '.github/workflows/static-analysis.yml'), 'utf-8'), STATIC_ANALYSIS_WORKFLOW);
+    // The project key recorded at publish time wins over --sonar-org.
+    assert.equal(
+      await fs.readFile(path.join(ws, 'sonar-project.properties'), 'utf-8'),
+      buildSonarProjectProperties({ sonarOrg: 'harness-loop-graph', workspaceName: path.basename(ws) }),
+    );
+
+    const adds = run.calls.filter((c) => c.cmd === 'git' && c.args[0] === 'add');
+    assert.deepEqual(adds.map((c) => c.args), [['add', '-f', '--', '.github/workflows/static-analysis.yml', 'sonar-project.properties']]);
+    assert.equal(await gitOut(ws, 'rev-list', '--count', 'HEAD'), String(Number(before) + 1) + '\n');
+    assert.equal(await gitOut(ws, 'show', '-s', '--format=%an <%ae>|%s', 'HEAD'), 'pi-runner <pi-runner@users.noreply.github.com>|runner: update static analysis (coverage + quality criteria)\n');
+    assert.equal(await gitOut(ws, 'show', '--name-only', '--format=', 'HEAD'), '.github/workflows/static-analysis.yml\nsonar-project.properties\n');
+    const commit = run.calls.find((c) => c.cmd === 'git' && c.args.includes('commit'));
+    assert.ok(commit.args.includes('--no-verify'));
+    // The model's uncommitted source edit is neither staged nor reverted.
+    assert.match(await gitOut(ws, 'status', '--porcelain'), /^ ?M backend\/src\/app\.ts$/m);
+
+    const push = run.calls.find((c) => c.cmd === 'git' && c.args.includes('push'));
+    assert.deepEqual(push.args, ['push', 'origin', 'HEAD:main']);
+    assert.equal(await gitOut(ws, 'remote', 'get-url', 'origin'), 'https://github.com/harness-loop-graph/run-x.git\n');
+    assert.equal(run.calls.some((c) => c.cmd === 'gh'), false);
+
+    const persisted = JSON.parse(await fs.readFile(path.join(ws, 'run-report.json'), 'utf-8'));
+    assert.equal(persisted.staticAnalysis.updatedAt, '2026-03-04T05:06:07.000Z');
+    assert.equal(persisted.staticAnalysis.sonarProjectKey, 'harness-loop-graph_run-x');
+    const { createHash } = await import('node:crypto');
+    assert.equal(persisted.staticAnalysis.workflowSha256, createHash('sha256').update(STATIC_ANALYSIS_WORKFLOW).digest('hex'));
+    assert.equal(persisted.repository.name, 'harness-loop-graph/run-x');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('updateStaticAnalysis() applies the hooks-off env to every git call and neutralizes planted hooks/config', async () => {
+  const ws = await seedPublishedWorkspace('runner-ua-hooks-');
+  const marker = path.join(ws, '..', `${path.basename(ws)}-hook-ran`);
+  try {
+    const hook = path.join(ws, '.git', 'hooks', 'pre-commit');
+    await fs.writeFile(hook, `#!/bin/sh\ntouch '${marker}'\n`);
+    await fs.chmod(hook, 0o755);
+    await gitOut(ws, 'config', 'url.https://evil.example/.insteadOf', 'https://github.com/');
+    const run = makeUpdateRun();
+    const report = await updateStaticAnalysis({ wsDir: ws, sonarOrg: 'harness-loop-graph', sonarToken: 'sonar-secret-token', secrets: [], run });
+    assert.equal(report.updateError, undefined, report.updateError);
+    await assert.rejects(fs.access(marker), 'a model-planted hook ran during the update');
+    const config = await fs.readFile(path.join(ws, '.git', 'config'), 'utf8');
+    assert.doesNotMatch(config, /insteadOf|evil/);
+    assert.deepEqual(await fs.readdir(path.join(ws, '.git', 'hooks')), []);
+    const gitCalls = run.calls.filter((c) => c.cmd === 'git');
+    assert.ok(gitCalls.some((c) => c.args.includes('push')));
+    for (const call of gitCalls) {
+      assert.equal(call.opts?.env?.GIT_CONFIG_KEY_0, 'core.hooksPath', call.args.join(' '));
+      assert.equal(call.opts?.env?.GIT_CONFIG_VALUE_0, '/dev/null');
+    }
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+    await fs.rm(marker, { force: true });
+  }
+});
+
+test('updateStaticAnalysis() runs the secret scan and never commits or pushes when it hits', async () => {
+  const ws = await seedPublishedWorkspace('runner-ua-secret-', { 'notes.txt': 'token=sonar-secret-token\n' });
+  try {
+    const before = await gitOut(ws, 'rev-parse', 'HEAD');
+    const run = makeUpdateRun();
+    const report = await updateStaticAnalysis({
+      wsDir: ws, sonarOrg: 'harness-loop-graph', sonarToken: 'sonar-secret-token', secrets: [{ label: 'SONAR_TOKEN', value: 'sonar-secret-token' }], run,
+    });
+    assert.equal(report.updateError, 'secret detected in notes.txt');
+    assert.equal(run.calls.some((c) => c.args.includes('commit') || c.args.includes('push')), false);
+    assert.equal(await gitOut(ws, 'rev-parse', 'HEAD'), before);
+    const persisted = JSON.parse(await fs.readFile(path.join(ws, 'run-report.json'), 'utf-8'));
+    assert.equal(persisted.updateError, 'secret detected in notes.txt');
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('updateStaticAnalysis() fails closed without SONAR_TOKEN, and never follows model-planted symlinks', async () => {
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-ua-outside-'));
+  const victim = path.join(outside, 'victim.txt');
+  const wsNoToken = await seedPublishedWorkspace('runner-ua-notoken-');
+  const wsLink = await seedPublishedWorkspace('runner-ua-symlink-');
+  try {
+    await fs.writeFile(victim, 'original');
+    const r1 = await updateStaticAnalysis({ wsDir: wsNoToken, sonarOrg: 'o', sonarToken: undefined, secrets: [], run: makeUpdateRun() });
+    assert.match(r1.updateError, /SONAR_TOKEN/);
+
+    await fs.symlink(victim, path.join(wsLink, 'sonar-project.properties'));
+    await fs.symlink(outside, path.join(wsLink, '.github'));
+    const run = makeUpdateRun();
+    const r2 = await updateStaticAnalysis({ wsDir: wsLink, sonarOrg: 'o', sonarToken: 'sonar-secret-token', secrets: [], run });
+    assert.match(r2.updateError ?? '', /symlink|outside the workspace/i);
+    assert.equal(run.calls.some((c) => c.args.includes('push')), false);
+    assert.equal(await fs.readFile(victim, 'utf8'), 'original');
+    assert.deepEqual((await fs.readdir(outside)).sort(), ['victim.txt']);
+  } finally {
+    for (const d of [outside, wsNoToken, wsLink]) await fs.rm(d, { recursive: true, force: true });
+  }
+});
+
+test('updateStaticAnalysis() makes no commit or push when the runner-owned files are already up to date', async () => {
+  const ws = await seedPublishedWorkspace('runner-ua-noop-');
+  try {
+    const first = await updateStaticAnalysis({ wsDir: ws, sonarOrg: 'o', sonarToken: 'sonar-secret-token', secrets: [], run: makeUpdateRun() });
+    assert.equal(first.updateError, undefined, first.updateError);
+    const head = await gitOut(ws, 'rev-parse', 'HEAD');
+    const run = makeUpdateRun();
+    const second = await updateStaticAnalysis({ wsDir: ws, sonarOrg: 'o', sonarToken: 'sonar-secret-token', secrets: [], run });
+    assert.equal(second.updateError, undefined, second.updateError);
+    assert.equal(await gitOut(ws, 'rev-parse', 'HEAD'), head);
+    assert.equal(run.calls.some((c) => c.args.includes('commit') || c.args.includes('push')), false);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('updateStaticAnalysis() records updateError and no updatedAt when the push fails', async () => {
+  const ws = await seedPublishedWorkspace('runner-ua-pushfail-');
+  try {
+    const run = async (cmd, args, opts) => {
+      if (cmd === 'git' && args.includes('push')) throw new Error('git push exited 1');
+      return spawnCommand(cmd, args, opts);
+    };
+    const report = await updateStaticAnalysis({ wsDir: ws, sonarOrg: 'o', sonarToken: 'sonar-secret-token', secrets: [], run });
+    assert.match(report.updateError, /git push exited 1/);
+    assert.equal(report.staticAnalysis.updatedAt, undefined);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+test('--update-analysis refuses an unpublished report with a clear message and a non-zero exit, before any credential check', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const ws = await seedWorkspace('runner-ua-cli-');
+  try {
+    const env = { ...process.env };
+    for (const k of ['MODEL_API_KEY', 'MODEL_ID', 'MODEL_BASE_URL', 'SONAR_TOKEN']) delete env[k];
+    const res = spawnSync(process.execPath, [path.join(__dirname, 'run-experiment.mjs'), '--update-analysis', ws], { encoding: 'utf8', env });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /Usage: --update-analysis/);
+    assert.match(res.stderr, /not published/);
     assert.doesNotMatch(res.stderr, /MODEL_API_KEY/);
   } finally {
     await fs.rm(ws, { recursive: true, force: true });

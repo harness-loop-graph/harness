@@ -13,7 +13,7 @@ import { DEFAULT_RUNS_DIR } from './aggregate-runs.mjs';
 const SONAR_MEASURES_URL = 'https://sonarcloud.io/api/measures/component';
 const SONAR_METRICS = [
   'ncloc', 'bugs', 'vulnerabilities', 'code_smells', 'security_hotspots', 'duplicated_lines_density',
-  'cognitive_complexity', 'sqale_index', 'reliability_rating', 'security_rating', 'sqale_rating',
+  'cognitive_complexity', 'sqale_index', 'reliability_rating', 'security_rating', 'sqale_rating', 'coverage', 'complexity',
 ];
 const SEMGREP_PENDING_PATTERN = /no analysis found|\b404\b|not found/i;
 

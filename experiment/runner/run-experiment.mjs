@@ -146,6 +146,8 @@ function parseArgs(argv) {
     sonarOrg: 'harness-loop-graph',
     // Workspace dir of an already generated run to publish without generating anything.
     publishOnly: null,
+    // Workspace dir of an already published run whose runner-owned static analysis files get refreshed.
+    updateAnalysis: null,
     // null = unset: the provider default applies and the field is omitted from requests.
     sampling: { temperature: null, topP: null, seed: null, maxTokens: null },
     // OpenRouter provider routing, pinned for every model call so c1/c2/c3 hit
@@ -208,6 +210,13 @@ function parseArgs(argv) {
         process.exit(1);
       }
       parsed.publishOnly = path.resolve(value);
+    } else if (a === '--update-analysis') {
+      const value = args[++i];
+      if (value === undefined) {
+        console.error('Usage: --update-analysis <workspace-dir> requires a value');
+        process.exit(1);
+      }
+      parsed.updateAnalysis = path.resolve(value);
     }
     else if (a === '--harness-config') {
       const value = args[++i];
@@ -223,7 +232,11 @@ function parseArgs(argv) {
     process.exit(1);
   }
   parsed.provider = providerOrder === null ? null : { order: providerOrder, allowFallbacks: allowProviderFallbacks };
-  if (!parsed.publishOnly && (!parsed.config || !['c1', 'c2', 'c3'].includes(parsed.config))) {
+  if (parsed.publishOnly && parsed.updateAnalysis) {
+    console.error('Usage: --publish-only and --update-analysis are mutually exclusive');
+    process.exit(1);
+  }
+  if (!parsed.publishOnly && !parsed.updateAnalysis && (!parsed.config || !['c1', 'c2', 'c3'].includes(parsed.config))) {
     console.error('Usage: node run-experiment.mjs --config c1|c2|c3 [options]');
     process.exit(1);
   }
@@ -550,6 +563,35 @@ async function checkGhAuthenticated(run = spawnCommand) {
 // replaced by this exact text; tests and docs reference this constant.
 const SEMGREP_CONFIGS = ['p/default', 'p/typescript'];
 
+// Projects whose tests run in the secret-less `coverage` job (paths mirror experiment/AGENTS.md).
+const COVERAGE_PROJECTS = ['backend', 'frontend'];
+
+// Install + Vitest coverage for one project dir. Generated code runs here and only here: no
+// secrets, read-only contents. Skips (exit 0) without a package.json, a test script or vitest;
+// `sed` prefixes relative lcov `SF:` paths with the dir because Sonar resolves them from the repo root.
+function coverageStep(dir) {
+  return `      - name: Coverage (${dir})
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          CI: true
+        run: |
+          if [ ! -f ${dir}/package.json ]; then echo "no ${dir}/package.json, skipping"; exit 0; fi
+          cd ${dir}
+          if ! node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then echo "no test script, skipping"; exit 0; fi
+          npm ci || npm install
+          if [ ! -f node_modules/vitest/package.json ]; then echo "vitest not installed, skipping coverage"; exit 0; fi
+          major=$(node -p "require('./node_modules/vitest/package.json').version.split('.')[0]")
+          npm i --no-save @vitest/coverage-v8@$major
+          npx vitest run --coverage --coverage.provider=v8 --coverage.reporter=lcov --coverage.reportsDirectory=coverage
+          if [ -f coverage/lcov.info ]; then sed -i '/^SF:[/]/!s#^SF:#SF:${dir}/#' coverage/lcov.info; fi
+`;
+}
+
+// Informative quality thresholds (the course's reference workflow); they never block the job.
+const QUALITY_THRESHOLDS = { MIN_COVERAGE: 65, MAX_DEBT_MIN: 960, MAX_COMPLEXITY: 50, MAX_VULNERABILITIES: 0 };
+const SONAR_MAIN_ONLY_IF = "if: github.event_name == 'push' && github.ref == 'refs/heads/main'";
+
 const STATIC_ANALYSIS_WORKFLOW = `name: static-analysis
 
 on:
@@ -578,24 +620,112 @@ jobs:
           sarif_file: semgrep.sarif
           category: semgrep
 
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+${COVERAGE_PROJECTS.map(coverageStep).join('')}      - name: Stage coverage reports
+        if: always()
+        run: |
+          for f in ${COVERAGE_PROJECTS.map((d) => `${d}/coverage/lcov.info`).join(' ')}; do
+            if [ -f "$f" ] && [ ! -L "$f" ]; then mkdir -p "coverage-artifacts/$(dirname "$f")" && cp "$f" "coverage-artifacts/$f"; fi
+          done
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: coverage-artifacts
+          if-no-files-found: ignore
+
   sonarcloud:
+    needs: coverage
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Download coverage reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports
+          path: .
       - name: SonarCloud scan
         uses: SonarSource/sonarqube-scan-action@v5
         env:
           SONAR_TOKEN: \${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
+      - name: Wait for SonarCloud analysis
+        ${SONAR_MAIN_ONLY_IF}
+        continue-on-error: true
+        env:
+          SONAR_TOKEN: \${{ secrets.SONAR_TOKEN }}
+        run: |
+          report=.scannerwork/report-task.txt
+          if [ ! -f "$report" ]; then echo "no report-task.txt, not waiting"; exit 0; fi
+          # ceTaskUrl is the /api/ce/task?id=... URL of this analysis' compute task
+          url=$(sed -n 's/^ceTaskUrl=//p' "$report")
+          case "$url" in https://sonarcloud.io/*) ;; *) echo "unexpected ceTaskUrl, not waiting"; exit 0 ;; esac
+          for i in $(seq 1 30); do
+            status=$(curl -s -u "$SONAR_TOKEN:" "$url" | jq -r '.task.status // empty')
+            echo "attempt $i: $status"
+            case "$status" in SUCCESS|FAILED|CANCELED) break ;; esac
+            sleep 5
+          done
+          exit 0
+      - name: Quality criteria (informative)
+        ${SONAR_MAIN_ONLY_IF}
+        continue-on-error: true
+        env:
+          SONAR_TOKEN: \${{ secrets.SONAR_TOKEN }}
+${Object.entries(QUALITY_THRESHOLDS).map(([k, v]) => `          ${k}: ${v}\n`).join('')}        run: |
+          PROJECT_KEY=$(sed -n 's/^sonar.projectKey=//p' sonar-project.properties)
+          api() { curl -s -u "$SONAR_TOKEN:" "$1"; }
+          measures=$(api "https://sonarcloud.io/api/measures/component?component=$PROJECT_KEY&branch=main&metricKeys=coverage,sqale_index,complexity")
+          metric() { echo "$measures" | jq -r --arg m "$1" '.component.measures[]? | select(.metric == $m) | .value'; }
+          coverage=$(metric coverage)
+          debt=$(metric sqale_index)
+          complexity=$(metric complexity)
+          vulns=$(api "https://sonarcloud.io/api/issues/search?componentKeys=$PROJECT_KEY&branch=main&types=VULNERABILITY&severities=CRITICAL,BLOCKER&resolved=false&ps=1" | jq -r '.total // empty')
+          failed=0
+          row() {
+            ok=$(awk -v v="$2" -v t="$4" -v op="$5" 'BEGIN { if (v == "") print 0; else if (op == "ge") print (v + 0 >= t + 0); else if (op == "le") print (v + 0 <= t + 0); else if (op == "lt") print (v + 0 < t + 0); else print (v + 0 == t + 0) }')
+            if [ "$ok" = "1" ]; then state="✅"; else state="❌"; failed=1; fi
+            value="$2$6"
+            if [ -z "$2" ]; then value="N/A"; fi
+            echo "| $1 | $value | $3 | $state |"
+          }
+          {
+            echo "### Resultado de calidad"
+            echo "| Criterio | Valor | Meta | Estado |"
+            echo "|---|---|---|---|"
+            row "Cobertura" "$coverage" "≥ $MIN_COVERAGE%" "$MIN_COVERAGE" ge "%"
+            row "Deuda técnica" "$debt" "≤ $MAX_DEBT_MIN min" "$MAX_DEBT_MIN" le " min"
+            row "Complejidad ciclomática" "$complexity" "< $MAX_COMPLEXITY" "$MAX_COMPLEXITY" lt ""
+            row "Vulnerabilidades críticas" "$vulns" "$MAX_VULNERABILITIES" "$MAX_VULNERABILITIES" eq ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$failed" = "1" ]; then echo "::warning title=Quality gates::Algunos criterios no se cumplen. Revisa la tabla en Summary."; fi
+          exit 0
 `;
 
 // The batteries pace their logins (~61 s apart) to respect the SPEC's auth rate limit (RF-14),
 // so ~12 logins alone take ~12 minutes.
 const BATTERY_TIMEOUT_MS = 30 * 60_000;
 
-const SONAR_EXCLUSIONS = '**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,run-report.json,batteries-report.json,audit*.jsonl,SPEC.md,AGENTS.md,.github/**';
+// Test files are declared as tests (SONAR_TEST_INCLUSIONS) and kept out of the sources.
+const SONAR_TEST_INCLUSIONS = '**/*.spec.ts,**/*.test.ts,**/*.spec.tsx,**/*.test.tsx,e2e/**';
+const SONAR_EXCLUSIONS = `**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,run-report.json,batteries-report.json,audit*.jsonl,SPEC.md,AGENTS.md,.github/**,${SONAR_TEST_INCLUSIONS}`;
+const SONAR_LCOV_REPORT_PATHS = COVERAGE_PROJECTS.map((d) => `${d}/coverage/lcov.info`).join(',');
 const SONARCLOUD_CREATE_URL = 'https://sonarcloud.io/api/projects/create';
 const SONARCLOUD_RENAME_BRANCH_URL = 'https://sonarcloud.io/api/project_branches/rename';
 const WORKFLOWS_DIR = '.github/workflows';
@@ -613,6 +743,9 @@ function buildSonarProjectProperties({ sonarOrg, workspaceName }) {
     `sonar.projectName=run-${workspaceName}`,
     'sonar.sources=.',
     `sonar.exclusions=${SONAR_EXCLUSIONS}`,
+    'sonar.tests=.',
+    `sonar.test.inclusions=${SONAR_TEST_INCLUSIONS}`,
+    `sonar.javascript.lcov.reportPaths=${SONAR_LCOV_REPORT_PATHS}`,
     '',
   ].join('\n');
 }
@@ -780,6 +913,76 @@ async function publishExistingWorkspace({ wsDir, org, sonarOrg, sonarToken, secr
   await publishWorkspace({
     ws: wsDir, report, modelId: report.model, config: report.config, org, secrets, sonarOrg, sonarToken, run, benchDir, fetchFn,
   });
+  await fs.writeFile(path.join(wsDir, 'run-report.json'), JSON.stringify(report, null, 2));
+  return report;
+}
+
+const UPDATE_ANALYSIS_COMMIT_MESSAGE = 'runner: update static analysis (coverage + quality criteria)';
+const GITHUB_REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+// Loads the run-report.json of an already published workspace for --update-analysis. Throws a
+// usage-style error when it cannot be updated: no report, no recorded repository (nothing to push
+// to), or not a git repository.
+async function loadUpdatableWorkspace(wsDir) {
+  let report;
+  try {
+    report = JSON.parse(await fs.readFile(path.join(wsDir, 'run-report.json'), 'utf-8'));
+  } catch (err) {
+    throw new Error(`cannot read run-report.json in ${wsDir}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!report.repository?.name) {
+    throw new Error(`${wsDir} is not published (run-report.json has no repository); publish it first with --publish-only`);
+  }
+  try {
+    await spawnCommand('git', ['-C', wsDir, 'rev-parse', '--git-dir'], {});
+  } catch {
+    throw new Error(`${wsDir} is not a git repository`);
+  }
+  return report;
+}
+
+// --update-analysis: rewrites ONLY the two runner-owned static analysis files of an already
+// published run (generated code is never touched), commits them and pushes to the recorded
+// remote's main, with the same protections as publishWorkspace(): git hooks/config neutralized,
+// no symlink following, and the secret scan before anything is committed or pushed. Never
+// throws once the report is loaded: failures land in `report.updateError` (persisted).
+async function updateStaticAnalysis({ wsDir, sonarOrg, sonarToken, secrets, run = spawnCommand, now = new Date() }) {
+  const report = await loadUpdatableWorkspace(wsDir);
+  delete report.updateError;
+  const gitRun = (cmd, args, opts = {}) => run(cmd, args, { ...opts, env: { ...opts.env, ...GIT_HOOKS_OFF_ENV } });
+  try {
+    if (!sonarToken) {
+      throw new Error('SONAR_TOKEN is not set (environment or .env at the repository root); refusing to update a run without static analysis');
+    }
+    if (!GITHUB_REPO_NAME.test(report.repository.name)) throw new Error(`unexpected repository name in run-report.json: ${report.repository.name}`);
+    await sanitizeWorkspaceGit(wsDir);
+    const secretHit = await scanWorkspaceForSecrets(wsDir, secrets);
+    if (secretHit) throw new Error(`secret detected in ${secretHit.file}`);
+
+    // Same project the run was published with: the recorded organization beats --sonar-org.
+    const projectOrg = report.staticAnalysis?.sonarOrganization ?? sonarOrg;
+    const owned = [STATIC_ANALYSIS_WORKFLOW_PATH, SONAR_PROPERTIES_PATH];
+    await writeOwnedFile(wsDir, STATIC_ANALYSIS_WORKFLOW_PATH, STATIC_ANALYSIS_WORKFLOW);
+    await writeOwnedFile(wsDir, SONAR_PROPERTIES_PATH, buildSonarProjectProperties({ sonarOrg: projectOrg, workspaceName: path.basename(wsDir) }));
+    await gitRun('git', ['add', '-f', '--', ...owned], { cwd: wsDir });
+    const pending = await gitRun('git', ['status', '--porcelain', '--', ...owned], { cwd: wsDir });
+    if ((pending?.stdout ?? '').trim()) {
+      const injectedHit = await scanWorkspaceForSecrets(wsDir, secrets);
+      if (injectedHit) throw new Error(`secret detected in ${injectedHit.file}`);
+      // `git commit` would also take other staged paths; the pathspec commits exactly the two files.
+      await gitRun('git', [...GIT_COMMIT_IDENTITY, 'commit', '--no-verify', '-m', UPDATE_ANALYSIS_COMMIT_MESSAGE, '--', ...owned], { cwd: wsDir });
+      // sanitizeWorkspaceGit() reset .git/config (planted remotes are gone), so point origin at the recorded repository again.
+      await gitRun('git', ['remote', 'add', 'origin', `https://github.com/${report.repository.name}.git`], { cwd: wsDir });
+      await gitRun('git', ['push', 'origin', 'HEAD:main'], { cwd: wsDir });
+    }
+    report.staticAnalysis = {
+      ...report.staticAnalysis,
+      workflowSha256: createHash('sha256').update(STATIC_ANALYSIS_WORKFLOW).digest('hex'),
+      ...((pending?.stdout ?? '').trim() ? { updatedAt: now.toISOString() } : {}),
+    };
+  } catch (err) {
+    report.updateError = err instanceof Error ? err.message : String(err);
+  }
   await fs.writeFile(path.join(wsDir, 'run-report.json'), JSON.stringify(report, null, 2));
   return report;
 }
@@ -1473,9 +1676,30 @@ async function mainPublishOnly(parsed) {
   if (report.publishError) process.exitCode = 1;
 }
 
+async function mainUpdateAnalysis(parsed) {
+  try {
+    await loadUpdatableWorkspace(parsed.updateAnalysis);
+  } catch (err) {
+    console.error(`Usage: --update-analysis ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  if (!(await checkGhAuthenticated())) {
+    console.error('Usage: --update-analysis requires an authenticated gh CLI. Run `gh auth login` first.');
+    process.exit(1);
+  }
+  const sonarToken = await loadSonarToken();
+  const secrets = await loadPublishOnlySecrets({ harnessConfigPath: parsed.harnessConfig });
+  const report = await updateStaticAnalysis({ wsDir: parsed.updateAnalysis, sonarOrg: parsed.sonarOrg, sonarToken, secrets });
+  if (report.updateError) console.error(`Update failed: ${report.updateError}`);
+  else console.error(`Updated static analysis of ${report.repository.url ?? report.repository.name}`);
+  console.log(path.join(parsed.updateAnalysis, 'run-report.json'));
+  if (report.updateError) process.exitCode = 1;
+}
+
 async function main() {
   const parsed = parseArgs(process.argv);
   if (parsed.publishOnly) return mainPublishOnly(parsed);
+  if (parsed.updateAnalysis) return mainUpdateAnalysis(parsed);
 
   if (parsed.publish && !(await checkGhAuthenticated())) {
     console.error('Usage: --publish requires an authenticated gh CLI. Run `gh auth login` first.');
@@ -1818,6 +2042,8 @@ export {
   publishWorkspace,
   publishExistingWorkspace,
   loadPublishableWorkspace,
+  loadUpdatableWorkspace,
+  updateStaticAnalysis,
   createSonarProject,
   buildSonarProjectProperties,
   STATIC_ANALYSIS_WORKFLOW,

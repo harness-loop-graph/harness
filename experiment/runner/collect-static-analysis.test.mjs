@@ -48,6 +48,8 @@ const SONAR_BODY = {
       { metric: 'reliability_rating', value: '1.0' },
       { metric: 'security_rating', value: '2.0' },
       { metric: 'sqale_rating', value: '1.0' },
+      { metric: 'coverage', value: '81.3' },
+      { metric: 'complexity', value: '412' },
     ],
   },
 };
@@ -115,7 +117,7 @@ test('complete case: Sonar measures + Semgrep alerts (non-semgrep ignored) are w
     const url = new URL(fetchFn.calls[0].url);
     assert.equal(url.origin + url.pathname, 'https://sonarcloud.io/api/measures/component');
     assert.equal(url.searchParams.get('component'), 'org_run-ws1');
-    assert.equal(url.searchParams.get('metricKeys'), 'ncloc,bugs,vulnerabilities,code_smells,security_hotspots,duplicated_lines_density,cognitive_complexity,sqale_index,reliability_rating,security_rating,sqale_rating');
+    assert.equal(url.searchParams.get('metricKeys'), 'ncloc,bugs,vulnerabilities,code_smells,security_hotspots,duplicated_lines_density,cognitive_complexity,sqale_index,reliability_rating,security_rating,sqale_rating,coverage,complexity');
     assert.equal(fetchFn.calls[0].init?.headers?.Authorization, undefined, 'no token => no auth header');
 
     const alertsCall = run.calls.find((c) => c.args.some((a) => a.includes('/code-scanning/alerts')));
@@ -132,6 +134,7 @@ test('complete case: Sonar measures + Semgrep alerts (non-semgrep ignored) are w
         measures: {
           ncloc: 1200, bugs: 3, vulnerabilities: 1, code_smells: 40, security_hotspots: 2, duplicated_lines_density: 4.5,
           cognitive_complexity: 77, sqale_index: 300, reliability_rating: 1, security_rating: 2, sqale_rating: 1,
+          coverage: 81.3, complexity: 412,
         },
       },
       semgrep: {

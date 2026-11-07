@@ -94,6 +94,7 @@ Router:
 | `--publish-org <org>` | `harness-loop-graph` | Organización/usuario de GitHub bajo el que se crea el repositorio de `--publish` |
 | `--sonar-org <key>` | `harness-loop-graph` | Organización de SonarCloud bajo la que se crea el proyecto de análisis estático de cada corrida publicada |
 | `--publish-only <workspace-dir>` | — | Publica un espacio de trabajo **ya generado** (sin llamar al modelo ni exigir `MODEL_API_KEY`/`MODEL_ID`): ver "Publicar un espacio de trabajo existente" |
+| `--update-analysis <workspace-dir>` | — | Refresca **solo** los dos archivos de análisis estático del runner (workflow + `sonar-project.properties`) de una corrida **ya publicada** y los empuja a su `main`: ver "Actualizar el análisis estático de una corrida publicada" |
 
 ### Tope de costo (`--max-cost`)
 
@@ -326,15 +327,64 @@ los archivos del modelo podrían manipular el análisis. Por eso, **antes** de
      p/default --config p/typescript --sarif --output semgrep.sarif || true`
      (los hallazgos no hacen fallar el job) y `github/codeql-action/upload-sarif@v3`
      con `category: semgrep`.
-   - job `sonarcloud`: `actions/checkout@v4` con `fetch-depth: 0` y
+   - job `coverage` (**sin secretos**, `permissions: contents: read`,
+     `persist-credentials: false`): `actions/checkout@v4`,
+     `actions/setup-node@v4` (Node 20) y, para `backend/` y `frontend/` (solo
+     si tienen `package.json` **y** un script `test`), `npm ci || npm install`,
+     instala `@vitest/coverage-v8` con el mismo *major* que el `vitest`
+     instalado (si no hay `vitest`, se omite la cobertura sin fallar) y corre
+     `npx vitest run --coverage --coverage.provider=v8
+     --coverage.reporter=lcov --coverage.reportsDirectory=coverage` con
+     `CI=true`, `continue-on-error: true` y `timeout-minutes: 20`. Las rutas
+     relativas de `lcov.info` se prefijan con el directorio del proyecto
+     (Sonar las resuelve desde la raíz del repositorio). Sube
+     `backend/coverage/lcov.info` y `frontend/coverage/lcov.info` como
+     artefacto `coverage-reports` (`if-no-files-found: ignore`).
+   - job `sonarcloud` (`needs: coverage`, `if: always()`): `actions/checkout@v4`
+     con `fetch-depth: 0`, descarga el artefacto de cobertura (si falta, sigue),
      `SonarSource/sonarqube-scan-action@v5` con `SONAR_TOKEN` (secreto de
-     Actions) y `SONAR_HOST_URL: https://sonarcloud.io`.
+     Actions) y `SONAR_HOST_URL: https://sonarcloud.io`, y —solo en *push* a
+     `main`— dos pasos informativos (`continue-on-error: true`, nunca hacen
+     fallar el job): **esperar el análisis** (lee `ceTaskUrl` de
+     `.scannerwork/report-task.txt` y consulta `/api/ce/task` cada 5 s, hasta
+     ~150 s, hasta `SUCCESS`/`FAILED`/`CANCELED`) y **criterios de calidad**.
+
+   **Código generado solo en un job sin secretos.** `npm ci`/`vitest` ejecutan
+   código del modelo, así que corren únicamente en el job `coverage`, que no
+   recibe `SONAR_TOKEN` ni ningún secreto. El job `sonarcloud` (con el token)
+   solo descarga `lcov.info` y escanea; nunca instala ni ejecuta el código del
+   modelo. Los reportes de cobertura son la única entrada que cruza entre
+   ambos jobs.
+
+   **Criterios de calidad (informativos).** El paso consulta
+   `https://sonarcloud.io/api/measures/component?component=<projectKey>&branch=main&metricKeys=coverage,sqale_index,complexity`
+   y `api/issues/search?componentKeys=<projectKey>&branch=main&types=VULNERABILITY&severities=CRITICAL,BLOCKER&resolved=false&ps=1`
+   (el `projectKey` se lee de `sonar-project.properties`, la misma clave que
+   recibe Sonar), compara con las metas de la rúbrica y escribe en
+   `$GITHUB_STEP_SUMMARY` una tabla `Criterio | Valor | Meta | Estado` (✅/❌);
+   si algún criterio falla emite un `::warning`. **Nunca bloquea**: es solo
+   información para el análisis posterior.
+
+   | Criterio | Meta (variable) |
+   |---|---|
+   | Cobertura (%) | ≥ 65 (`MIN_COVERAGE`) |
+   | Deuda técnica (min, `sqale_index`) | ≤ 960 (`MAX_DEBT_MIN`) |
+   | Complejidad (`complexity`) | ≤ 50 (`MAX_COMPLEXITY`) |
+   | Vulnerabilidades críticas/bloqueantes | = 0 (`MAX_VULNERABILITIES`) |
+
+   `complexity` es la **suma de todo el proyecto**, tal como la define la
+   rúbrica: cualquier aplicación completa superará 50, así que ese criterio
+   casi siempre aparecerá en ❌. Se reporta igual, sin ajustar la meta.
 3. `sonar-project.properties` fija `sonar.organization=<--sonar-org>`,
    `sonar.projectKey=<org>_run-<workspace dir name>`,
    `sonar.projectName=run-<workspace dir name>`, `sonar.sources=.` y
    `sonar.exclusions` con `node_modules`, `dist`, `build`, `coverage`,
-   `run-report.json`, `batteries-report.json`, `audit*.jsonl`, `SPEC.md` y
-   `.github/**`.
+   `run-report.json`, `batteries-report.json`, `audit*.jsonl`, `SPEC.md`,
+   `AGENTS.md`, `.github/**` y los archivos de prueba. Los tests se declaran
+   como tales con `sonar.tests=.` y `sonar.test.inclusions=**/*.spec.ts,
+   **/*.test.ts,**/*.spec.tsx,**/*.test.tsx,e2e/**` (así Sonar no los cuenta
+   como código fuente), y la cobertura entra por
+   `sonar.javascript.lcov.reportPaths=backend/coverage/lcov.info,frontend/coverage/lcov.info`.
 4. **Crea el proyecto de SonarCloud** con `POST
    https://sonarcloud.io/api/projects/create` (`organization`, `project`,
    `name`, `visibility=public`; cabecera `Authorization: Bearer
@@ -383,6 +433,11 @@ node runner/collect-static-analysis.mjs [--runs-dir <dir>] [--force]
   repos/<owner>/<repo>/code-scanning/alerts?state=open&per_page=100`,
   filtrando las alertas cuyo nombre de herramienta empieza con "semgrep"
   (sin distinguir mayúsculas). Requiere `gh` autenticado.
+- Métricas de Sonar pedidas: `ncloc`, `bugs`, `vulnerabilities`, `code_smells`,
+  `security_hotspots`, `duplicated_lines_density`, `cognitive_complexity`,
+  `sqale_index`, `reliability_rating`, `security_rating`, `sqale_rating`,
+  `coverage` y `complexity` (las dos últimas, de la cobertura y la rúbrica de
+  calidad; `complexity` es la suma de todo el proyecto).
 - Escribe `<ws>/static-analysis.json` con `collectedAt`, `status`
   (`complete` | `pending` | `error`), `sonar` (`status`, `projectKey`,
   `measures`) y `semgrep` (`status`, `openAlerts`, `bySeverity`,
@@ -398,6 +453,29 @@ node runner/collect-static-analysis.mjs [--runs-dir <dir>] [--force]
   archivo.
 - Imprime una línea por corrida; nunca falla por una sola corrida y sale con
   código 0 salvo que **todas** las corridas publicadas hayan dado `error`.
+
+#### Actualizar el análisis estático de una corrida publicada (`--update-analysis`)
+
+`node run-experiment.mjs --update-analysis <workspace-dir> [--sonar-org <key>]
+[--harness-config <path>]` lleva a una corrida **ya publicada** al workflow y
+las propiedades de Sonar actuales (cobertura + criterios de calidad) sin
+regenerar nada. Exige un `run-report.json` **con `repository`** (si no, se
+rehúsa con un error de uso), que el directorio sea un repositorio git, una CLI
+`gh` autenticada (igual que `--publish-only`) y `SONAR_TOKEN` (entorno o `.env`
+de la raíz). Reescribe **solo** `.github/workflows/static-analysis.yml` y
+`sonar-project.properties` (el código del modelo no se toca), agrega con
+`git add -f` únicamente esas dos rutas, las commitea con la identidad del runner,
+`--no-verify` y el mensaje `runner: update static analysis (coverage + quality
+criteria)`, y empuja a `main` del repositorio registrado en
+`repository.name`. Reutiliza las salvaguardas de `--publish`: hooks y
+`.git/config` neutralizados, nunca sigue enlaces simbólicos plantados por el
+modelo y el escaneo de secretos corre **antes** de commitear y empujar. La
+organización de Sonar es la registrada en `staticAnalysis.sonarOrganization`
+(tiene prioridad sobre `--sonar-org`). Si los archivos ya están al día no hay
+commit ni *push*. Al terminar registra `staticAnalysis.updatedAt` (y el nuevo
+`workflowSha256`) en `run-report.json`, sin commitear ese archivo; un fallo se
+guarda en `updateError` y el comando termina con código distinto de cero y un
+mensaje claro.
 
 #### Publicar un espacio de trabajo existente (`--publish-only`)
 
@@ -633,6 +711,9 @@ false` y un tope definido se agrega `budget.warning`.
   en una publicación: `sonarOrganization`, `sonarProjectKey`,
   `semgrepConfig`, `workflowSha256` (sha256 del *workflow* inyectado) y
   `removedWorkflows` (ver "Análisis estático").
+- `staticAnalysis.updatedAt` — ISO-8601 de la última ejecución exitosa de
+  `--update-analysis` (que además refresca `workflowSha256`); `updateError`
+  guarda el motivo si esa actualización falló.
 - `publishError` — presente solo si se pasó `--publish` (o `--publish-only`) y la publicación fue
   rehusada o falló (ver "Publicación" arriba); nunca incluye un valor de
   secreto.
@@ -783,4 +864,9 @@ cabecera `Bearer`), la tolerancia al 400 "already exists", que cualquier otro
 fallo o un `SONAR_TOKEN` ausente dejan `publishError` sin llamar a `gh`, que
 el escaneo de secretos detecta un `SONAR_TOKEN` plantado, `--sonar-org` y
 `--publish-only` (rechazo de reportes ya publicados, sin credenciales de
-modelo).
+modelo). Los pasos del *workflow* (job `coverage` sin secretos, espera del
+análisis y tabla de criterios) se verifican por su texto exacto, y
+`--update-analysis` con `run`/`fs` inyectados: rechazo de reportes sin
+`repository`, solo las dos rutas propias en `git add`, entorno sin hooks en
+cada llamada a git, escaneo de secretos antes de commitear/empujar y sin
+commit cuando ya está al día.
