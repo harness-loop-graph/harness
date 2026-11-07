@@ -1161,27 +1161,30 @@ function stopReasonForModelError(code) {
  * `runnerError`: truthy when the runner itself threw (or the harness config
  * failed). `budgetRefused`: the cost cap refused at least one model call.
  * Exactly one outcome applies: `finalResponse` (c1), `loopResult` (c2) or
- * `graphResult` (c3). A failure caused by a model error in the last turn/node
- * uses that error's category; otherwise c2 ran out of turns (`max_turns`) and
- * c3 ran out of steps/retries (`max_steps`).
+ * `graphResult` (c3). A loop that used every turn is `max_turns`; a failure
+ * caused by a model error that ended the loop early uses that error's
+ * category; otherwise c3 ran out of steps/retries (`max_steps`).
  */
 function deriveStopReason({ runnerError = null, budgetRefused = false, finalResponse = null, loopResult = null, graphResult = null } = {}) {
   if (runnerError) return 'runner_error';
   if (budgetRefused) return 'budget_exceeded';
   const fromResponse = (r) => (r?.type === 'error' ? stopReasonForModelError(r.code) : null);
+  // Using every turn is the cause, even when the last turn also ended on an error (e.g. max_tool_rounds).
+  const ranOutOfTurns = (loop) => /^max_turns \(/.test(loop?.failure ?? '');
   if (finalResponse) {
     if (finalResponse.type === 'finish') return 'finished';
     return fromResponse(finalResponse) ?? 'model_error';
   }
   if (loopResult) {
     if (loopResult.status === 'SUCCESS') return 'finished';
+    if (ranOutOfTurns(loopResult)) return 'max_turns';
     return fromResponse(loopResult.finalResponse) ?? 'max_turns';
   }
   if (graphResult) {
     if (graphResult.status === 'SUCCESS') return 'finished';
     if (/^maxSteps \(/.test(graphResult.failure ?? graphResult.decision?.reason ?? '')) return 'max_steps';
     const last = graphResult.state?.nodeResults?.at(-1);
-    if (last?.status === 'FAILED') return fromResponse(last.finalResponse) ?? 'max_turns';
+    if (last?.status === 'FAILED') return ranOutOfTurns(last) ? 'max_turns' : fromResponse(last.finalResponse) ?? 'max_turns';
     return 'max_steps';
   }
   return 'runner_error';

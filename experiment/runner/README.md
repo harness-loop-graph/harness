@@ -129,8 +129,10 @@ Cada corrida (salvo `--dry-run`, cuyo plan no lo incluye) escribe
 | `model_error` | Cualquier otro código de error del modelo |
 | `runner_error` | Excepción del runner (o `--harness-config` inválido), no del modelo |
 
-En c2/c3, un `FAILED` causado por un error del modelo en el último turno/nodo
-usa la categoría de ese error (por ejemplo `context_overflow`).
+En c2/c3, si el *loop* agotó todos sus turnos el motivo es `max_turns`, aunque
+el último turno también haya terminado en error (por ejemplo `max_tool_rounds`).
+Un `FAILED` causado por un error del modelo que cortó el *loop* antes usa la
+categoría de ese error (por ejemplo `provider_refused`).
 
 Los flags de muestreo que no se pasan quedan sin definir: el campo se omite
 de la solicitud y rige el default del proveedor. Un valor inválido termina con

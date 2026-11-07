@@ -2560,3 +2560,25 @@ test('default loop turn budget is 40 for c2 and 8 per node for c3; --max-turns o
 test('the battery phase allows at least 20 minutes (logins are paced to respect RF-14)', () => {
   assert.ok(BATTERY_TIMEOUT_MS >= 20 * 60_000, `got ${BATTERY_TIMEOUT_MS}`);
 });
+
+test('deriveStopReason() reports max_turns when c2 used every turn, even if the last turn ended on an error', () => {
+  const err = (code) => ({ type: 'error', code, message: 'm' });
+  const loop = (finalResponse, failure) => ({ status: 'FAILED', finalResponse, failure });
+  assert.equal(deriveStopReason({ loopResult: loop(err('max_tool_rounds'), 'max_turns (40) reached without success') }), 'max_turns');
+  assert.equal(deriveStopReason({ loopResult: loop(err('repeated_tool_call'), 'max_turns (3) reached without success') }), 'max_turns');
+  // A turn that ends the loop early keeps its own category.
+  assert.equal(deriveStopReason({ loopResult: loop(err('http_402'), 'Model unavailable (http_402: no credits)') }), 'provider_refused');
+});
+
+test('deriveStopReason() reports max_turns when the failed c3 node used every turn', () => {
+  const graphResult = {
+    status: 'FAILED',
+    failure: "Node 'backend' failed and has no on_failure edge",
+    state: {
+      nodeResults: [
+        { status: 'FAILED', failure: 'max_turns (8) reached without success', finalResponse: { type: 'error', code: 'max_tool_rounds', message: 'm' } },
+      ],
+    },
+  };
+  assert.equal(deriveStopReason({ graphResult }), 'max_turns');
+});
