@@ -38,7 +38,7 @@ sobre `experiment/SPEC.md` por defecto.
 | Nodo | Rol | Esencia de la tarea | Verificación |
 |------|------|--------------|--------------|
 | architect | architect | Escribir `docs/architecture.md` | `test -f docs/architecture.md` |
-| data | data | Implementar la capa de datos (migraciones + seed) y los archivos raíz `docker-compose.yml` y `.env.example` | `test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations \| grep -q . && cd backend && npm run build` |
+| data | data | Implementar la capa de datos (migraciones + seed), el esqueleto mínimo del backend que su verificación compila (`backend/package.json`, `backend/tsconfig.json`, `backend/src/main.ts`, `backend/src/app.module.ts`) y los archivos raíz `docker-compose.yml` y `.env.example` | `test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations \| grep -q . && cd backend && npm run build` |
 | backend | backend | Implementar el backend NestJS (EP-01..EP-20) y `backend/Dockerfile` | `cd backend && npm run build && npm run format:check && npm test && test -f Dockerfile && cd .. && docker compose build backend` |
 | frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08), `frontend/Dockerfile` y la suite raíz: `e2e/` (Playwright con el contrato `data-testid`, los cuatro flujos de "What to test" de `AGENTS.md`), `package.json` (con `@playwright/test` y Prettier fijados y los scripts `format`/`format:check`), `playwright.config.ts` y `README.md` | `cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd .. && test -f package.json && test -f README.md && test -f playwright.config.ts && test -d e2e && (ls node_modules/.bin/playwright node_modules/.bin/prettier >/dev/null 2>&1 \|\| npm install --no-audit --no-fund) && npm run format:check && npx playwright test --list && docker compose build frontend` |
 | reviewer | reviewer | Probar `docker compose up`, revisar el sistema, escribir `review-verdict.json` | `node -e` que valida la forma de `review-verdict.json` |
@@ -117,6 +117,16 @@ porque es lo más lento.
   de la línea `/`, cada carpeta, lo anidado y los `Dockerfile`) y cada entrada
   debe quedar nombrada, ella o una carpeta que la contiene, en la tarea de algún
   nodo que construye; una entrada nueva del layout sin dueño rompe el test.
+
+La verificación de **data** termina en `cd backend && npm run build`, pero el
+nodo backend corre después: sin esqueleto, un modelo que respeta su alcance
+nunca puede pasar. En la corrida C3 de gpt-6-luna (2026-11-08) el nodo data
+agotó sus 16 turnos esperando un `backend/package.json` que no le tocaba
+escribir; DeepSeek C3 había pasado porque su nodo data creó el esqueleto por
+su cuenta, fuera del alcance indicado. Desde entonces la tarea de data incluye
+ese esqueleto mínimo (el nodo backend lo completa), y un test exige que todo
+chequeo que corre `npm` en un directorio lo haga donde ese nodo o uno anterior
+es dueño del `package.json`.
 
 Cada Dockerfile es del nodo que escribe ese servicio: `backend/Dockerfile`
 (migraciones y seed al arrancar) del **backend** y `frontend/Dockerfile` (SPA

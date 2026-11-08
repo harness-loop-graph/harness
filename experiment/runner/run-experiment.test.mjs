@@ -1659,6 +1659,29 @@ test('killRunLeftovers() kills orphaned processes this run started and nothing e
   }
 });
 
+// A gate that runs npm in <dir> needs <dir>/package.json. When that file belonged to a later node,
+// a model that respected its scope could never pass (gpt-6-luna's data node, 2026-11-08).
+test('c3 gates only run npm where this node or an earlier one owns package.json', () => {
+  const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 });
+  const owns = (task, dir) =>
+    task.includes(`${dir}/package.json`) || new RegExp(`(^|[\\s(])${dir}/(?=[\\s,.)]|$)`).test(task);
+  for (const [i, node] of nodes.entries()) {
+    for (const [, dir] of node.verification.command.matchAll(/cd (\w+) && npm/g)) {
+      const owner = nodes.slice(0, i + 1).find((n) => owns(n.task, dir));
+      assert.ok(owner, `${node.id} runs npm in ${dir}/ but neither it nor an earlier node owns ${dir}/package.json`);
+    }
+  }
+});
+
+test('c3 data node creates the minimal backend skeleton its build gate needs', () => {
+  const data = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'data');
+  for (const file of ['backend/package.json', 'backend/tsconfig.json', 'backend/src/main.ts', 'backend/src/app.module.ts']) {
+    assert.ok(data.task.includes(file), file);
+  }
+  assert.match(data.task, /backend node completes/);
+  assert.match(data.verification.command, /cd backend && npm run build$/);
+});
+
 test('c3 data node owns the root docker-compose.yml and .env.example', () => {
   const data = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'data');
   assert.match(data.task, /docker-compose\.yml/);

@@ -1670,7 +1670,10 @@ function buildSpecNodes(parsed) {
         'Implement the data layer per SPEC: migrations + deterministic seed. Consult SPEC.md.' +
         ' You also own the root files that start the stack: create docker-compose.yml (services db, backend and frontend per the SPEC delivery contract, with the ports and environment defaults from the SPEC) and .env.example.' +
         ' The backend service builds backend/Dockerfile and the frontend service builds frontend/Dockerfile; the backend and frontend nodes write those Dockerfiles, not you.' +
-        doneInstructions('backend/src/database/ (migrations and seed), the wiring that runs them on start, and the root docker-compose.yml and .env.example', dataCommand),
+        // The gate builds the backend, and the backend node runs after this one: without a skeleton
+        // a model that respects its scope can never pass (gpt-6-luna, 2026-11-08).
+        ' The backend does not exist yet and your check builds it, so also create the minimal NestJS skeleton it needs to compile: backend/package.json (pinned dependencies), backend/tsconfig.json, backend/src/main.ts and backend/src/app.module.ts. Keep it minimal; the backend node completes it.' +
+        doneInstructions('backend/src/database/ (migrations and seed), the wiring that runs them on start, the minimal backend skeleton (backend/package.json, backend/tsconfig.json, backend/src/main.ts, backend/src/app.module.ts), and the root docker-compose.yml and .env.example', dataCommand),
       verification: { command: dataCommand },
       finishOnVerificationPass: true,
       maxTurns: parsed.maxTurns,
