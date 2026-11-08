@@ -38,7 +38,7 @@ sobre `experiment/SPEC.md` por defecto.
 | Nodo | Rol | Esencia de la tarea | Verificación |
 |------|------|--------------|--------------|
 | architect | architect | Escribir `docs/architecture.md` | `test -f docs/architecture.md` |
-| data | data | Implementar la capa de datos (migraciones + seed) | `test -d backend/src/database/migrations && ls backend/src/database/migrations \| grep -q . && cd backend && npm run build` |
+| data | data | Implementar la capa de datos (migraciones + seed) y los archivos raíz `docker-compose.yml` y `.env.example` | `test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations \| grep -q . && cd backend && npm run build` |
 | backend | backend | Implementar el backend NestJS (EP-01..EP-20) | `cd backend && npm run build && npm test` |
 | frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) | `cd frontend && npm run build` |
 | reviewer | reviewer | Revisar el sistema, escribir `review-verdict.json` | `test -f review-verdict.json` |
@@ -48,11 +48,18 @@ Los cuatro nodos de construcción (architect, data, backend, frontend) usan
 el nodo termina en cuanto pasa, aunque el modelo no haya dicho `finish`
 (evita que un modelo perfeccionista gaste todos los turnos puliendo). El texto
 de cada tarea conserva su descripción y añade el alcance (`docs/`,
-`backend/src/database/`, `backend/`, `frontend/`) y el comando que cierra el
+`backend/src/database/` más los dos archivos raíz del *data*, `backend/`,
+`frontend/`) y el comando que cierra el
 nodo; `--task-file` reemplaza solo la descripción de la tarea, no la
 verificación ni la bandera. El reviewer no usa la bandera. `--dry-run` lista
 `verification` y `finishOnVerificationPass` de cada nodo en `plan.nodes`. C2
 no cambia: sigue exigiendo `finish` más verificación aprobada.
+
+El nodo **data** es el dueño de `docker-compose.yml` (servicios `db`, `backend`
+y `frontend` según el contrato de entrega de la SPEC, con sus puertos y
+variables por defecto) y de `.env.example` en la raíz: antes nadie los poseía y
+el stack no podía levantarse. Por eso su verificación primero comprueba que
+ambos archivos existan.
 
 Router:
 - Los nodos no-revisores fluyen linealmente: architect → data → backend → frontend → reviewer.
@@ -75,7 +82,7 @@ Router:
 | `--task-file <path>` | — | Sobrescribe la tarea de generación (corridas de validación económicas). En c3, cada nodo conserva su rol y verificación pero trabaja sobre esta tarea en lugar de la SPEC, y la tarea a nivel de grafo del `GraphEngine` también se fija al valor sobrescrito (los nodos son lo que el motor realmente ejecuta, pero la tarea a nivel de grafo ya no lo contradice). El archivo se valida (existe, es legible, no está vacío ni es solo espacios en blanco) **antes** de crear el espacio de trabajo de la corrida, con un error de uso y salida distinta de cero si falla, para cada `--config` — de modo que un `--task-file` inválido nunca deja un directorio de espacio de trabajo huérfano |
 | `--max-turns <n>` | 40 (c2), 8 por nodo (c3) | Presupuesto de turnos del *loop* (C2, y cada nodo de C3). Debe ser un entero positivo |
 | `--max-steps <n>` | 12 | Presupuesto de pasos del grafo (solo C3). Debe ser un entero positivo |
-| `--tool-rounds <n>` | 2000 (c1), 80 (c2), 30 por nodo (c3) | Presupuesto de llamadas a herramienta por interacción. En c1 el valor por defecto es alto a propósito: las rondas no deben ser un límite arbitrario, el que manda es `--max-cost` (y, si la conversación única se llena, `context_overflow`). Debe ser un entero positivo |
+| `--tool-rounds <n>` | 2000 (c1), 80 (c2), 80 por nodo (c3) | Presupuesto de llamadas a herramienta por interacción. En C3 cada turno del *loop* de un nodo arranca una conversación nueva: con 30 rondas el nodo de backend volvía a planificar en cada turno y se quedaba sin presupuesto, así que usa lo mismo que C2. En c1 el valor por defecto es alto a propósito: las rondas no deben ser un límite arbitrario, el que manda es `--max-cost` (y, si la conversación única se llena, `context_overflow`). Debe ser un entero positivo |
 | `--temperature <n>` | sin valor (default del proveedor) | Temperatura de muestreo, número en [0, 2]. Se aplica a **todos** los adaptadores que crea el runner (el predeterminado y los de cada ruta del *router*), de modo que C1/C2/C3 muestreen igual |
 | `--top-p <n>` | sin valor | `top_p`, número en (0, 1]. Mismo alcance que `--temperature` |
 | `--seed <n>` | sin valor | `seed` de muestreo, entero. Mismo alcance que `--temperature` |
@@ -529,7 +536,16 @@ publicado.
 
 ## Seguir una corrida en vivo
 
-Cada decisión de *guardrails* se agrega a `<espacio-de-trabajo>/audit.jsonl`
+Durante la generación, los logs se escriben **fuera** del espacio de trabajo, en
+el directorio hermano `<espacio-de-trabajo>.logs/` (p. ej.
+`pi-runs/<nombre>.logs/`), para que el modelo no pueda leerlos (antes leyó el
+`reasoning.jsonl` del runner). Al terminar la generación (éxito, fallo o
+excepción) y antes del commit, las baterías y la publicación, el runner copia
+los `audit*.jsonl` a la raíz del espacio de trabajo, de modo que se
+commitean y publican igual que siempre; `reasoning.jsonl` se queda solo en
+`<espacio-de-trabajo>.logs/`.
+
+Cada decisión de *guardrails* se agrega a `<espacio-de-trabajo>.logs/audit.jsonl`
 (`audit-<nodo>.jsonl` en C3) apenas se toma, de modo que se puede seguir lo que
 hace el modelo con `tail -f`. Cada línea trae `decision`, `reason`, `at` y la
 acción evaluada: `tool` más `path` (`read_file`/`write_file`/`search_replace`) o
@@ -538,19 +554,19 @@ con `…`). Nunca incluye contenido de archivos ni los cuerpos de
 `search`/`replace`.
 
 ```sh
-tail -f <espacio-de-trabajo>/audit.jsonl
+tail -f <espacio-de-trabajo>.logs/audit.jsonl
 ```
 
 Si tenés `jq` (el runner no lo requiere), una vista compacta:
 
 ```sh
-tail -f <espacio-de-trabajo>/audit.jsonl | jq -r '"\(.at[11:19]) \(.decision) \(.tool // "cmd") \(.path // .command // .name // "")"'
+tail -f <espacio-de-trabajo>.logs/audit.jsonl | jq -r '"\(.at[11:19]) \(.decision) \(.tool // "cmd") \(.path // .command // .name // "")"'
 ```
 
 ### Ver el razonamiento del modelo
 
 Para ver, al menos a grandes rasgos, *por qué* el modelo hace cada acción, el
-runner agrega a `<espacio-de-trabajo>/reasoning.jsonl` una línea por respuesta
+runner agrega a `<espacio-de-trabajo>.logs/reasoning.jsonl` una línea por respuesta
 del modelo que traiga texto de razonamiento (el que OpenRouter devuelve en
 `message.reasoning`/`reasoning_details` para modelos de razonamiento): `at`,
 `model`, `provider`, `reasoningChars`, `reasoning` (recortado a 2000 caracteres
@@ -559,18 +575,18 @@ con `…`) y `action` (`tool_call <herramienta> <path|name|comando>`, `finish` o
 los nodos comparten el mismo archivo; con `--dry-run` no se crea.
 
 ```sh
-tail -f <espacio-de-trabajo>/reasoning.jsonl
+tail -f <espacio-de-trabajo>.logs/reasoning.jsonl
 ```
 
 Con `jq` (opcional), hora, acción y los primeros ~200 caracteres del razonamiento:
 
 ```sh
-tail -f <espacio-de-trabajo>/reasoning.jsonl | jq -r '"\(.at[11:19]) \(.action)\n    \(.reasoning[:200] | gsub("\n"; " "))"'
+tail -f <espacio-de-trabajo>.logs/reasoning.jsonl | jq -r '"\(.at[11:19]) \(.action)\n    \(.reasoning[:200] | gsub("\n"; " "))"'
 ```
 
-Este archivo es **solo local**: está en el `.gitignore` del espacio de trabajo
-(`reasoning.jsonl`), así que no se commitea ni se publica con el repositorio de
-la corrida.
+Este archivo es **solo local**: vive fuera del espacio de trabajo (y además
+`reasoning.jsonl` sigue en su `.gitignore`), así que no se commitea ni se
+publica con el repositorio de la corrida.
 
 ## Referencia de `run-report.json`
 

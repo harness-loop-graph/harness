@@ -45,7 +45,7 @@ el tope de gasto es el límite que manda.
 |---|---|---|
 | C1 | USD 6 | Una interacción con `--tool-rounds` (2000 por defecto: las rondas dejan de ser un límite arbitrario) |
 | C2 | USD 6 | Hasta `--max-turns` turnos (40 por defecto) × `--tool-rounds` por turno (80 por defecto) |
-| C3 | USD 6 | Hasta `--max-steps` pasos de grafo, cada nodo con su propio *loop* de hasta `--max-turns` turnos (8 por defecto) |
+| C3 | USD 6 | Hasta `--max-steps` pasos de grafo, cada nodo con su propio *loop* de hasta `--max-turns` turnos (8 por defecto) × `--tool-rounds` por turno (80 por defecto, igual que C2) |
 
 Toda corrida declara **por qué terminó** en `stopReason` de `run-report.json`
 (y en la línea `Stopped:` del resumen final); ver `runner/README.md`.

@@ -245,7 +245,7 @@ function parseArgs(argv) {
     parsed.maxTurns = parsed.config === 'c2' ? 40 : 8;
   }
   if (parsed.toolRounds == null) {
-    parsed.toolRounds = parsed.config === 'c1' ? 2000 : parsed.config === 'c2' ? 80 : 30;
+    parsed.toolRounds = parsed.config === 'c1' ? 2000 : 80;
   }
   return parsed;
 }
@@ -330,8 +330,9 @@ async function createWorkspace(runsDir, config, modelId, specPath, { dryRun = fa
 }
 
 // Patterns always ignored in a per-run workspace repo: dependency/build
-// output that should never be committed, and any .env* file (credentials).
-const RUN_GITIGNORE_LINES = ['node_modules/', 'dist/', 'build/', 'coverage/', '.env*', 'reasoning.jsonl'];
+// output that should never be committed, and any .env* file (credentials)
+// except the .env.example template SPEC's delivery contract asks for.
+const RUN_GITIGNORE_LINES = ['node_modules/', 'dist/', 'build/', 'coverage/', '.env*', '!.env.example', 'reasoning.jsonl'];
 
 // Writes the workspace .gitignore, only adding lines the agent's own
 // .gitignore (if any) doesn't already have, so a generated project's own
@@ -1393,6 +1394,34 @@ function deriveStopReason({ runnerError = null, budgetRefused = false, finalResp
   return 'runner_error';
 }
 
+// Run logs live in a sibling directory, outside the workspace the model can
+// read: the audit logs and the runner's own reasoning log stay out of its reach
+// while it generates. auditFile(nodeId) is audit-<node>.jsonl for c3 nodes.
+function runLogPaths(ws) {
+  const dir = `${ws}.logs`;
+  return {
+    dir,
+    reasoningLog: path.join(dir, 'reasoning.jsonl'),
+    auditFile: (nodeId) => path.join(dir, nodeId ? `audit-${nodeId}.jsonl` : 'audit.jsonl'),
+  };
+}
+
+// After generation, put the audit*.jsonl files into the workspace root so the
+// git commit and publishing keep them. reasoning.jsonl stays local in the logs dir.
+async function copyAuditLogsToWorkspace(ws) {
+  const { dir } = runLogPaths(ws);
+  let names;
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return [];
+    throw err;
+  }
+  const audits = names.filter((n) => /^audit.*\.jsonl$/.test(n));
+  for (const name of audits) await fs.copyFile(path.join(dir, name), path.join(ws, name));
+  return audits;
+}
+
 function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
   const execution = new LocalExecutionManager({
     workspaceRoot: ws,
@@ -1527,7 +1556,7 @@ function doneInstructions(scope, command) {
 
 function buildSpecNodes(parsed) {
   const dataCommand =
-    'test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build';
+    'test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build';
   const backendCommand = 'cd backend && npm run build && npm test';
   const frontendCommand = 'cd frontend && npm run build';
   return [
@@ -1547,7 +1576,8 @@ function buildSpecNodes(parsed) {
       role: 'data',
       task:
         'Implement the data layer per SPEC: migrations + deterministic seed. Consult SPEC.md.' +
-        doneInstructions('backend/src/database/ (migrations and seed) and the wiring that runs them on start', dataCommand),
+        ' You also own the root files that start the stack: create docker-compose.yml (services db, backend and frontend per the SPEC delivery contract, with the ports and environment defaults from the SPEC) and .env.example.' +
+        doneInstructions('backend/src/database/ (migrations and seed), the wiring that runs them on start, and the root docker-compose.yml and .env.example', dataCommand),
       verification: { command: dataCommand },
       finishOnVerificationPass: true,
       maxTurns: parsed.maxTurns,
@@ -1779,6 +1809,8 @@ async function main() {
 
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
+  const logs = runLogPaths(ws);
+  await fs.mkdir(logs.dir, { recursive: true });
 
   let report = {
     config: parsed.config,
@@ -1817,69 +1849,79 @@ async function main() {
   // The one outcome object deriveStopReason() reads (set by the config's branch).
   let stopOutcome = {};
   if (!configFailure) try {
-    if (parsed.config === 'c1') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, reasoningLogFile: path.join(ws, 'reasoning.jsonl'), maxCostUsd: parsed.maxCostUsd });
-      runModel = model;
-      const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
-      const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
-      stopOutcome = { finalResponse: result.finalResponse };
-      report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
-      attachUsageAndRouting(report, model);
-      report.turns = result.turns.length;
-      report.trace = compactTraceC1(result);
-      if (result.finalResponse.type === 'finish') {
-        report.finalResponse = truncate(result.finalResponse.content, 2000);
-      } else if (result.finalResponse.type === 'error') {
-        report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
+    try {
+      if (parsed.config === 'c1') {
+        const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, reasoningLogFile: logs.reasoningLog, maxCostUsd: parsed.maxCostUsd });
+        runModel = model;
+        const { harness } = buildHarness(ws, model, parsed.toolRounds, logs.auditFile(), harnessExtras);
+        const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
+        stopOutcome = { finalResponse: result.finalResponse };
+        report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
+        attachUsageAndRouting(report, model);
+        report.turns = result.turns.length;
+        report.trace = compactTraceC1(result);
+        if (result.finalResponse.type === 'finish') {
+          report.finalResponse = truncate(result.finalResponse.content, 2000);
+        } else if (result.finalResponse.type === 'error') {
+          report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
+        }
+      } else if (parsed.config === 'c2') {
+        const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, reasoningLogFile: logs.reasoningLog, maxCostUsd: parsed.maxCostUsd });
+        runModel = model;
+        const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, logs.auditFile(), harnessExtras);
+        const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
+        const loopResult = await loop.run({
+          task,
+          maxTurns: parsed.maxTurns,
+          verification: { command: parsed.verifyCmd },
+          toolRoundsPerTurn: parsed.toolRounds,
+        });
+        stopOutcome = { loopResult };
+        report.status = loopResult.status;
+        attachUsageAndRouting(report, model);
+        report.turns = loopResult.turns;
+        report.decision = loopResult.decision;
+        report.failure = loopResult.failure;
+        report.trace = compactTraceC2(loopResult);
+        if (loopResult.finalResponse?.type === 'finish') {
+          report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
+        }
+      } else if (parsed.config === 'c3') {
+        const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, reasoningLogFile: logs.reasoningLog, maxCostUsd: parsed.maxCostUsd });
+        runModel = model;
+        const factory = (node) => {
+          if (node.id === 'reviewer') clearStaleReviewVerdict(ws);
+          const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, logs.auditFile(node.id), harnessExtras);
+          return new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
+        };
+        const nodes = buildNodes(parsed, parsed.taskFile ? task : null);
+        const engine = new GraphEngine(factory, {
+          // The engine's graph-level task must not contradict a --task-file
+          // override even though GraphEngine itself only consults node.task.
+          task: parsed.taskFile ? task : 'Implement the complete system described in SPEC.md',
+          initialNode: 'architect',
+          nodes,
+          edges: [],
+          maxSteps: parsed.maxSteps,
+        }, buildRouter(ws));
+        const graphResult = await engine.run();
+        stopOutcome = { graphResult };
+        report.status = graphResult.status;
+        attachUsageAndRouting(report, model);
+        report.steps = graphResult.steps;
+        report.totalLoopTurns = graphResult.totalLoopTurns;
+        report.decision = graphResult.decision;
+        report.failure = graphResult.failure;
+        report.trace = compactTraceC3(graphResult);
       }
-    } else if (parsed.config === 'c2') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, reasoningLogFile: path.join(ws, 'reasoning.jsonl'), maxCostUsd: parsed.maxCostUsd });
-      runModel = model;
-      const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
-      const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
-      const loopResult = await loop.run({
-        task,
-        maxTurns: parsed.maxTurns,
-        verification: { command: parsed.verifyCmd },
-        toolRoundsPerTurn: parsed.toolRounds,
-      });
-      stopOutcome = { loopResult };
-      report.status = loopResult.status;
-      attachUsageAndRouting(report, model);
-      report.turns = loopResult.turns;
-      report.decision = loopResult.decision;
-      report.failure = loopResult.failure;
-      report.trace = compactTraceC2(loopResult);
-      if (loopResult.finalResponse?.type === 'finish') {
-        report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
+    } finally {
+      // Whatever the outcome, the audit logs reach the workspace before the batteries,
+      // the git commit and publishing read them. reasoning.jsonl stays in the logs dir.
+      try {
+        await copyAuditLogsToWorkspace(ws);
+      } catch (copyErr) {
+        console.error(`Warning: failed to copy audit logs into the workspace: ${copyErr instanceof Error ? copyErr.message : String(copyErr)}`);
       }
-    } else if (parsed.config === 'c3') {
-      const model = await createModel({ apiKey, modelId, harnessExtras, sampling: parsed.sampling, provider: parsed.provider, timeoutMs: modelTimeoutMs, maxRetries: parsed.modelRetries, reasoningLogFile: path.join(ws, 'reasoning.jsonl'), maxCostUsd: parsed.maxCostUsd });
-      runModel = model;
-      const factory = (node) => {
-        if (node.id === 'reviewer') clearStaleReviewVerdict(ws);
-        const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`), harnessExtras);
-        return new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
-      };
-      const nodes = buildNodes(parsed, parsed.taskFile ? task : null);
-      const engine = new GraphEngine(factory, {
-        // The engine's graph-level task must not contradict a --task-file
-        // override even though GraphEngine itself only consults node.task.
-        task: parsed.taskFile ? task : 'Implement the complete system described in SPEC.md',
-        initialNode: 'architect',
-        nodes,
-        edges: [],
-        maxSteps: parsed.maxSteps,
-      }, buildRouter(ws));
-      const graphResult = await engine.run();
-      stopOutcome = { graphResult };
-      report.status = graphResult.status;
-      attachUsageAndRouting(report, model);
-      report.steps = graphResult.steps;
-      report.totalLoopTurns = graphResult.totalLoopTurns;
-      report.decision = graphResult.decision;
-      report.failure = graphResult.failure;
-      report.trace = compactTraceC3(graphResult);
     }
 
     if (parsed.withBatteries) {
@@ -2014,6 +2056,8 @@ export {
   loadSonarToken,
   loadHarnessExtras,
   buildHarness,
+  runLogPaths,
+  copyAuditLogsToWorkspace,
   buildNodes,
   buildRouter,
   createWorkspace,

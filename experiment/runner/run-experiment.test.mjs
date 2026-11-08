@@ -16,6 +16,8 @@ import {
   deriveStopReason,
   STOP_REASONS,
   buildNodes,
+  runLogPaths,
+  copyAuditLogsToWorkspace,
   loadHarnessExtras,
   buildHarness,
   createModel,
@@ -1257,7 +1259,7 @@ test('c3 nodes keep topology and verifications but use the --task-file task', ()
 
 const C3_NODE_DONE = {
   architect: 'test -f docs/architecture.md',
-  data: 'test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build',
+  data: 'test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build',
   backend: 'cd backend && npm run build && npm test',
   frontend: 'cd frontend && npm run build',
 };
@@ -1273,6 +1275,15 @@ test('c3 build nodes finish on their verification; the reviewer still needs the 
   const reviewer = nodes.find((n) => n.id === 'reviewer');
   assert.deepEqual(reviewer.verification, { command: 'test -f review-verdict.json' });
   assert.notEqual(reviewer.finishOnVerificationPass, true);
+});
+
+test('c3 data node owns the root docker-compose.yml and .env.example', () => {
+  const data = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'data');
+  assert.match(data.task, /docker-compose\.yml/);
+  assert.match(data.task, /\.env\.example/);
+  assert.match(data.task, /db.*backend.*frontend/s);
+  assert.match(data.task, /backend\/src\/database/);
+  assert.match(data.verification.command, /^test -f docker-compose\.yml && test -f \.env\.example && /);
 });
 
 test('c3 --task-file override keeps the per-node verification and finishOnVerificationPass', () => {
@@ -1919,11 +1930,11 @@ test('harness instructions pin the repository root to the workspace root', () =>
   assert.match(HARNESS_INSTRUCTIONS, /Stay inside the workspace/);
 });
 
-test('default tool-round budget makes c1 rounds a non-limit (2000) and keeps c2/c3 per-turn budget', () => {
+test('default tool-round budget makes c1 rounds a non-limit (2000) and gives c2/c3 the same 80 per turn', () => {
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1']).toolRounds, 2000);
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c1', '--tool-rounds', '50']).toolRounds, 50);
   assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']).toolRounds, 80);
-  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c3']).toolRounds, 30);
+  assert.equal(parseArgs(['node', 'run-experiment.mjs', '--config', 'c3']).toolRounds, 80);
 });
 
 const err = (code) => ({ type: 'error', code, message: 'm' });
@@ -2866,4 +2877,51 @@ test('deriveStopReason() reports max_turns when the failed c3 node used every tu
     },
   };
   assert.equal(deriveStopReason({ graphResult }), 'max_turns');
+});
+
+test('runLogPaths puts audit and reasoning logs in the sibling ${ws}.logs directory, outside the workspace', () => {
+  const ws = path.join(os.tmpdir(), 'pi-runs', 'model-c3-2026');
+  const logs = runLogPaths(ws);
+  assert.equal(logs.dir, `${ws}.logs`);
+  assert.equal(logs.reasoningLog, `${ws}.logs/reasoning.jsonl`);
+  assert.equal(logs.auditFile(), `${ws}.logs/audit.jsonl`);
+  assert.equal(logs.auditFile('backend'), `${ws}.logs/audit-backend.jsonl`);
+  for (const p of [logs.reasoningLog, logs.auditFile(), logs.auditFile('data')]) {
+    assert.ok(!p.startsWith(ws + path.sep), p);
+  }
+});
+
+test('copyAuditLogsToWorkspace copies audit*.jsonl into the workspace and leaves reasoning.jsonl out', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'audit-copy-'));
+  try {
+    const ws = path.join(base, 'ws');
+    await fs.mkdir(ws);
+    const logs = runLogPaths(ws);
+    await fs.mkdir(logs.dir);
+    await fs.writeFile(logs.auditFile(), '{"a":1}\n');
+    await fs.writeFile(logs.auditFile('data'), '{"d":1}\n');
+    await fs.writeFile(logs.reasoningLog, '{"r":1}\n');
+    await copyAuditLogsToWorkspace(ws);
+    assert.equal(await fs.readFile(path.join(ws, 'audit.jsonl'), 'utf-8'), '{"a":1}\n');
+    assert.equal(await fs.readFile(path.join(ws, 'audit-data.jsonl'), 'utf-8'), '{"d":1}\n');
+    assert.deepEqual((await fs.readdir(ws)).sort(), ['audit-data.jsonl', 'audit.jsonl']);
+    await assert.doesNotReject(copyAuditLogsToWorkspace(path.join(base, 'no-logs-ws')));
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('initWorkspaceRepo() commits .env.example but never .env', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-envexample-'));
+  try {
+    await fs.writeFile(path.join(ws, '.env.example'), 'POSTGRES_USER=medapp\n');
+    await fs.writeFile(path.join(ws, '.env'), 'POSTGRES_PASSWORD=real\n');
+    await initWorkspaceRepo(ws, 'test: env example');
+    const tracked = execFileSync('git', ['-C', ws, 'ls-files'], { encoding: 'utf8' }).trim().split('\n');
+    assert.ok(tracked.includes('.env.example'));
+    assert.ok(!tracked.includes('.env'));
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
 });
