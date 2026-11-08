@@ -60,7 +60,7 @@ import {
   killRunLeftovers,
   removeStrayContainers,
 } from './run-experiment.mjs';
-import { rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HARNESS_TESTS_DIR = path.resolve(__dirname, '..', '..', 'harness', 'tests');
@@ -1264,7 +1264,11 @@ const C3_NODE_DONE = {
   architect: 'test -f docs/architecture.md',
   data: 'test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build',
   backend: 'cd backend && npm run build && npm run format:check && npm test && test -f Dockerfile && cd .. && docker compose build backend',
-  frontend: 'cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd .. && docker compose build frontend',
+  frontend:
+    'cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd ..' +
+    ' && test -f package.json && test -f README.md && test -f playwright.config.ts && test -d e2e' +
+    ' && (ls node_modules/.bin/playwright node_modules/.bin/prettier >/dev/null 2>&1 || npm install --no-audit --no-fund)' +
+    ' && npm run format:check && npx playwright test --list && docker compose build frontend',
 };
 
 const C2_DEFAULT_VERIFY_CMD =
@@ -1309,9 +1313,10 @@ test('c3 backend and frontend commands run the format check inside their own dir
     assert.equal(checks.find((c) => c.step === 'npm run format:check').dir, id, id);
     assert.equal(checks.find((c) => c.step.startsWith('docker compose build')).dir, '.', id);
   }
-  // The root package.json and e2e/ have no owner node in c3 (tracked separately): no root check here.
-  for (const command of nodes.map((n) => n.verification.command)) {
-    assert.ok(!stepDirectories(command).some((c) => c.step === 'npm run format:check' && c.dir === '.'), command);
+  // Only the frontend node owns the root package.json and e2e/, so only it checks the root format.
+  for (const node of nodes) {
+    const rootFormat = stepDirectories(node.verification.command).some((c) => c.step === 'npm run format:check' && c.dir === '.');
+    assert.equal(rootFormat, node.id === 'frontend', node.id);
   }
 });
 
@@ -1323,6 +1328,200 @@ test('c3 build nodes finish on their verification', () => {
     assert.equal(node.finishOnVerificationPass, true, id);
     assert.match(node.task, /done when/, id);
   }
+});
+
+const ROOT_SUITE_FILES = ['e2e/', 'package.json', 'playwright.config.ts', 'README.md'];
+
+test('c3 frontend node owns the root Playwright suite, package.json, playwright.config.ts and README.md', () => {
+  const frontend = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'frontend');
+  const scope = frontend.task.match(/Work only in (.*?)\. Your part is done when/s)[1];
+  assert.match(scope, /^frontend\//);
+  for (const owned of ROOT_SUITE_FILES) {
+    assert.ok(scope.includes(owned), `scope names ${owned}: ${scope}`);
+    assert.ok(frontend.task.includes(owned), owned);
+  }
+  assert.match(frontend.task, /data-testid/);
+  assert.match(frontend.task, /@playwright\/test/);
+  assert.match(frontend.task, /\bformat\b.*\bformat:check\b/s);
+  assert.match(frontend.task, /http:\/\/localhost:8080/);
+  // The AGENTS.md "What to test" end-to-end list.
+  assert.match(frontend.task, /login for each role/i);
+  assert.match(frontend.task, /books and cancels an appointment/i);
+  assert.match(frontend.task, /professional records an encounter/i);
+  assert.match(frontend.task, /patient views their clinical history/i);
+  // The frontend/Dockerfile ownership stays.
+  assert.match(frontend.task, /frontend\/Dockerfile/);
+});
+
+test('c3 frontend verification also needs README.md, playwright.config.ts, root deps, root format and a listed Playwright test, from the root', () => {
+  const command = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'frontend').verification.command;
+  const steps = stepDirectories(command);
+  const at = (step) => {
+    const i = steps.findIndex((c) => c.step === step || c.step.startsWith(step));
+    assert.ok(i >= 0, `${step} in ${command}`);
+    return i;
+  };
+  for (const step of ['test -f package.json', 'test -f README.md', 'test -f playwright.config.ts', 'test -d e2e', 'npx playwright test --list', 'docker compose build frontend']) {
+    assert.equal(steps[at(step)].dir, '.', step);
+  }
+  const install = at('(ls node_modules/.bin/playwright node_modules/.bin/prettier');
+  const rootFormat = steps.findIndex((c) => c.step === 'npm run format:check' && c.dir === '.');
+  assert.ok(rootFormat > install, 'root format check runs after the root deps are installed');
+  assert.ok(at('npx playwright test --list') > install);
+  assert.ok(at('docker compose build frontend') > at('npx playwright test --list'));
+  // The existing frontend parts stay in the frontend directory.
+  assert.equal(steps[at('npm run build')].dir, 'frontend');
+  assert.equal(steps.find((c) => c.step === 'npm run format:check').dir, 'frontend');
+  assert.equal(steps[at('test -f Dockerfile')].dir, 'frontend');
+  // It needs neither browsers nor a running stack.
+  assert.doesNotMatch(command, /playwright install|docker compose up|curl/);
+});
+
+test('c3 frontend verification runs the real chain in a scratch workspace: root deps only when missing, every root file required', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const command = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'frontend').verification.command;
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c3-frontend-verify-'));
+  try {
+    const bin = path.join(base, 'bin');
+    await fs.mkdir(bin);
+    // Stand-ins that record where and how they were called; the chain's own `ls`, `test` and `cd` stay real.
+    for (const tool of ['npm', 'npx', 'docker']) {
+      await fs.writeFile(path.join(bin, tool), `#!/bin/sh\necho "[\${PWD#"$WS"}/] ${tool} $*" >> "$WS/calls.log"\n`, { mode: 0o755 });
+    }
+    const touch = async (ws, file) => {
+      await fs.mkdir(path.dirname(path.join(ws, file)), { recursive: true });
+      await fs.writeFile(path.join(ws, file), '');
+    };
+    const scenario = async (name, { skip = [], deps = true }) => {
+      const ws = path.join(base, name);
+      await fs.mkdir(ws);
+      for (const file of ['frontend/Dockerfile', 'package.json', 'README.md', 'playwright.config.ts', 'e2e/login.spec.ts']) {
+        if (!skip.includes(file)) await touch(ws, file);
+      }
+      if (deps) for (const b of ['playwright', 'prettier']) await touch(ws, `node_modules/.bin/${b}`);
+      const res = spawnSync('/bin/bash', ['-c', command], { cwd: ws, encoding: 'utf8', env: { ...process.env, WS: ws, PATH: `${bin}:${process.env.PATH}` } });
+      const calls = await fs.readFile(path.join(ws, 'calls.log'), 'utf8').catch(() => '');
+      return { status: res.status, calls: calls.split('\n').filter(Boolean) };
+    };
+
+    const ready = await scenario('ready', {});
+    assert.equal(ready.status, 0);
+    assert.deepEqual(ready.calls, [
+      '[/frontend/] npm run build',
+      '[/frontend/] npm run format:check',
+      '[/] npm run format:check',
+      '[/] npx playwright test --list',
+      '[/] docker compose build frontend',
+    ]);
+
+    const fresh = await scenario('fresh', { deps: false });
+    assert.equal(fresh.status, 0);
+    assert.equal(fresh.calls.filter((c) => c.includes('npm install')).length, 1);
+    assert.equal(fresh.calls.indexOf('[/] npm install --no-audit --no-fund'), 2, 'installed at the root, before the root format check');
+    assert.equal(fresh.calls.indexOf('[/] npm run format:check'), 3);
+
+    for (const file of ['package.json', 'README.md', 'playwright.config.ts', 'e2e/login.spec.ts']) {
+      const missing = await scenario(`missing-${file.replace(/\W/g, '-')}`, { skip: [file] });
+      assert.notEqual(missing.status, 0, file);
+      assert.ok(!missing.calls.some((c) => /playwright|docker|install/.test(c)), `${file}: stops before running the root checks`);
+    }
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+// `npx playwright test --list` is the frontend gate's "the suite has tests" check: with no test it must fail by itself.
+// Uses the @playwright/test the acceptance batteries install; skipped when that is not installed.
+const ACCEPTANCE_MODULES = path.join(__dirname, '..', 'acceptance', 'node_modules');
+test('playwright test --list exits non-zero with no test and zero with one', { skip: !existsSync(path.join(ACCEPTANCE_MODULES, '.bin', 'playwright')) }, async () => {
+  const { spawnSync } = await import('node:child_process');
+  const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'pw-list-'));
+  try {
+    await fs.symlink(ACCEPTANCE_MODULES, path.join(ws, 'node_modules'));
+    await fs.writeFile(path.join(ws, 'playwright.config.ts'), "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ testDir: 'e2e' });\n");
+    await fs.mkdir(path.join(ws, 'e2e'));
+    const list = () => spawnSync('npx', ['playwright', 'test', '--list'], { cwd: ws, encoding: 'utf8', env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: '/nonexistent' } });
+    assert.notEqual(list().status, 0, 'empty e2e/');
+    await fs.writeFile(path.join(ws, 'e2e', 'a.spec.ts'), "import { test } from '@playwright/test';\ntest('one', async () => {});\n");
+    const one = list();
+    assert.equal(one.status, 0, one.stderr);
+    assert.match(one.stdout, /Total: 1 test in 1 file/);
+  } finally {
+    await fs.rm(ws, { recursive: true, force: true });
+  }
+});
+
+// Every entry of the AGENTS.md "Repository layout" block, as a workspace-relative path: the files
+// on the `/` line, each folder, what is nested under it, and `<folder>/Dockerfile` when the line says so.
+function layoutEntries(agentsText) {
+  const block = agentsText.match(/## Repository layout[\s\S]*?```\n([\s\S]*?)```/)[1];
+  const DESCRIPTION_COLUMN = 20; // an entry's description starts far to the right: deeper lines continue the previous entry
+  const entries = [];
+  const stack = [];
+  let previous = null;
+  for (const line of block.split('\n')) {
+    if (line.trim() === '') continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent >= DESCRIPTION_COLUMN) {
+      previous.description += ` ${line.trim()}`;
+      continue;
+    }
+    const [token, ...rest] = line.trim().split(/\s+/);
+    while (stack.length > 0 && stack.at(-1).indent >= indent) stack.pop();
+    const parent = stack.at(-1)?.path ?? '';
+    previous = { token, description: rest.join(' '), path: token === '/' ? '' : parent + token };
+    entries.push(previous);
+    stack.push({ indent, path: previous.path });
+  }
+  const paths = [];
+  for (const e of entries) {
+    if (e.token === '/') {
+      paths.push(...e.description.split(',').map((f) => f.trim()).filter((f) => /^[.\w-]+\.[\w.]+$/.test(f)));
+    } else if (!e.path.includes('<')) {
+      paths.push(e.path);
+      if (/\bDockerfile\b/.test(e.description)) paths.push(`${e.path}Dockerfile`);
+    }
+  }
+  return paths;
+}
+
+// An entry is owned when some task names it, or one of its parent folders, as a whole path (`backend/` is not
+// "named" by `backend/src/database/`, and a root `package.json` is not named by `backend/package.json`).
+function unownedLayoutEntries(entries, taskTexts) {
+  const named = (text, entry) =>
+    new RegExp(`(?<![\\w./-])${entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-]|\\.\\w)`).test(text);
+  const candidates = (entry) => {
+    const folders = entry.replace(/\/$/, '').split('/').slice(0, -1);
+    return [entry, ...folders.map((_, i) => `${folders.slice(0, folders.length - i).join('/')}/`)];
+  };
+  return entries.filter((entry) => !candidates(entry).some((c) => taskTexts.some((t) => named(t, c))));
+}
+
+const AGENTS_TEXT = readFileSync(path.join(__dirname, '..', 'AGENTS.md'), 'utf8');
+
+test('AGENTS.md repository layout is parsed into the root files, folders and the Dockerfiles', () => {
+  const entries = layoutEntries(AGENTS_TEXT);
+  for (const expected of [
+    'docker-compose.yml', '.env.example', 'package.json', 'playwright.config.ts', 'README.md',
+    'docs/', 'backend/', 'frontend/', 'e2e/',
+    'backend/Dockerfile', 'frontend/Dockerfile', 'backend/test/', 'backend/src/database/',
+  ]) {
+    assert.ok(entries.includes(expected), `${expected} in ${entries.join(' ')}`);
+  }
+});
+
+test('every AGENTS.md repository layout entry is named in some c3 build node task', () => {
+  const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 }).filter((n) => n.id !== 'reviewer');
+  assert.deepEqual(unownedLayoutEntries(layoutEntries(AGENTS_TEXT), nodes.map((n) => n.task)), []);
+});
+
+test('a layout entry no c3 node names is reported as unowned', () => {
+  const text = AGENTS_TEXT.replace(/^e2e\/ .*$/m, (line) => `${line}\nscripts/                  helper scripts`);
+  const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 }).filter((n) => n.id !== 'reviewer');
+  assert.deepEqual(unownedLayoutEntries(layoutEntries(text), nodes.map((n) => n.task)), ['scripts/']);
+  // Naming a path inside a folder, or the same file in another folder, does not own the parent or the root file.
+  assert.deepEqual(unownedLayoutEntries(['backend/', 'package.json'], ['Work in backend/src/ and backend/package.json.']), ['backend/', 'package.json']);
+  assert.deepEqual(unownedLayoutEntries(['backend/test/', 'README.md'], ['Work only in backend/. Write README.md.']), []);
 });
 
 test('c3 backend and frontend nodes own the Dockerfiles that docker-compose.yml builds', () => {
@@ -1360,6 +1559,15 @@ test('c3 reviewer finishes as soon as a well-formed review-verdict.json exists',
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('c3 reviewer task says the root suite files and e2e/ belong to the frontend node, and keeps the verdict schema', () => {
+  const reviewer = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'reviewer');
+  assert.match(reviewer.task, /package\.json, playwright\.config\.ts, README\.md and e2e\/ belong to the frontend node/);
+  assert.match(reviewer.task, /missing or broken.*"responsible": "frontend"/s);
+  assert.match(reviewer.task, /docker-compose\.yml.*\.env\.example.*data/s);
+  assert.ok(reviewer.task.includes('{ "acceptable": boolean, "responsible": "data"|"backend"|"frontend"|"none", "notes": string }'));
+  assert.ok(reviewer.verification.command.includes(`['data', 'backend', 'frontend', 'none'].includes(v.responsible)`));
 });
 
 test('c3 reviewer task asks for an early verdict, a compose smoke check and cleanup', () => {

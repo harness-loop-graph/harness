@@ -1642,7 +1642,15 @@ function buildSpecNodes(parsed) {
   // Each service's Dockerfile belongs to the node that writes the service, and only an image that
   // builds proves it: the batteries start the stack with `docker compose up -d --build`.
   const backendCommand = 'cd backend && npm run build && npm run format:check && npm test && test -f Dockerfile && cd .. && docker compose build backend';
-  const frontendCommand = 'cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd .. && docker compose build frontend';
+  // The frontend node also owns the root Playwright suite and README. Each verification starts at the workspace
+  // root, so `cd ..` comes back to it. The root deps are installed only when playwright or prettier is missing
+  // (`npm ci` would need a lockfile and wipe node_modules on every turn). `playwright test --list` needs no browser
+  // or stack and exits 1 when it finds no test. The slow image build goes last.
+  const frontendCommand =
+    'cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd ..' +
+    ' && test -f package.json && test -f README.md && test -f playwright.config.ts && test -d e2e' +
+    ' && (ls node_modules/.bin/playwright node_modules/.bin/prettier >/dev/null 2>&1 || npm install --no-audit --no-fund)' +
+    ' && npm run format:check && npx playwright test --list && docker compose build frontend';
   return [
     {
       id: 'architect',
@@ -1686,7 +1694,12 @@ function buildSpecNodes(parsed) {
       task:
         'Implement the React SPA per SPEC (SCR-01..SCR-08, testability contract). Consult SPEC.md.' +
         ' You also own frontend/Dockerfile, which the frontend service in the root docker-compose.yml builds: the image must serve the built SPA on the container port that the frontend service in docker-compose.yml maps to host port 8080 (read the file).' +
-        doneInstructions('frontend/', frontendCommand),
+        ' You also own the root Playwright suite and the README, which no other node writes:' +
+        ' e2e/ (Playwright tests using the data-testid contract of the SPEC, run against the stack at http://localhost:8080 and the backend at http://localhost:3000, covering login for each role, a patient books and cancels an appointment, a professional records an encounter, and a patient views their clinical history),' +
+        ' the root package.json (with @playwright/test and prettier pinned to exact versions, and the scripts format and format:check over `e2e playwright.config.ts`),' +
+        ' playwright.config.ts (testDir e2e, base URL http://localhost:8080) and README.md (how to start the stack with docker compose and how to run the tests with `npx playwright test` from the root).' +
+        ' Run `npm install` at the workspace root and `npm run format` after editing; your check lists the tests (`npx playwright test --list`) without browsers or a running stack.' +
+        doneInstructions('frontend/ and, at the workspace root, e2e/, package.json, playwright.config.ts and README.md', frontendCommand),
       verification: { command: frontendCommand },
       finishOnVerificationPass: true,
       maxTurns: parsed.maxTurns,
@@ -1700,6 +1713,8 @@ function buildSpecNodes(parsed) {
         '{ "acceptable": boolean, "responsible": "data"|"backend"|"frontend"|"none", "notes": string } ' +
         '— acceptable=true only if the delivery contract holds. Consult SPEC.md.' +
         ' Check the delivery contract first: run `docker compose up -d --build` from the workspace root, confirm GET http://localhost:3000/health and http://localhost:8080 answer, then `docker compose down`.' +
+        ' `responsible` names the node that owns the defect: data owns docker-compose.yml, .env.example and backend/src/database/ (migrations and seed); backend owns backend/ including backend/Dockerfile; frontend owns frontend/ including frontend/Dockerfile.' +
+        ' The root files package.json, playwright.config.ts, README.md and e2e/ belong to the frontend node: if the Playwright suite, the root package.json or the README is missing or broken, answer "responsible": "frontend".' +
         ' Your tool rounds are limited: write a first verdict early, after that smoke check and a short read of the code, then refine it only if you find more.' +
         ' Your work ends as soon as a well-formed review-verdict.json exists at the end of a turn.' +
         ' Do not leave anything behind: delete any scratch file you create, stop every process you start, and run `docker compose down` before you finish.',

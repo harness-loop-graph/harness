@@ -40,7 +40,7 @@ sobre `experiment/SPEC.md` por defecto.
 | architect | architect | Escribir `docs/architecture.md` | `test -f docs/architecture.md` |
 | data | data | Implementar la capa de datos (migraciones + seed) y los archivos raíz `docker-compose.yml` y `.env.example` | `test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations \| grep -q . && cd backend && npm run build` |
 | backend | backend | Implementar el backend NestJS (EP-01..EP-20) y `backend/Dockerfile` | `cd backend && npm run build && npm run format:check && npm test && test -f Dockerfile && cd .. && docker compose build backend` |
-| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) y `frontend/Dockerfile` | `cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd .. && docker compose build frontend` |
+| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08), `frontend/Dockerfile` y la suite raíz: `e2e/` (Playwright con el contrato `data-testid`, los cuatro flujos de "What to test" de `AGENTS.md`), `package.json` (con `@playwright/test` y Prettier fijados y los scripts `format`/`format:check`), `playwright.config.ts` y `README.md` | `cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd .. && test -f package.json && test -f README.md && test -f playwright.config.ts && test -d e2e && (ls node_modules/.bin/playwright node_modules/.bin/prettier >/dev/null 2>&1 \|\| npm install --no-audit --no-fund) && npm run format:check && npx playwright test --list && docker compose build frontend` |
 | reviewer | reviewer | Probar `docker compose up`, revisar el sistema, escribir `review-verdict.json` | `node -e` que valida la forma de `review-verdict.json` |
 
 Todos los nodos usan
@@ -49,15 +49,18 @@ el nodo termina en cuanto pasa, aunque el modelo no haya dicho `finish`
 (evita que un modelo perfeccionista gaste todos los turnos puliendo). El texto
 de cada tarea conserva su descripción y añade el alcance (`docs/`,
 `backend/src/database/` más los dos archivos raíz del *data*, `backend/`,
-`frontend/`) y el comando que cierra el
+`frontend/` más `e2e/`, `package.json`, `playwright.config.ts` y `README.md` de
+la raíz) y el comando que cierra el
 nodo; `--task-file` reemplaza solo la descripción de la tarea, no la
 verificación ni la bandera. El reviewer termina en cuanto existe un
 `review-verdict.json` bien formado (`acceptable` booleano, `responsible` uno de
 `data`, `backend`, `frontend` o `none`, `notes` texto) al final de un turno,
 aunque haya agotado sus rondas sin `finish`: en la corrida C3 de 2026-11-08 gastó
 sus dos turnos de 80 rondas probando y nunca escribió el veredicto. Su tarea le
-pide un primer veredicto temprano, la prueba de humo de `docker compose up` y
-dejar el workspace limpio (sin archivos de prueba, procesos ni contenedores). `--dry-run` lista
+pide un primer veredicto temprano, la prueba de humo de `docker compose up`,
+dejar el workspace limpio (sin archivos de prueba, procesos ni contenedores) y le
+dice quién es dueño de qué para elegir `responsible` (ver *Dueños de la raíz*).
+`--dry-run` lista
 `verification` y `finishOnVerificationPass` de cada nodo en `plan.nodes`. C2
 no cambia: sigue exigiendo `finish` más verificación aprobada.
 
@@ -66,6 +69,54 @@ y `frontend` según el contrato de entrega de la SPEC, con sus puertos y
 variables por defecto) y de `.env.example` en la raíz: antes nadie los poseía y
 el stack no podía levantarse. Por eso su verificación primero comprueba que
 ambos archivos existan.
+
+#### Dueños de la raíz y de `e2e/`
+
+`AGENTS.md` ("Repository layout") pone en la raíz `docker-compose.yml`,
+`.env.example`, `package.json`, `playwright.config.ts` y `README.md`, además de
+`docs/` y `e2e/`. En C3 cada entrada tiene un nodo dueño:
+
+| Entrada | Dueño |
+|---------|-------|
+| `docs/` | architect |
+| `docker-compose.yml`, `.env.example`, `backend/src/database/` | data |
+| `backend/` (incluye `backend/Dockerfile`) | backend |
+| `frontend/` (incluye `frontend/Dockerfile`), `e2e/`, `package.json`, `playwright.config.ts`, `README.md` | frontend |
+
+El nodo **frontend** es dueño de la suite raíz porque es el último que construye
+y el que conoce el contrato `data-testid`. Su tarea pide los cuatro flujos
+end-to-end de "What to test" (login por rol, el paciente reserva y cancela, el
+profesional registra una consulta, el paciente ve su historia), `@playwright/test`
+y Prettier fijados, los scripts `format`/`format:check` sobre
+`e2e playwright.config.ts`, y un `README.md` con cómo levantar el stack y correr
+las pruebas. Su verificación, además de lo de frontend, exige desde la raíz:
+`package.json`, `README.md`, `playwright.config.ts` y `e2e/` existen; las
+dependencias de la raíz están instaladas; `npm run format:check` pasa; y
+`npx playwright test --list` encuentra al menos un test. No necesita navegadores
+ni el stack levantado, y la imagen (`docker compose build frontend`) va al final
+porque es lo más lento.
+
+- **Instalación condicional**: `npm install` corre solo si falta
+  `node_modules/.bin/playwright` o `node_modules/.bin/prettier`. `npm ci` exige
+  `package-lock.json` (el modelo puede no generarlo) y borra `node_modules` en
+  cada turno; sin la guarda, `npx playwright` intentaría descargar el paquete.
+- **`--list` ya falla sin tests** (medido con `@playwright/test` 1.63.0, la
+  versión que instalan las baterías): sin directorio `e2e/` o con `e2e/` vacío o
+  un archivo sin tests sale con código **1** ("Error: No tests found"); con un
+  test sale **0**; un archivo con error de sintaxis también sale **1**. Por eso
+  no hace falta un conteo aparte. No pide navegadores (con
+  `PLAYWRIGHT_BROWSERS_PATH` inexistente sigue saliendo 0). Sin
+  `playwright.config.ts` también sale 0, por eso el archivo se exige aparte. El
+  test `playwright test --list exits non-zero…` lo comprueba (se omite si las
+  baterías no tienen `node_modules`).
+- **Reviewer**: su tarea dice que `package.json`, `playwright.config.ts`,
+  `README.md` y `e2e/` son del nodo frontend, así que una suite raíz faltante o
+  rota se devuelve con `responsible: "frontend"`. El esquema del veredicto y su
+  verificación no cambian.
+- **Test sistemático**: `experiment/AGENTS.md` se parsea en el test (los archivos
+  de la línea `/`, cada carpeta, lo anidado y los `Dockerfile`) y cada entrada
+  debe quedar nombrada, ella o una carpeta que la contiene, en la tarea de algún
+  nodo que construye; una entrada nueva del layout sin dueño rompe el test.
 
 Cada Dockerfile es del nodo que escribe ese servicio: `backend/Dockerfile`
 (migraciones y seed al arrancar) del **backend** y `frontend/Dockerfile` (SPA
@@ -98,8 +149,9 @@ sin formato.
 
 - **C3**: las verificaciones de **backend** y **frontend** ejecutan
   `npm run format:check` justo después de `npm run build`. La raíz
-  (`package.json`, `e2e/`) no tiene nodo dueño en C3: esa brecha ya estaba
-  registrada y no se corrige aquí, así que C3 no chequea el formato de la raíz.
+  (`package.json`, `e2e/`) es del nodo **frontend** desde el 2026-11-08, así que
+  su verificación también ejecuta `npm run format:check` desde la raíz (ver
+  *Dueños de la raíz y de `e2e/`*).
 - **C2**: el `--verify-cmd` por defecto chequea backend, frontend y raíz antes
   de levantar el stack (ver la tabla de flags).
 - **C1**: no tiene comando de verificación (termina con el `finish` del
@@ -117,6 +169,17 @@ DeepSeek produjo código formateado. Hashes sha256 de `experiment/AGENTS.md`:
 
 Las corridas posteriores no son comparables 1:1 con las de DeepSeek en este
 punto: la diferencia de `AGENTS.md` y de *gates* debe citarse al compararlas.
+
+> **Nota (2026-11-08) — corrida DeepSeek C3 sin dueño para la raíz.** En esa
+> corrida ningún nodo era dueño de `e2e/`, `package.json`, `playwright.config.ts`
+> ni `README.md` (el *data* tenía el compose y `.env.example`, el *architect*
+> `docs/`, y el *frontend* solo `frontend/`: "Work only in frontend/"), y el
+> veredicto del reviewer solo admitía `data|backend|frontend|none` sin decirle
+> quién poseía esos archivos. Resultado: DeepSeek C3 no entregó ninguno de los
+> cuatro. Fue un defecto del *harness*, no del modelo. Se corrigió (frontend es
+> dueño, su verificación lo exige y el reviewer sabe a quién devolverlo) antes de
+> la corrida Luna C3. La corrida DeepSeek C3 no es comparable 1:1 en este punto y
+> debe citarse con esa diferencia de topología.
 
 Router:
 - Los nodos no-revisores fluyen linealmente: architect → data → backend → frontend → reviewer.
