@@ -1554,11 +1554,90 @@ function doneInstructions(scope, command) {
   );
 }
 
+// Processes the model started in the background (`node dist/main.js &`, a dev server) outlive
+// their tool call, reparented away from the runner. They carry HARNESS_RUN_MARKER in their
+// environment, so kill the ones with this run's marker that are not the runner's own children.
+// Linux only (/proc); elsewhere nothing is found.
+async function killRunLeftovers(marker) {
+  let entries;
+  try {
+    entries = await fs.readdir('/proc');
+  } catch {
+    return [];
+  }
+  const wanted = `HARNESS_RUN_MARKER=${marker}`;
+  const killed = [];
+  for (const name of entries) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    if (pid === process.pid) continue;
+    try {
+      const environ = await fs.readFile(`/proc/${name}/environ`, 'utf8');
+      if (!environ.split('\0').includes(wanted)) continue;
+      // The command name in stat may contain spaces and parentheses; ppid follows the last ')'.
+      const stat = await fs.readFile(`/proc/${name}/stat`, 'utf8');
+      const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+      if (ppid === process.pid) continue;
+      process.kill(pid, 'SIGKILL');
+      killed.push(pid);
+    } catch {
+      // Gone, or not ours to read.
+    }
+  }
+  return killed;
+}
+
+// Host ports of the battery stack (SPEC delivery contract): backend, frontend, db.
+const STACK_HOST_PORTS = new Set(['3000', '8080', '5432']);
+
+// A probe container the model started with `docker run -p 5432:5432` and never removed would
+// make the battery `docker compose up` fail on the port. Remove the containers created since
+// the run started that publish a stack port and are not part of the workspace's compose stack
+// (which compose itself recreates). Older containers belong to someone else and stay.
+async function removeStrayContainers(ws, startedAt, deps = {}) {
+  const { run = spawnCommand } = deps;
+  try {
+    const ids = (await run('docker', ['ps', '-q'], { timeoutMs: 30_000 })).stdout.split('\n').filter(Boolean);
+    if (ids.length === 0) return [];
+    const containers = JSON.parse((await run('docker', ['inspect', ...ids], { timeoutMs: 30_000 })).stdout);
+    const since = Date.parse(startedAt);
+    const stray = containers.filter((c) => {
+      if (!(Date.parse(c.Created) >= since)) return false;
+      if (c.Config?.Labels?.['com.docker.compose.project.working_dir'] === ws) return false;
+      const bindings = Object.values(c.NetworkSettings?.Ports ?? {}).flatMap((b) => b ?? []);
+      return bindings.some((b) => STACK_HOST_PORTS.has(String(b.HostPort)));
+    });
+    if (stray.length === 0) return [];
+    const names = stray.map((c) => c.Name.replace(/^\//, ''));
+    await run('docker', ['rm', '-f', ...names], { timeoutMs: 60_000 });
+    return names;
+  } catch {
+    // No docker, or nothing removable: the battery phase reports what compose up says.
+    return [];
+  }
+}
+
+// Runs both cleanups and says on stderr what they found.
+async function cleanUpRunLeftovers(ws, startedAt, when) {
+  const killedProcesses = await killRunLeftovers(ws);
+  if (killedProcesses.length > 0) console.error(`Killed process(es) the run left running ${when}: ${killedProcesses.join(', ')}`);
+  const removedContainers = await removeStrayContainers(ws, startedAt);
+  if (removedContainers.length > 0) console.error(`Removed container(s) the run left on stack ports ${when}: ${removedContainers.join(', ')}`);
+  return { killedProcesses, removedContainers };
+}
+
+// The reviewer is done once review-verdict.json is well formed; the router reads it.
+const REVIEW_VERDICT_CHECK =
+  `node -e "const v = JSON.parse(require('fs').readFileSync('review-verdict.json', 'utf8'));` +
+  ` if (typeof v.acceptable !== 'boolean' || !['data', 'backend', 'frontend', 'none'].includes(v.responsible) || typeof v.notes !== 'string') process.exit(1)"`;
+
 function buildSpecNodes(parsed) {
   const dataCommand =
     'test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build';
-  const backendCommand = 'cd backend && npm run build && npm test';
-  const frontendCommand = 'cd frontend && npm run build';
+  // Each service's Dockerfile belongs to the node that writes the service, and only an image that
+  // builds proves it: the batteries start the stack with `docker compose up -d --build`.
+  const backendCommand = 'cd backend && npm run build && npm test && test -f Dockerfile && cd .. && docker compose build backend';
+  const frontendCommand = 'cd frontend && npm run build && test -f Dockerfile && cd .. && docker compose build frontend';
   return [
     {
       id: 'architect',
@@ -1577,6 +1656,7 @@ function buildSpecNodes(parsed) {
       task:
         'Implement the data layer per SPEC: migrations + deterministic seed. Consult SPEC.md.' +
         ' You also own the root files that start the stack: create docker-compose.yml (services db, backend and frontend per the SPEC delivery contract, with the ports and environment defaults from the SPEC) and .env.example.' +
+        ' The backend service builds backend/Dockerfile and the frontend service builds frontend/Dockerfile; the backend and frontend nodes write those Dockerfiles, not you.' +
         doneInstructions('backend/src/database/ (migrations and seed), the wiring that runs them on start, and the root docker-compose.yml and .env.example', dataCommand),
       verification: { command: dataCommand },
       finishOnVerificationPass: true,
@@ -1588,6 +1668,7 @@ function buildSpecNodes(parsed) {
       role: 'backend',
       task:
         'Implement the NestJS backend per SPEC (endpoint catalog EP-01..EP-20). Consult SPEC.md.' +
+        ' You also own backend/Dockerfile, which the backend service in the root docker-compose.yml builds: the image must run the migrations and seed on start and serve the API on the container port that the backend service in docker-compose.yml maps to host port 3000 (read the file).' +
         doneInstructions('backend/ (plus root files the backend needs)', backendCommand),
       verification: { command: backendCommand },
       finishOnVerificationPass: true,
@@ -1599,6 +1680,7 @@ function buildSpecNodes(parsed) {
       role: 'frontend',
       task:
         'Implement the React SPA per SPEC (SCR-01..SCR-08, testability contract). Consult SPEC.md.' +
+        ' You also own frontend/Dockerfile, which the frontend service in the root docker-compose.yml builds: the image must serve the built SPA on the container port that the frontend service in docker-compose.yml maps to host port 8080 (read the file).' +
         doneInstructions('frontend/', frontendCommand),
       verification: { command: frontendCommand },
       finishOnVerificationPass: true,
@@ -1611,8 +1693,13 @@ function buildSpecNodes(parsed) {
       task:
         'Review the whole system against SPEC.md and write review-verdict.json with EXACTLY ' +
         '{ "acceptable": boolean, "responsible": "data"|"backend"|"frontend"|"none", "notes": string } ' +
-        '— acceptable=true only if the delivery contract holds. Consult SPEC.md.',
-      verification: { command: 'test -f review-verdict.json' },
+        '— acceptable=true only if the delivery contract holds. Consult SPEC.md.' +
+        ' Check the delivery contract first: run `docker compose up -d --build` from the workspace root, confirm GET http://localhost:3000/health and http://localhost:8080 answer, then `docker compose down`.' +
+        ' Your tool rounds are limited: write a first verdict early, after that smoke check and a short read of the code, then refine it only if you find more.' +
+        ' Your work ends as soon as a well-formed review-verdict.json exists at the end of a turn.' +
+        ' Do not leave anything behind: delete any scratch file you create, stop every process you start, and run `docker compose down` before you finish.',
+      verification: { command: REVIEW_VERDICT_CHECK },
+      finishOnVerificationPass: true,
       maxTurns: 2,
       toolRoundsPerTurn: parsed.toolRounds,
     },
@@ -1765,6 +1852,8 @@ async function main() {
 
   const { apiKey, modelId } = await loadCredentials();
   const ws = await createWorkspace(parsed.runsDir, parsed.config, modelId, parsed.spec, { dryRun: parsed.dryRun });
+  // Every command the model runs inherits this, so killRunLeftovers() can find what it left running.
+  process.env.HARNESS_RUN_MARKER = ws;
 
   const gitMetadata = await readGitMetadata();
   const modelTimeoutMs = parsed.modelTimeoutSeconds * 1000;
@@ -1892,7 +1981,16 @@ async function main() {
         const factory = (node) => {
           if (node.id === 'reviewer') clearStaleReviewVerdict(ws);
           const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, logs.auditFile(node.id), harnessExtras);
-          return new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
+          const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
+          if (node.id !== 'reviewer') return loop;
+          // The reviewer starts the stack itself: a server or probe container a build node left
+          // behind would hold its ports and get the wrong node blamed.
+          return {
+            run: async (request) => {
+              await cleanUpRunLeftovers(ws, startedAt, 'before the reviewer');
+              return loop.run(request);
+            },
+          };
         };
         const nodes = buildNodes(parsed, parsed.taskFile ? task : null);
         const engine = new GraphEngine(factory, {
@@ -1925,9 +2023,13 @@ async function main() {
     }
 
     if (parsed.withBatteries) {
+      // A server the model started with `&` would hold the ports the battery stack needs.
+      const cleanup = await cleanUpRunLeftovers(ws, startedAt, 'before the batteries');
       const batteryInfo = await runBatteries(ws, parsed.keep, routeApiKeyEnvNames(harnessExtras));
       report.batteryPhase = {
         ran: true,
+        // What the runner had to clean up before the stack could start, so a report shows it.
+        cleanup,
         stack: batteryInfo.stack,
         passed: !batteryInfo.batteryError && batteryInfo.stack.healthy && (batteryInfo.batteryReport?.passed ?? false),
         error: batteryInfo.batteryError || undefined,
@@ -2099,5 +2201,7 @@ export {
   spawnCommand,
   workspaceMayHaveDockerStack,
   clearStaleReviewVerdict,
+  killRunLeftovers,
+  removeStrayContainers,
   main,
 };

@@ -57,7 +57,10 @@ import {
   publishExistingWorkspace,
   loadUpdatableWorkspace,
   updateStaticAnalysis,
+  killRunLeftovers,
+  removeStrayContainers,
 } from './run-experiment.mjs';
+import { rmSync, writeFileSync } from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HARNESS_TESTS_DIR = path.resolve(__dirname, '..', '..', 'harness', 'tests');
@@ -1260,11 +1263,11 @@ test('c3 nodes keep topology and verifications but use the --task-file task', ()
 const C3_NODE_DONE = {
   architect: 'test -f docs/architecture.md',
   data: 'test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build',
-  backend: 'cd backend && npm run build && npm test',
-  frontend: 'cd frontend && npm run build',
+  backend: 'cd backend && npm run build && npm test && test -f Dockerfile && cd .. && docker compose build backend',
+  frontend: 'cd frontend && npm run build && test -f Dockerfile && cd .. && docker compose build frontend',
 };
 
-test('c3 build nodes finish on their verification; the reviewer still needs the model finish', () => {
+test('c3 build nodes finish on their verification', () => {
   const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 });
   for (const [id, command] of Object.entries(C3_NODE_DONE)) {
     const node = nodes.find((n) => n.id === id);
@@ -1272,9 +1275,132 @@ test('c3 build nodes finish on their verification; the reviewer still needs the 
     assert.equal(node.finishOnVerificationPass, true, id);
     assert.match(node.task, /done when/, id);
   }
-  const reviewer = nodes.find((n) => n.id === 'reviewer');
-  assert.deepEqual(reviewer.verification, { command: 'test -f review-verdict.json' });
-  assert.notEqual(reviewer.finishOnVerificationPass, true);
+});
+
+test('c3 backend and frontend nodes own the Dockerfiles that docker-compose.yml builds', () => {
+  const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 });
+  const backend = nodes.find((n) => n.id === 'backend');
+  const frontend = nodes.find((n) => n.id === 'frontend');
+  assert.match(backend.task, /backend\/Dockerfile/);
+  assert.match(frontend.task, /frontend\/Dockerfile/);
+  // The container port follows the compose mapping, so an `8080:80` mapping still works.
+  assert.match(backend.task, /container port that the backend service in docker-compose\.yml maps to host port 3000/);
+  assert.match(frontend.task, /container port that the frontend service in docker-compose\.yml maps to host port 8080/);
+  const data = nodes.find((n) => n.id === 'data');
+  assert.match(data.task, /backend\/Dockerfile.*frontend\/Dockerfile/s);
+});
+
+test('c3 reviewer finishes as soon as a well-formed review-verdict.json exists', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const reviewer = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'reviewer');
+  assert.equal(reviewer.finishOnVerificationPass, true);
+  assert.equal(reviewer.maxTurns, 2);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'c3-verdict-'));
+  const check = (content) => {
+    if (content === null) rmSyncQuiet(path.join(dir, 'review-verdict.json'));
+    else writeFileSync(path.join(dir, 'review-verdict.json'), content);
+    return spawnSync('/bin/bash', ['-c', reviewer.verification.command], { cwd: dir }).status;
+  };
+  try {
+    assert.equal(check('{"acceptable":true,"responsible":"none","notes":"ok"}'), 0);
+    assert.equal(check('{"acceptable":false,"responsible":"backend","notes":"x"}'), 0);
+    assert.equal(check(null), 1, 'missing file');
+    assert.equal(check('{"acceptable":tr'), 1, 'truncated JSON');
+    assert.equal(check('{"acceptable":"yes","responsible":"none","notes":""}'), 1, 'acceptable not boolean');
+    assert.equal(check('{"acceptable":false,"responsible":"reviewer","notes":""}'), 1, 'unknown responsible');
+    assert.equal(check('{"acceptable":false,"responsible":"none"}'), 1, 'notes missing');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('c3 reviewer task asks for an early verdict, a compose smoke check and cleanup', () => {
+  const reviewer = buildNodes({ maxTurns: 1, toolRounds: 5 }).find((n) => n.id === 'reviewer');
+  assert.match(reviewer.task, /review-verdict\.json/);
+  assert.match(reviewer.task, /docker compose up -d --build/);
+  assert.match(reviewer.task, /docker compose down/);
+  assert.match(reviewer.task, /first verdict/i);
+  assert.match(reviewer.task, /scratch/i);
+});
+
+test("killRunLeftovers() spares the runner's direct children", async () => {
+  const { spawn } = await import('node:child_process');
+  const marker = `child-${process.pid}-${Date.now()}`;
+  const child = spawn('sleep', ['30'], { env: { ...process.env, HARNESS_RUN_MARKER: marker }, stdio: 'ignore' });
+  try {
+    assert.deepEqual(await killRunLeftovers(marker), []);
+    assert.equal(child.exitCode, null);
+    assert.equal(child.signalCode, null);
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
+test('removeStrayContainers() removes only containers this run created outside its compose stack that hold a stack port', async () => {
+  const ws = '/runs/c3-ws';
+  const startedAt = '2026-11-08T00:03:11.275Z';
+  const container = (id, created, ports, workingDir) => ({
+    Id: id,
+    Name: `/${id}`,
+    Created: created,
+    Config: { Labels: workingDir ? { 'com.docker.compose.project.working_dir': workingDir } : {} },
+    NetworkSettings: { Ports: Object.fromEntries(ports.map((p) => [`${p.container}/tcp`, [{ HostIp: '0.0.0.0', HostPort: String(p.host) }]])) },
+  });
+  const inspected = [
+    container('probe-db', '2026-11-08T00:10:00Z', [{ container: 5432, host: 5432 }]),
+    container('probe-api', '2026-11-08T01:00:00Z', [{ container: 3000, host: 3000 }], '/elsewhere'),
+    container('stack-db', '2026-11-08T00:20:00Z', [{ container: 5432, host: 5432 }], ws),
+    container('older-db', '2026-11-07T23:00:00Z', [{ container: 5432, host: 5432 }]),
+    container('probe-other-port', '2026-11-08T00:10:00Z', [{ container: 5432, host: 55433 }]),
+    container('no-ports', '2026-11-08T00:10:00Z', []),
+  ];
+  const calls = [];
+  const run = async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (args[0] === 'ps') return { stdout: inspected.map((c) => c.Id).join('\n') + '\n', stderr: '' };
+    if (args[0] === 'inspect') return { stdout: JSON.stringify(inspected), stderr: '' };
+    return { stdout: '', stderr: '' };
+  };
+  const removed = await removeStrayContainers(ws, startedAt, { run });
+  assert.deepEqual(removed, ['probe-db', 'probe-api']);
+  assert.deepEqual(calls.at(-1), ['docker', 'rm', '-f', 'probe-db', 'probe-api']);
+
+  const none = [];
+  const quiet = async (cmd, args) => {
+    none.push(args[0]);
+    return { stdout: args[0] === 'ps' ? '' : '[]', stderr: '' };
+  };
+  assert.deepEqual(await removeStrayContainers(ws, startedAt, { run: quiet }), []);
+  assert.deepEqual(none, ['ps']);
+
+  const noDocker = async () => { throw new Error('spawn docker ENOENT'); };
+  assert.deepEqual(await removeStrayContainers(ws, startedAt, { run: noDocker }), []);
+});
+
+test('killRunLeftovers() kills orphaned processes this run started and nothing else', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const marker = `test-${process.pid}-${Date.now()}`;
+  // `cmd &` from a shell that exits leaves an orphan, like a model's `node dist/main.js &`.
+  const orphan = (env) =>
+    Number(spawnSync('/bin/bash', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { env: { ...process.env, ...env } }).stdout.toString().trim());
+  const alive = (pid) => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+  const mine = orphan({ HARNESS_RUN_MARKER: marker });
+  const otherRun = orphan({ HARNESS_RUN_MARKER: `${marker}-other` });
+  const unmarked = orphan({ HARNESS_RUN_MARKER: '' });
+  try {
+    const killed = await killRunLeftovers(marker);
+    assert.deepEqual(killed, [mine]);
+    for (let i = 0; i < 30 && alive(mine); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(alive(mine), false);
+    assert.equal(alive(otherRun), true);
+    assert.equal(alive(unmarked), true);
+  } finally {
+    for (const pid of [mine, otherRun, unmarked]) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  }
 });
 
 test('c3 data node owns the root docker-compose.yml and .env.example', () => {
@@ -1285,6 +1411,11 @@ test('c3 data node owns the root docker-compose.yml and .env.example', () => {
   assert.match(data.task, /backend\/src\/database/);
   assert.match(data.verification.command, /^test -f docker-compose\.yml && test -f \.env\.example && /);
 });
+
+function rmSyncQuiet(file) {
+  try { rmSync(file); } catch { /* absent */ }
+}
+
 
 test('c3 --task-file override keeps the per-node verification and finishOnVerificationPass', () => {
   const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 }, 'Create notes/summary.txt\n');
@@ -1308,7 +1439,7 @@ test('c3 --dry-run plan.nodes lists each node verification and finishOnVerificat
     assert.deepEqual(node.verification, { command }, id);
     assert.equal(node.finishOnVerificationPass, true, id);
   }
-  assert.notEqual(plan.nodes.find((n) => n.id === 'reviewer').finishOnVerificationPass, true);
+  assert.equal(plan.nodes.find((n) => n.id === 'reviewer').finishOnVerificationPass, true);
 });
 
 // --- T3b: review fixes ---

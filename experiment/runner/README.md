@@ -39,11 +39,11 @@ sobre `experiment/SPEC.md` por defecto.
 |------|------|--------------|--------------|
 | architect | architect | Escribir `docs/architecture.md` | `test -f docs/architecture.md` |
 | data | data | Implementar la capa de datos (migraciones + seed) y los archivos raíz `docker-compose.yml` y `.env.example` | `test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations \| grep -q . && cd backend && npm run build` |
-| backend | backend | Implementar el backend NestJS (EP-01..EP-20) | `cd backend && npm run build && npm test` |
-| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) | `cd frontend && npm run build` |
-| reviewer | reviewer | Revisar el sistema, escribir `review-verdict.json` | `test -f review-verdict.json` |
+| backend | backend | Implementar el backend NestJS (EP-01..EP-20) y `backend/Dockerfile` | `cd backend && npm run build && npm test && test -f Dockerfile && cd .. && docker compose build backend` |
+| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) y `frontend/Dockerfile` | `cd frontend && npm run build && test -f Dockerfile && cd .. && docker compose build frontend` |
+| reviewer | reviewer | Probar `docker compose up`, revisar el sistema, escribir `review-verdict.json` | `node -e` que valida la forma de `review-verdict.json` |
 
-Los cuatro nodos de construcción (architect, data, backend, frontend) usan
+Todos los nodos usan
 `finishOnVerificationPass: true`: su verificación es su definición de "hecho" y
 el nodo termina en cuanto pasa, aunque el modelo no haya dicho `finish`
 (evita que un modelo perfeccionista gaste todos los turnos puliendo). El texto
@@ -51,7 +51,13 @@ de cada tarea conserva su descripción y añade el alcance (`docs/`,
 `backend/src/database/` más los dos archivos raíz del *data*, `backend/`,
 `frontend/`) y el comando que cierra el
 nodo; `--task-file` reemplaza solo la descripción de la tarea, no la
-verificación ni la bandera. El reviewer no usa la bandera. `--dry-run` lista
+verificación ni la bandera. El reviewer termina en cuanto existe un
+`review-verdict.json` bien formado (`acceptable` booleano, `responsible` uno de
+`data`, `backend`, `frontend` o `none`, `notes` texto) al final de un turno,
+aunque haya agotado sus rondas sin `finish`: en la corrida C3 de 2026-11-08 gastó
+sus dos turnos de 80 rondas probando y nunca escribió el veredicto. Su tarea le
+pide un primer veredicto temprano, la prueba de humo de `docker compose up` y
+dejar el workspace limpio (sin archivos de prueba, procesos ni contenedores). `--dry-run` lista
 `verification` y `finishOnVerificationPass` de cada nodo en `plan.nodes`. C2
 no cambia: sigue exigiendo `finish` más verificación aprobada.
 
@@ -61,6 +67,26 @@ variables por defecto) y de `.env.example` en la raíz: antes nadie los poseía 
 el stack no podía levantarse. Por eso su verificación primero comprueba que
 ambos archivos existan.
 
+Cada Dockerfile es del nodo que escribe ese servicio: `backend/Dockerfile`
+(migraciones y seed al arrancar) del **backend** y `frontend/Dockerfile` (SPA
+construida) del **frontend**. Cada imagen escucha en el puerto de contenedor que
+su servicio de `docker-compose.yml` mapea al puerto de host 3000 o 8080 (un
+`8080:80` en el compose significa escuchar en el 80). Su
+verificación termina con `docker compose build <servicio>`, porque las baterías
+levantan el stack con `docker compose up -d --build`: en la corrida C3 de
+2026-11-08 el compose pedía dos Dockerfiles que nadie escribió.
+
+Antes del reviewer y antes de las baterías, el runner mata los procesos que la corrida dejó
+corriendo en segundo plano (por ejemplo `node dist/main.js &`), que podrían
+ocupar los puertos del stack. Los reconoce por `HARNESS_RUN_MARKER`, que el
+runner pone en su entorno y heredan todos los comandos del modelo; no toca sus
+hijos directos ni procesos de otras corridas. Solo en Linux (`/proc`). También
+elimina los contenedores creados desde el inicio de la corrida que publican un
+puerto del stack (3000, 8080, 5432) y no son del compose del workspace (por
+ejemplo un `docker run -p 5432:5432` de prueba); los anteriores a la corrida no
+se tocan. Lo que limpió antes de las baterías queda en `batteryPhase.cleanup` del `run-report.json`
+(`killedProcesses`, `removedContainers`).
+
 Router:
 - Los nodos no-revisores fluyen linealmente: architect → data → backend → frontend → reviewer.
 - Un nodo fallido se reintenta una vez (mismo nodo), luego el grafo falla.
@@ -68,7 +94,7 @@ Router:
 - Antes de cada visita al reviewer (incluyendo un reintento), cualquier
   `review-verdict.json` ya presente en el espacio de trabajo se borra primero,
   de modo que un veredicto obsoleto de una visita anterior nunca pueda
-  satisfacer la verificación `test -f review-verdict.json` de esta visita, ni
+  satisfacer la verificación de esta visita, ni
   ser malinterpretado por el router de arriba como el resultado de esta
   visita.
 
