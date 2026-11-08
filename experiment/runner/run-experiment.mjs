@@ -570,6 +570,8 @@ const COVERAGE_PROJECTS = ['backend', 'frontend'];
 // Install + Vitest coverage for one project dir. Generated code runs here and only here: no
 // secrets, read-only contents. Skips (exit 0) without a package.json, a test script or vitest;
 // `sed` prefixes relative lcov `SF:` paths with the dir because Sonar resolves them from the repo root.
+// coverage-v8 is installed at vitest's exact version: it pins vitest as an exact peer, so a major-only
+// `@2` resolves to 2.1.9 and fails with ERESOLVE next to vitest 2.1.8.
 function coverageStep(dir) {
   return `      - name: Coverage (${dir})
         continue-on-error: true
@@ -582,8 +584,8 @@ function coverageStep(dir) {
           if ! node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then echo "no test script, skipping"; exit 0; fi
           npm ci || npm install
           if [ ! -f node_modules/vitest/package.json ]; then echo "vitest not installed, skipping coverage"; exit 0; fi
-          major=$(node -p "require('./node_modules/vitest/package.json').version.split('.')[0]")
-          npm i --no-save @vitest/coverage-v8@$major
+          version=$(node -p "require('./node_modules/vitest/package.json').version")
+          npm i --no-save @vitest/coverage-v8@$version
           npx vitest run --coverage --coverage.provider=v8 --coverage.reporter=lcov --coverage.reportsDirectory=coverage
           if [ -f coverage/lcov.info ]; then sed -i '/^SF:[/]/!s#^SF:#SF:${dir}/#' coverage/lcov.info; fi
 `;
@@ -692,11 +694,12 @@ ${COVERAGE_PROJECTS.map(coverageStep).join('')}      - name: Stage coverage repo
 ${Object.entries(QUALITY_THRESHOLDS).map(([k, v]) => `          ${k}: ${v}\n`).join('')}        run: |
           PROJECT_KEY=$(sed -n 's/^sonar.projectKey=//p' sonar-project.properties)
           api() { curl -s -u "$SONAR_TOKEN:" "$1"; }
-          measures=$(api "https://sonarcloud.io/api/measures/component?component=$PROJECT_KEY&branch=main&metricKeys=coverage,sqale_index,complexity")
+          measures=$(api "https://sonarcloud.io/api/measures/component?component=$PROJECT_KEY&branch=main&metricKeys=coverage,sqale_index")
           metric() { echo "$measures" | jq -r --arg m "$1" '.component.measures[]? | select(.metric == $m) | .value'; }
           coverage=$(metric coverage)
           debt=$(metric sqale_index)
-          complexity=$(metric complexity)
+          # The most complex file's complexity: the project sum puts any full app over the threshold.
+          complexity=$(api "https://sonarcloud.io/api/measures/component_tree?component=$PROJECT_KEY&branch=main&metricKeys=complexity&qualifiers=FIL&s=metric&metricSort=complexity&metricSortFilter=withMeasuresOnly&asc=false&ps=1" | jq -r '.components[0].measures[]? | select(.metric == "complexity") | .value')
           vulns=$(api "https://sonarcloud.io/api/issues/search?componentKeys=$PROJECT_KEY&branch=main&types=VULNERABILITY&severities=CRITICAL,BLOCKER&resolved=false&ps=1" | jq -r '.total // empty')
           failed=0
           row() {
@@ -712,7 +715,7 @@ ${Object.entries(QUALITY_THRESHOLDS).map(([k, v]) => `          ${k}: ${v}\n`).j
             echo "|---|---|---|---|"
             row "Cobertura" "$coverage" "≥ $MIN_COVERAGE%" "$MIN_COVERAGE" ge "%"
             row "Deuda técnica" "$debt" "≤ $MAX_DEBT_MIN min" "$MAX_DEBT_MIN" le " min"
-            row "Complejidad ciclomática" "$complexity" "< $MAX_COMPLEXITY" "$MAX_COMPLEXITY" lt ""
+            row "Complejidad ciclomática (máx. por archivo)" "$complexity" "< $MAX_COMPLEXITY" "$MAX_COMPLEXITY" lt ""
             row "Vulnerabilidades críticas" "$vulns" "$MAX_VULNERABILITIES" "$MAX_VULNERABILITIES" eq ""
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$failed" = "1" ]; then echo "::warning title=Quality gates::Algunos criterios no se cumplen. Revisa la tabla en Summary."; fi

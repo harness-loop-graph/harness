@@ -2633,7 +2633,11 @@ test('the coverage job runs generated code with no secrets and read-only content
   assert.match(job, /scripts\?\.test/);
   assert.match(job, /npm ci \|\| npm install/);
   assert.match(job, /node_modules\/vitest\/package\.json/);
-  assert.match(job, /npm i --no-save @vitest\/coverage-v8@\$major/);
+  // The exact vitest version: coverage-v8 pins vitest as an exact peer, so `@2` (2.1.9) fails
+  // with ERESOLVE next to vitest 2.1.8 and no lcov.info is written.
+  assert.match(job, /version=\$\(node -p "require\('\.\/node_modules\/vitest\/package\.json'\)\.version"\)/);
+  assert.match(job, /npm i --no-save @vitest\/coverage-v8@\$version/);
+  assert.doesNotMatch(job, /coverage-v8@\$major/);
   assert.match(job, /npx vitest run --coverage --coverage\.provider=v8 --coverage\.reporter=lcov --coverage\.reportsDirectory=coverage/);
   assert.match(job, /CI: true/);
   assert.equal((job.match(/continue-on-error: true/g) ?? []).length, 2);
@@ -2660,7 +2664,10 @@ test('the sonarcloud job waits for coverage, downloads it, waits for the compute
   assert.match(job, /sleep 5/);
   assert.match(job, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(job, /PROJECT_KEY=\$\(sed -n 's\/\^sonar\.projectKey=\/\/p' sonar-project\.properties\)/);
-  assert.match(job, /api\/measures\/component\?component=\$PROJECT_KEY&branch=main&metricKeys=coverage,sqale_index,complexity/);
+  assert.match(job, /api\/measures\/component\?component=\$PROJECT_KEY&branch=main&metricKeys=coverage,sqale_index"/);
+  // Complexity is the most complex file's, not the project sum (which any full app puts over 50).
+  assert.match(job, /api\/measures\/component_tree\?component=\$PROJECT_KEY&branch=main&metricKeys=complexity&qualifiers=FIL&s=metric&metricSort=complexity&metricSortFilter=withMeasuresOnly&asc=false&ps=1/);
+  assert.match(job, /row "Complejidad ciclomática \(máx\. por archivo\)" "\$complexity"/);
   assert.match(job, /api\/issues\/search\?componentKeys=\$PROJECT_KEY&branch=main&types=VULNERABILITY&severities=CRITICAL,BLOCKER&resolved=false&ps=1/);
   assert.match(job, /MIN_COVERAGE: 65\n/);
   assert.match(job, /MAX_DEBT_MIN: 960\n/);

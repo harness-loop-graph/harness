@@ -364,8 +364,10 @@ los archivos del modelo podrían manipular el análisis. Por eso, **antes** de
      `persist-credentials: false`): `actions/checkout@v4`,
      `actions/setup-node@v4` (Node 20) y, para `backend/` y `frontend/` (solo
      si tienen `package.json` **y** un script `test`), `npm ci || npm install`,
-     instala `@vitest/coverage-v8` con el mismo *major* que el `vitest`
-     instalado (si no hay `vitest`, se omite la cobertura sin fallar) y corre
+     instala `@vitest/coverage-v8` con la misma versión exacta que el `vitest`
+     instalado (si no hay `vitest`, se omite la cobertura sin fallar; con solo
+     el *major*, `@2` resolvía a 2.1.9, que exige `vitest@2.1.9` como peer, y
+     junto a `vitest@2.1.8` fallaba con `ERESOLVE` sin generar `lcov.info`) y corre
      `npx vitest run --coverage --coverage.provider=v8
      --coverage.reporter=lcov --coverage.reportsDirectory=coverage` con
      `CI=true`, `continue-on-error: true` y `timeout-minutes: 20`. Las rutas
@@ -390,8 +392,9 @@ los archivos del modelo podrían manipular el análisis. Por eso, **antes** de
    ambos jobs.
 
    **Criterios de calidad (informativos).** El paso consulta
-   `https://sonarcloud.io/api/measures/component?component=<projectKey>&branch=main&metricKeys=coverage,sqale_index,complexity`
-   y `api/issues/search?componentKeys=<projectKey>&branch=main&types=VULNERABILITY&severities=CRITICAL,BLOCKER&resolved=false&ps=1`
+   `https://sonarcloud.io/api/measures/component?component=<projectKey>&branch=main&metricKeys=coverage,sqale_index`,
+   `api/measures/component_tree?component=<projectKey>&branch=main&metricKeys=complexity&qualifiers=FIL&s=metric&metricSort=complexity&metricSortFilter=withMeasuresOnly&asc=false&ps=1`
+   (el archivo más complejo) y `api/issues/search?componentKeys=<projectKey>&branch=main&types=VULNERABILITY&severities=CRITICAL,BLOCKER&resolved=false&ps=1`
    (el `projectKey` se lee de `sonar-project.properties`, la misma clave que
    recibe Sonar), compara con las metas de la rúbrica y escribe en
    `$GITHUB_STEP_SUMMARY` una tabla `Criterio | Valor | Meta | Estado` (✅/❌);
@@ -402,12 +405,12 @@ los archivos del modelo podrían manipular el análisis. Por eso, **antes** de
    |---|---|
    | Cobertura (%) | ≥ 65 (`MIN_COVERAGE`) |
    | Deuda técnica (min, `sqale_index`) | ≤ 960 (`MAX_DEBT_MIN`) |
-   | Complejidad (`complexity`) | ≤ 50 (`MAX_COMPLEXITY`) |
+   | Complejidad ciclomática del archivo más complejo (`complexity`) | < 50 (`MAX_COMPLEXITY`) |
    | Vulnerabilidades críticas/bloqueantes | = 0 (`MAX_VULNERABILITIES`) |
 
-   `complexity` es la **suma de todo el proyecto**, tal como la define la
-   rúbrica: cualquier aplicación completa superará 50, así que ese criterio
-   casi siempre aparecerá en ❌. Se reporta igual, sin ajustar la meta.
+   La complejidad es la del **archivo más complejo**, no la suma de todo el
+   proyecto: con la suma, cualquier aplicación completa superaba 50 (C1 1003,
+   C2 1223, C3 1605) y el criterio no distinguía nada. Decidido el 2026-11-08.
 3. `sonar-project.properties` fija `sonar.organization=<--sonar-org>`,
    `sonar.projectKey=<org>_run-<workspace dir name>`,
    `sonar.projectName=run-<workspace dir name>`, `sonar.sources=.` y
