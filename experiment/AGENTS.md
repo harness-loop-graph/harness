@@ -54,6 +54,14 @@ Work in this order. Do not start a step until the previous one works.
   commented-out code.
 - Pin dependency versions in `package.json`. Never use `latest`. Add a
   dependency only when the code uses it.
+- Format every source file with Prettier, default options, no config file
+  (no `.prettierrc`): one statement per line, 2-space indentation. Never put
+  a class, a function body or several statements on one line. Pin Prettier as
+  a devDependency and add the scripts `format` (`prettier --write ...`) and
+  `format:check` (`prettier --check ...`) to `backend/package.json` (paths
+  `src test`), `frontend/package.json` (path `src`) and the root
+  `package.json` (paths `e2e playwright.config.ts`). Run `npm run format`
+  after editing code.
 - When a command fails, read its output and fix the cause. Do not repeat the
   same command unchanged.
 - Never commit secrets. Configuration comes from environment variables, with
@@ -98,3 +106,5 @@ The task is done only when all of these pass:
 2. `curl -sf http://localhost:3000/health` returns 200.
 3. `cd backend && npm test` passes.
 4. `cd frontend && npm run build` succeeds.
+5. `cd backend && npm run format:check`, `cd frontend && npm run format:check`
+   and the root `npm run format:check` pass.

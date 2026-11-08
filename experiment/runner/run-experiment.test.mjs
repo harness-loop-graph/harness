@@ -1263,9 +1263,57 @@ test('c3 nodes keep topology and verifications but use the --task-file task', ()
 const C3_NODE_DONE = {
   architect: 'test -f docs/architecture.md',
   data: 'test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build',
-  backend: 'cd backend && npm run build && npm test && test -f Dockerfile && cd .. && docker compose build backend',
-  frontend: 'cd frontend && npm run build && test -f Dockerfile && cd .. && docker compose build frontend',
+  backend: 'cd backend && npm run build && npm run format:check && npm test && test -f Dockerfile && cd .. && docker compose build backend',
+  frontend: 'cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd .. && docker compose build frontend',
 };
+
+const C2_DEFAULT_VERIFY_CMD =
+  'cd backend && npm run format:check && cd ../frontend && npm run format:check && cd .. && npm run format:check' +
+  ' && docker compose up -d --build && curl -sf --retry 60 --retry-delay 2 --retry-all-errors http://localhost:3000/health';
+
+// Replays the `cd` / `&&` chain from the workspace root (each verification starts there) and returns
+// the directory (relative to the root, '.' for the root) every non-`cd` step runs in.
+function stepDirectories(command) {
+  let dir = '.';
+  const steps = [];
+  for (const step of command.split(' && ')) {
+    const cd = step.match(/^cd (\S+)$/);
+    if (cd) dir = path.posix.normalize(path.posix.join(dir, cd[1]));
+    else steps.push({ step, dir });
+  }
+  return steps;
+}
+
+test('c2 default --verify-cmd checks formatting of backend, frontend and root before starting the stack', () => {
+  const parsed = parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']);
+  assert.equal(parsed.verifyCmd, C2_DEFAULT_VERIFY_CMD);
+});
+
+test('c2 default --verify-cmd runs each format check from its own directory and the stack from the root', () => {
+  const checks = stepDirectories(parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']).verifyCmd);
+  assert.deepEqual(
+    checks.filter((c) => c.step === 'npm run format:check').map((c) => c.dir),
+    ['backend', 'frontend', '.'],
+  );
+  const compose = checks.findIndex((c) => c.step.startsWith('docker compose up'));
+  assert.ok(compose > checks.findLastIndex((c) => c.step === 'npm run format:check'));
+  assert.equal(checks[compose].dir, '.');
+  assert.equal(checks[compose + 1].dir, '.');
+});
+
+test('c3 backend and frontend commands run the format check inside their own directory and compose from the root', () => {
+  const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 });
+  const commandOf = (id) => nodes.find((n) => n.id === id).verification.command;
+  for (const id of ['backend', 'frontend']) {
+    const checks = stepDirectories(commandOf(id));
+    assert.equal(checks.find((c) => c.step === 'npm run format:check').dir, id, id);
+    assert.equal(checks.find((c) => c.step.startsWith('docker compose build')).dir, '.', id);
+  }
+  // The root package.json and e2e/ have no owner node in c3 (tracked separately): no root check here.
+  for (const command of nodes.map((n) => n.verification.command)) {
+    assert.ok(!stepDirectories(command).some((c) => c.step === 'npm run format:check' && c.dir === '.'), command);
+  }
+});
 
 test('c3 build nodes finish on their verification', () => {
   const nodes = buildNodes({ maxTurns: 1, toolRounds: 5 });
@@ -1440,6 +1488,20 @@ test('c3 --dry-run plan.nodes lists each node verification and finishOnVerificat
     assert.equal(node.finishOnVerificationPass, true, id);
   }
   assert.equal(plan.nodes.find((n) => n.id === 'reviewer').finishOnVerificationPass, true);
+});
+
+test('c2 --dry-run plan lists the verification command; c1 has none', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const plan = (config) => {
+    const res = spawnSync(process.execPath, [path.join(__dirname, 'run-experiment.mjs'), '--config', config, '--dry-run'], {
+      encoding: 'utf8',
+      env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    return JSON.parse(res.stdout);
+  };
+  assert.deepEqual(plan('c2').verification, { command: C2_DEFAULT_VERIFY_CMD });
+  assert.equal(plan('c1').verification, undefined);
 });
 
 // --- T3b: review fixes ---
@@ -2230,7 +2292,7 @@ test('a FAILED run (thrown exception) still records task identity in run-report.
 
 test('default c2 verify command waits for the backend health check instead of probing once', () => {
   const { verifyCmd } = parseArgs(['node', 'run-experiment.mjs', '--config', 'c2']);
-  assert.match(verifyCmd, /^docker compose up -d --build && /);
+  assert.match(verifyCmd, / && docker compose up -d --build && curl /);
   assert.match(verifyCmd, /curl -sf --retry 60 --retry-delay 2 --retry-all-errors http:\/\/localhost:3000\/health$/);
 });
 

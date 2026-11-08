@@ -39,8 +39,8 @@ sobre `experiment/SPEC.md` por defecto.
 |------|------|--------------|--------------|
 | architect | architect | Escribir `docs/architecture.md` | `test -f docs/architecture.md` |
 | data | data | Implementar la capa de datos (migraciones + seed) y los archivos raíz `docker-compose.yml` y `.env.example` | `test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations \| grep -q . && cd backend && npm run build` |
-| backend | backend | Implementar el backend NestJS (EP-01..EP-20) y `backend/Dockerfile` | `cd backend && npm run build && npm test && test -f Dockerfile && cd .. && docker compose build backend` |
-| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) y `frontend/Dockerfile` | `cd frontend && npm run build && test -f Dockerfile && cd .. && docker compose build frontend` |
+| backend | backend | Implementar el backend NestJS (EP-01..EP-20) y `backend/Dockerfile` | `cd backend && npm run build && npm run format:check && npm test && test -f Dockerfile && cd .. && docker compose build backend` |
+| frontend | frontend | Implementar la SPA en React (SCR-01..SCR-08) y `frontend/Dockerfile` | `cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd .. && docker compose build frontend` |
 | reviewer | reviewer | Probar `docker compose up`, revisar el sistema, escribir `review-verdict.json` | `node -e` que valida la forma de `review-verdict.json` |
 
 Todos los nodos usan
@@ -87,6 +87,37 @@ ejemplo un `docker run -p 5432:5432` de prueba); los anteriores a la corrida no
 se tocan. Lo que limpió antes de las baterías queda en `batteryPhase.cleanup` del `run-report.json`
 (`killedProcesses`, `removedContainers`).
 
+### Regla de formato (Prettier)
+
+El 2026-11-08 se agregó a `AGENTS.md` la regla de formatear todo el código con
+Prettier (opciones por defecto, sin archivo de configuración) y el chequeo
+`npm run format:check` a la definición de terminado, porque `openai/gpt-6-luna`
+escribió código sin formato (clases NestJS enteras en una sola línea). La regla
+no depende de que el modelo la obedezca: los *gates* también fallan con código
+sin formato.
+
+- **C3**: las verificaciones de **backend** y **frontend** ejecutan
+  `npm run format:check` justo después de `npm run build`. La raíz
+  (`package.json`, `e2e/`) no tiene nodo dueño en C3: esa brecha ya estaba
+  registrada y no se corrige aquí, así que C3 no chequea el formato de la raíz.
+- **C2**: el `--verify-cmd` por defecto chequea backend, frontend y raíz antes
+  de levantar el stack (ver la tabla de flags).
+- **C1**: no tiene comando de verificación (termina con el `finish` del
+  modelo), así que depende solo de `AGENTS.md`. `--dry-run` no muestra
+  `verification` para c1.
+
+Las corridas de DeepSeek C1/C2/C3 se hicieron **sin** esta regla: su
+`AGENTS.md` es otro (`task.agentsSha256` en su `run-report.json`) y aun así
+DeepSeek produjo código formateado. Hashes sha256 de `experiment/AGENTS.md`:
+
+| Versión | sha256 |
+|---------|--------|
+| Antes (sin regla de formato) | `086b94e11ccf3fd2855f2f4eb8d88bfe0efb8fce140e6eb2e83ef415c8dafade` |
+| Después (con regla de formato) | `97ed35c637de47f4dafce7f0fc7c510af6cfed302556bebcd9c334177abc201f` |
+
+Las corridas posteriores no son comparables 1:1 con las de DeepSeek en este
+punto: la diferencia de `AGENTS.md` y de *gates* debe citarse al compararlas.
+
 Router:
 - Los nodos no-revisores fluyen linealmente: architect → data → backend → frontend → reviewer.
 - Un nodo fallido se reintenta una vez (mismo nodo), luego el grafo falla.
@@ -118,7 +149,7 @@ Router:
 | `--model-timeout <s>` | 600 | Timeout por solicitud al modelo, en segundos (entero positivo). Cubre la respuesta completa, cuerpo incluido: OpenRouter responde 200 de inmediato y envía el cuerpo no *streaming* recién al terminar la generación, así que con contextos de 20-35k tokens el default del adaptador (120 s) agota el tiempo en cada reintento (`body_read_error ... aborted due to timeout`). Se pasa como `timeoutMs` a **todos** los adaptadores que crea el runner (el predeterminado y los de cada ruta del *router*; un `timeoutMs` explícito en la configuración de una ruta tiene prioridad). No cambia el default de la biblioteca. Un valor inválido termina con un error de uso |
 | `--model-retries <n>` | 8 | Reintentos por llamada al modelo ante 429, 5xx o errores de red (entero positivo). La espera se duplica desde 1 s hasta 30 s (o respeta `Retry-After`), así que 8 reintentos aguantan una saturación del proveedor de unos 2-3 minutos; con 3 (el default del adaptador) una saturación de DeepInfra cortaba la corrida en segundos. Se pasa a todos los adaptadores y queda en `modelRetries` del reporte |
 | `--max-cost <usd>` | 6 (USD, para c1, c2 y c3) | Tope de gasto en USD, número positivo. Envuelve el modelo de **todas** las configuraciones (c1/c2/c3, plano o con *router*) en un `BudgetedModelAdapter`: antes de cada llamada, si el costo acumulado (`usage.cost` que reporta el proveedor, p. ej. OpenRouter) ya alcanzó el tope, no se llama al modelo y se devuelve un error `budget_exceeded`. El tope se comprueba *antes* de la llamada, así que la última puede sobrepasarlo por su propio costo. El dinero es el recurso que se iguala entre configuraciones, por eso el mismo valor por defecto aplica a las tres. No existe una forma de correr sin tope: para más margen, pasar un valor mayor. Un valor inválido termina con un error de uso |
-| `--verify-cmd <cmd>` | `docker compose up -d --build && curl -sf --retry 60 --retry-delay 2 --retry-all-errors http://localhost:3000/health` | Comando de verificación de C2. El `curl` reintenta hasta ~120 s porque `up -d` vuelve cuando arrancan los contenedores, no cuando el backend ya responde |
+| `--verify-cmd <cmd>` | `cd backend && npm run format:check && cd ../frontend && npm run format:check && cd .. && npm run format:check && docker compose up -d --build && curl -sf --retry 60 --retry-delay 2 --retry-all-errors http://localhost:3000/health` | Comando de verificación de C2: primero los chequeos de formato de backend, frontend y raíz (cada comando arranca en la raíz del workspace, por eso los `cd` van encadenados) y luego el stack. El `curl` reintenta hasta ~120 s porque `up -d` vuelve cuando arrancan los contenedores, no cuando el backend ya responde |
 | `--with-batteries` | desactivado | Después de la generación, levanta el stack y corre las baterías de aceptación |
 | `--keep` | desactivado | Con `--with-batteries`, **no** desmonta el stack al final |
 | `--dry-run` | desactivado | Imprime el plan en JSON y termina sin llamar al modelo; no crea nada en disco |

@@ -134,7 +134,9 @@ function parseArgs(argv) {
     toolRounds: null,
     // `up -d` returns once containers start, not once the backend serves, so
     // the probe retries for up to ~120s, like the battery phase health wait.
-    verifyCmd: 'docker compose up -d --build && curl -sf --retry 60 --retry-delay 2 --retry-all-errors http://localhost:3000/health',
+    // Formatting is checked first (each step starts from the workspace root, so chain the `cd`s), so
+    // the rule in AGENTS.md does not depend on the model choosing to obey it.
+    verifyCmd: 'cd backend && npm run format:check && cd ../frontend && npm run format:check && cd .. && npm run format:check && docker compose up -d --build && curl -sf --retry 60 --retry-delay 2 --retry-all-errors http://localhost:3000/health',
     withBatteries: false,
     keep: false,
     dryRun: false,
@@ -1639,8 +1641,8 @@ function buildSpecNodes(parsed) {
     'test -f docker-compose.yml && test -f .env.example && test -d backend/src/database/migrations && ls backend/src/database/migrations | grep -q . && cd backend && npm run build';
   // Each service's Dockerfile belongs to the node that writes the service, and only an image that
   // builds proves it: the batteries start the stack with `docker compose up -d --build`.
-  const backendCommand = 'cd backend && npm run build && npm test && test -f Dockerfile && cd .. && docker compose build backend';
-  const frontendCommand = 'cd frontend && npm run build && test -f Dockerfile && cd .. && docker compose build frontend';
+  const backendCommand = 'cd backend && npm run build && npm run format:check && npm test && test -f Dockerfile && cd .. && docker compose build backend';
+  const frontendCommand = 'cd frontend && npm run build && npm run format:check && test -f Dockerfile && cd .. && docker compose build frontend';
   return [
     {
       id: 'architect',
@@ -1894,6 +1896,8 @@ async function main() {
       plan.budgets = { maxSteps: parsed.maxSteps, maxTurns: parsed.maxTurns, toolRoundsPerTurn: parsed.toolRounds };
     } else {
       plan.budgets = { maxToolRounds: parsed.toolRounds, maxTurns: parsed.maxTurns };
+      // c1 has no verification command: it ends on the model's own finish.
+      if (parsed.config === 'c2') plan.verification = { command: parsed.verifyCmd };
     }
     console.log(JSON.stringify(plan, null, 2));
     process.exit(0);
